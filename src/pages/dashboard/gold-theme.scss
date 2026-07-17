@@ -1,0 +1,110 @@
+// NolimitzBots gold/black dashboard skin — scoped to the Dashboard tab only.
+$nlb-gold: #d4af37;
+$nlb-gold-soft: #e8cf7a;
+
+.tab__dashboard {
+    // Override Deriv text tokens inside the dashboard scope
+    --text-prominent: #f5f1e6;
+    --text-general: #d9dce4;
+    --text-less-prominent: #a0a7b6;
+
+    background: radial-gradient(1200px 500px at 85% -10%, rgba(212, 175, 55, 0.12), transparent 60%),
+        linear-gradient(180deg, #0a0e17 0%, #0c1120 55%, #0a0e17 100%) !important;
+    min-height: 100%;
+
+    .tab__dashboard__header .title,
+    .tab__dashboard__header .subtitle {
+        color: var(--text-prominent);
+    }
+    .tab__dashboard__header .subtitle {
+        color: var(--text-less-prominent);
+    }
+
+    // ---- Quick-action tiles (Local / Bot Builder / Quick strategy / Drive) ----
+    .tab__dashboard__table__tiles {
+        gap: 1.2rem;
+    }
+
+    .tab__dashboard__table__block {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(212, 175, 55, 0.22);
+        border-radius: 1.4rem;
+        padding: 1.6rem 1rem;
+        transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+
+        &:hover {
+            transform: translateY(-3px);
+            border-color: $nlb-gold;
+            box-shadow: 0 10px 26px rgba(212, 175, 55, 0.18);
+        }
+
+        .dc-text {
+            color: var(--text-general) !important;
+        }
+    }
+
+    .tab__dashboard__table__images {
+        background: rgba(212, 175, 55, 0.1);
+        border-radius: 1.2rem;
+        padding: 0.6rem;
+    }
+
+    // ---- Announcements strip ----
+    .announcements {
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 1.2rem;
+    }
+
+    // ---- Free Bots cards → dark glass with gold accents ----
+    .free-bots {
+        &__title {
+            color: $nlb-gold-soft !important;
+            letter-spacing: 0.04em;
+        }
+
+        &__card {
+            background: rgba(255, 255, 255, 0.04) !important;
+            border: 1px solid rgba(212, 175, 55, 0.25) !important;
+            box-shadow: none !important;
+
+            .dc-text {
+                color: var(--text-general) !important;
+            }
+
+            &:hover {
+                border-color: $nlb-gold !important;
+                box-shadow: 0 8px 22px rgba(212, 175, 55, 0.16) !important;
+            }
+        }
+
+        &__desc {
+            color: var(--text-less-prominent) !important;
+        }
+
+        &__run {
+            background: linear-gradient(135deg, $nlb-gold-soft, $nlb-gold) !important;
+            color: #141004 !important;
+            font-weight: 700;
+        }
+
+        &__badge {
+            &--low {
+                background: rgba(34, 197, 94, 0.16) !important;
+                color: #4ade80 !important;
+            }
+            &--medium {
+                background: rgba(245, 158, 11, 0.16) !important;
+                color: #fbbf24 !important;
+            }
+        }
+    }
+
+    // Bot list table (Your bots) readability on dark
+    .bot-list__wrapper,
+    .bot-list__table {
+        .dc-text {
+            color: var(--text-general) !important;
+        }
+    }
+}

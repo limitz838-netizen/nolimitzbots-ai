@@ -1,0 +1,269 @@
+$nlb-gold: #d4af37;
+$nlb-gold-soft: #e8cf7a;
+$nlb-bg: #0b0f1a;
+$nlb-card: rgba(255, 255, 255, 0.04);
+$nlb-border: rgba(212, 175, 55, 0.28);
+
+.market-pulse {
+    margin: 1.6rem 0 0.8rem;
+    padding: 1.6rem;
+    border-radius: 1.6rem;
+    background: linear-gradient(160deg, #0d1322 0%, #0b0f1a 60%, #101728 100%);
+    border: 1px solid $nlb-border;
+    box-shadow: 0 0 24px rgba(212, 175, 55, 0.08);
+
+    &__head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1.2rem;
+    }
+
+    &__title-wrap {
+        display: flex;
+        align-items: center;
+        gap: 0.8rem;
+    }
+
+    &__title {
+        color: $nlb-gold-soft;
+        font-weight: 700;
+        font-size: 1.4rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+
+    &__dot {
+        width: 0.9rem;
+        height: 0.9rem;
+        border-radius: 50%;
+        background: #6b7280;
+
+        &--live {
+            background: #22c55e;
+            box-shadow: 0 0 8px rgba(34, 197, 94, 0.8);
+            animation: nlb-pulse 1.6s infinite;
+        }
+        &--error {
+            background: #ef4444;
+        }
+    }
+
+    &__quote {
+        color: #eef2ff;
+        font-weight: 700;
+        font-size: 1.6rem;
+        font-variant-numeric: tabular-nums;
+    }
+
+    &__symbols {
+        display: flex;
+        gap: 0.6rem;
+        flex-wrap: wrap;
+        margin-bottom: 1.4rem;
+    }
+
+    &__symbol {
+        padding: 0.5rem 1.1rem;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: transparent;
+        color: #c7cbd6;
+        font-size: 1.2rem;
+        cursor: pointer;
+        transition: all 0.15s ease;
+
+        &--active {
+            border-color: $nlb-gold;
+            color: #10131c;
+            background: linear-gradient(135deg, $nlb-gold-soft, $nlb-gold);
+            font-weight: 700;
+        }
+    }
+
+    &__note {
+        color: #fca5a5;
+        font-size: 1.2rem;
+        margin-bottom: 1rem;
+    }
+
+    &__digits {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 0.8rem;
+        margin-bottom: 1.2rem;
+
+        @media (min-width: 768px) {
+            grid-template-columns: repeat(10, 1fr);
+        }
+    }
+
+    &__digit {
+        position: relative;
+        padding: 0.8rem 0.4rem 1rem;
+        border-radius: 1rem;
+        background: $nlb-card;
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.2rem;
+        overflow: hidden;
+
+        &--hot {
+            border-color: rgba(34, 197, 94, 0.7);
+            box-shadow: inset 0 0 12px rgba(34, 197, 94, 0.15);
+        }
+        &--cold {
+            border-color: rgba(239, 68, 68, 0.6);
+            box-shadow: inset 0 0 12px rgba(239, 68, 68, 0.12);
+        }
+    }
+
+    &__digit-num {
+        color: #f8fafc;
+        font-weight: 700;
+        font-size: 1.5rem;
+    }
+
+    &__digit-pct {
+        color: #9aa1b0;
+        font-size: 1rem;
+        font-variant-numeric: tabular-nums;
+    }
+
+    &__digit-bar {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        height: 0.3rem;
+        background: linear-gradient(90deg, $nlb-gold-soft, $nlb-gold);
+        border-radius: 0 0.3rem 0.3rem 0;
+        transition: width 0.3s ease;
+    }
+
+    &__stream {
+        display: flex;
+        gap: 0.5rem;
+        justify-content: center;
+        margin-bottom: 1.4rem;
+    }
+
+    &__eo {
+        width: 2.6rem;
+        height: 2.6rem;
+        border-radius: 0.7rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 1.2rem;
+        color: #06121a;
+
+        &--e {
+            background: #5eead4;
+        }
+        &--o {
+            background: #f87171;
+        }
+    }
+
+    &__signals {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 1rem;
+
+        @media (min-width: 768px) {
+            grid-template-columns: 1fr 1fr;
+        }
+    }
+
+    &__signal {
+        padding: 1.2rem;
+        border-radius: 1.2rem;
+        background: $nlb-card;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    &__signal-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 0.8rem;
+    }
+
+    &__signal-tag {
+        color: #8b93a5;
+        font-size: 1rem;
+        letter-spacing: 0.1em;
+    }
+
+    &__signal-side {
+        color: $nlb-gold-soft;
+        font-weight: 700;
+        font-size: 1.4rem;
+    }
+
+    &__signal-meter {
+        height: 0.6rem;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.08);
+        overflow: hidden;
+        margin-bottom: 0.7rem;
+    }
+
+    &__signal-fill {
+        display: block;
+        height: 100%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, $nlb-gold-soft, $nlb-gold);
+        transition: width 0.4s ease;
+    }
+
+    &__signal-row {
+        display: flex;
+        justify-content: space-between;
+        color: #9aa1b0;
+        font-size: 1.1rem;
+        margin-bottom: 1rem;
+    }
+
+    &__signal-load {
+        width: 100%;
+        padding: 1rem;
+        border: none;
+        border-radius: 1rem;
+        background: linear-gradient(135deg, $nlb-gold-soft, $nlb-gold);
+        color: #141004;
+        font-weight: 700;
+        font-size: 1.3rem;
+        cursor: pointer;
+        transition: transform 0.12s ease, box-shadow 0.12s ease;
+
+        &:hover:not(:disabled) {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 18px rgba(212, 175, 55, 0.35);
+        }
+        &:disabled {
+            opacity: 0.45;
+            cursor: default;
+        }
+    }
+
+    &__disclaimer {
+        margin-top: 1.2rem;
+        color: #6f7788;
+        font-size: 1rem;
+        text-align: center;
+    }
+}
+
+@keyframes nlb-pulse {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.45;
+    }
+}

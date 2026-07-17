@@ -71,7 +71,7 @@ const S = (tradetype, purchase, prediction) => `<xml xmlns="http://www.w3.org/19
   </block>
 </xml>`;
 
-const FREE_BOTS = [
+export const FREE_BOTS = [
     { id: 'nlb-even-flow', name: 'Even Flow', risk: 'LOW', desc: 'Trades Even on every tick with a fixed stake. Simple, steady digit rhythm on Volatility 100.', xml: S('evenodd', 'DIGITEVEN', null) },
     { id: 'nlb-odd-rush', name: 'Odd Rush', risk: 'LOW', desc: 'Trades Odd continuously with a fixed stake — the mirror of Even Flow.', xml: S('evenodd', 'DIGITODD', null) },
     { id: 'nlb-over-2', name: 'Over 2 Steady', risk: 'MEDIUM', desc: 'Wins when the last digit is 3-9. High win-rate profile with smaller payouts. Fixed stake.', xml: S('overunder', 'DIGITOVER', 2) },
