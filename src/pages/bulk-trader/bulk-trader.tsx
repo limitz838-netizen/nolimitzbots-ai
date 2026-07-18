@@ -53,22 +53,24 @@ const BulkTrader = observer(() => {
         const out = [];
         for (let i = 0; i < count; i++) {
             try {
-                const req = {
-                    buy: '1',
-                    price: stake_num,
-                    parameters: {
-                        amount: stake_num,
-                        basis: 'stake',
-                        contract_type: trade_type,
-                        currency,
-                        duration: ticks,
-                        duration_unit: 't',
-                        symbol,
-                        ...(needs_barrier ? { barrier: String(barrier) } : {}),
-                    },
+                const proposal_req = {
+                    proposal: 1,
+                    amount: stake_num,
+                    basis: 'stake',
+                    contract_type: trade_type,
+                    currency,
+                    duration: ticks,
+                    duration_unit: 't',
+                    underlying_symbol: symbol,
+                    ...(needs_barrier ? { barrier: String(barrier) } : {}),
                 };
                 // eslint-disable-next-line no-await-in-loop
-                const res = await api_base.api.send(req);
+                const prop = await api_base.api.send(proposal_req);
+                const proposal_id = prop?.proposal?.id;
+                const ask_price = Number(prop?.proposal?.ask_price ?? stake_num);
+                if (!proposal_id) throw new Error('No proposal returned');
+                // eslint-disable-next-line no-await-in-loop
+                const res = await api_base.api.send({ buy: proposal_id, price: ask_price });
                 out.push({
                     ok: true,
                     id: res?.buy?.contract_id,
