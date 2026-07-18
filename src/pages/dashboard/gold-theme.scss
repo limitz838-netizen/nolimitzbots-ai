@@ -1,26 +1,33 @@
 // NolimitzBots gold/black dashboard skin — scoped to the Dashboard tab only.
 $nlb-gold: #d4af37;
 $nlb-gold-soft: #e8cf7a;
+$nlb-grad: radial-gradient(1200px 500px at 85% -10%, rgba(212, 175, 55, 0.12), transparent 60%),
+    linear-gradient(180deg, #0a0e17 0%, #0c1120 55%, #0a0e17 100%);
 
 .tab__dashboard {
-    // Override Deriv text tokens inside the dashboard scope
     --text-prominent: #f5f1e6;
     --text-general: #d9dce4;
     --text-less-prominent: #a0a7b6;
 
-    background: radial-gradient(1200px 500px at 85% -10%, rgba(212, 175, 55, 0.12), transparent 60%),
-        linear-gradient(180deg, #0a0e17 0%, #0c1120 55%, #0a0e17 100%) !important;
-    min-height: 100%;
+    background: $nlb-grad !important;
 
-    .tab__dashboard__header .title,
-    .tab__dashboard__header .subtitle {
-        color: var(--text-prominent);
+    // The content wrapper paints its own light background — repaint + allow scroll
+    .tab__dashboard__content {
+        background: $nlb-grad !important;
+        overflow-y: auto !important;
+    }
+    .quick-panel {
+        background: transparent !important;
+    }
+
+    .tab__dashboard__header .title {
+        color: $nlb-gold-soft;
     }
     .tab__dashboard__header .subtitle {
         color: var(--text-less-prominent);
     }
 
-    // ---- Quick-action tiles (Local / Bot Builder / Quick strategy / Drive) ----
+    // ---- Quick-action tiles → traderscheme-style dark cards ----
     .tab__dashboard__table__tiles {
         gap: 1.2rem;
     }
@@ -29,7 +36,7 @@ $nlb-gold-soft: #e8cf7a;
         background: rgba(255, 255, 255, 0.04);
         border: 1px solid rgba(212, 175, 55, 0.22);
         border-radius: 1.4rem;
-        padding: 1.6rem 1rem;
+        padding: 1.8rem 1rem;
         transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
 
         &:hover {
@@ -39,14 +46,30 @@ $nlb-gold-soft: #e8cf7a;
         }
 
         .dc-text {
-            color: var(--text-general) !important;
+            color: #cfd6e4 !important;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            font-size: 1.1rem !important;
+            font-weight: 700 !important;
         }
     }
 
+    // Colored icon chips per tile (Local / Bot Builder / Quick strategy / Drive)
     .tab__dashboard__table__images {
-        background: rgba(212, 175, 55, 0.1);
         border-radius: 1.2rem;
-        padding: 0.6rem;
+        padding: 0.8rem;
+    }
+    .tab__dashboard__table__block:nth-child(1) .tab__dashboard__table__images {
+        background: rgba(96, 165, 250, 0.16);
+    }
+    .tab__dashboard__table__block:nth-child(2) .tab__dashboard__table__images {
+        background: rgba(212, 175, 55, 0.16);
+    }
+    .tab__dashboard__table__block:nth-child(3) .tab__dashboard__table__images {
+        background: rgba(167, 139, 250, 0.16);
+    }
+    .tab__dashboard__table__block:nth-child(4) .tab__dashboard__table__images {
+        background: rgba(94, 234, 212, 0.16);
     }
 
     // ---- Announcements strip ----
@@ -54,6 +77,16 @@ $nlb-gold-soft: #e8cf7a;
         background: rgba(255, 255, 255, 0.03);
         border: 1px solid rgba(255, 255, 255, 0.08);
         border-radius: 1.2rem;
+    }
+
+    // ---- "Your bots" list on dark ----
+    .bot-list__wrapper,
+    .bot-list__table {
+        background: transparent !important;
+
+        .dc-text {
+            color: var(--text-general) !important;
+        }
     }
 
     // ---- Free Bots cards → dark glass with gold accents ----
@@ -97,14 +130,6 @@ $nlb-gold-soft: #e8cf7a;
                 background: rgba(245, 158, 11, 0.16) !important;
                 color: #fbbf24 !important;
             }
-        }
-    }
-
-    // Bot list table (Your bots) readability on dark
-    .bot-list__wrapper,
-    .bot-list__table {
-        .dc-text {
-            color: var(--text-general) !important;
         }
     }
 }
