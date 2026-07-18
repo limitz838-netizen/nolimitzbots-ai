@@ -9,6 +9,7 @@ import Announcements from './announcements';
 import Cards from './cards';
 import FreeBots from './free-bots';
 import MarketPulse from './market-pulse/market-pulse';
+import QuickActions from './quick-actions/quick-actions';
 import InfoPanel from './info-panel';
 
 type TMobileIconGuide = {
@@ -68,6 +69,7 @@ const DashboardComponent = observer(({ handleTabChange }: TMobileIconGuide) => {
                                       )}
                             </Text>
                         </div>
+                        <QuickActions />
                         <Cards has_dashboard_strategies={has_dashboard_strategies} is_mobile={!isDesktop} />
                         <MarketPulse />
                         <FreeBots />

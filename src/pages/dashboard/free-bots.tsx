@@ -89,7 +89,7 @@ const FreeBots = observer(() => {
     };
 
     return (
-        <div className='free-bots'>
+        <div className='free-bots' id='free-bots-section'>
             <Text weight='bold' size='m' className='free-bots__title'>Free Bots</Text>
             <Text size='xs' color='less-prominent'>
                 NolimitzBots starter strategies — fixed stake, no martingale. Tap a bot to load it into the builder, review the stake, then press Run.

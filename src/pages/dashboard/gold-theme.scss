@@ -27,6 +27,11 @@ $nlb-grad: radial-gradient(1200px 500px at 85% -10%, rgba(212, 175, 55, 0.12), t
         color: var(--text-less-prominent);
     }
 
+    // Old tile row replaced by QuickActions component
+    .tab__dashboard__table__tiles {
+        display: none !important;
+    }
+
     // ---- Quick-action tiles → traderscheme-style dark cards ----
     .tab__dashboard__table__tiles {
         gap: 1.2rem;
