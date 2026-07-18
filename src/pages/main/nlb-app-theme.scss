@@ -1,0 +1,106 @@
+// NolimitzBots global glassy-gold skin: header + tab bar + page chrome.
+$nlb-gold: #d4af37;
+$nlb-gold-soft: #e8cf7a;
+
+// ---- App header → dark glass ----
+.app-header {
+    background: linear-gradient(180deg, #0d1322 0%, #0a0e17 100%) !important;
+    border-bottom: 1px solid rgba(212, 175, 55, 0.25) !important;
+
+    .acc-info__account-type {
+        color: $nlb-gold-soft !important;
+    }
+
+    .acc-info__balance {
+        color: #f5f1e6 !important;
+    }
+
+    .acc-info__select-arrow {
+        color: #c7cbd6;
+    }
+}
+
+// Account dropdown on dark
+.acc-dropdown {
+    background: #10162a !important;
+    border: 1px solid rgba(212, 175, 55, 0.3) !important;
+
+    .acc-dropdown__account-type,
+    .acc-dropdown__balance {
+        color: #d9dce4 !important;
+    }
+
+    .acc-dropdown__account--selected {
+        background: rgba(212, 175, 55, 0.12) !important;
+    }
+}
+
+// ---- Tab bar → dark glass with gold active pill ----
+.main {
+    background: #0a0e17;
+}
+
+.main__tabs {
+    &.dc-tabs,
+    .dc-tabs {
+        background: linear-gradient(180deg, #0c1120 0%, #0a0e17 100%) !important;
+    }
+
+    .dc-tabs__list {
+        background: transparent !important;
+    }
+
+    .dc-tabs__item {
+        color: #aeb6c6 !important;
+
+        svg [fill] {
+            fill: #aeb6c6;
+        }
+    }
+
+    .dc-tabs__active {
+        background: linear-gradient(135deg, rgba(232, 207, 122, 0.18), rgba(212, 175, 55, 0.18)) !important;
+        color: $nlb-gold-soft !important;
+        border-radius: 1rem 1rem 0 0;
+
+        svg [fill] {
+            fill: $nlb-gold-soft;
+        }
+    }
+
+    .dc-tabs__active-line {
+        background-color: $nlb-gold !important;
+    }
+}
+
+// ---- Free Bots tab wrapper ----
+.free-bots-tab {
+    height: var(--tab-content-height);
+    overflow-y: auto;
+    padding: 1.6rem;
+    background: radial-gradient(1200px 500px at 85% -10%, rgba(212, 175, 55, 0.12), transparent 60%),
+        linear-gradient(180deg, #0a0e17 0%, #0c1120 55%, #0a0e17 100%);
+
+    .free-bots__title {
+        color: $nlb-gold-soft !important;
+    }
+
+    .free-bots__card {
+        background: rgba(255, 255, 255, 0.04) !important;
+        border: 1px solid rgba(212, 175, 55, 0.25) !important;
+
+        .dc-text {
+            color: #d9dce4 !important;
+        }
+
+        &:hover {
+            border-color: $nlb-gold !important;
+        }
+    }
+
+    .free-bots__run {
+        background: linear-gradient(135deg, #e8cf7a, #d4af37) !important;
+        color: #141004 !important;
+        font-weight: 700;
+    }
+}

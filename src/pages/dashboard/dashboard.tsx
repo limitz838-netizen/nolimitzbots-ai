@@ -7,7 +7,6 @@ import { localize } from '@deriv-com/translations';
 import { useDevice } from '@deriv-com/ui';
 import Announcements from './announcements';
 import Cards from './cards';
-import FreeBots from './free-bots';
 import MarketPulse from './market-pulse/market-pulse';
 import QuickActions from './quick-actions/quick-actions';
 import InfoPanel from './info-panel';
@@ -72,7 +71,6 @@ const DashboardComponent = observer(({ handleTabChange }: TMobileIconGuide) => {
                         <QuickActions />
                         <Cards has_dashboard_strategies={has_dashboard_strategies} is_mobile={!isDesktop} />
                         <MarketPulse />
-                        <FreeBots />
                     </div>
                 </div>
             </div>

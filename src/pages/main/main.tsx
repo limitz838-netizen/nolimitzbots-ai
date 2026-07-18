@@ -35,12 +35,19 @@ import {
     LabelPairedObjectsColumnCaptionRegularIcon,
     LabelPairedPuzzlePieceTwoCaptionBoldIcon,
     LabelPairedChartMixedCaptionBoldIcon,
+    LabelPairedGridCaptionBoldIcon,
+    LabelPairedGridCaptionBoldIcon,
 } from '@deriv/quill-icons/LabelPaired';
 import { LegacyGuide1pxIcon } from '@deriv/quill-icons/Legacy';
 import { Localize, localize } from '@deriv-com/translations';
 import { useDevice } from '@deriv-com/ui';
 import RunPanel from '../../components/run-panel';
 import BulkTrader from '../bulk-trader/bulk-trader';
+import FreeBots from '../dashboard/free-bots';
+import RiskDisclaimer from '../../components/risk-disclaimer/risk-disclaimer';
+import './nlb-app-theme.scss';
+import FreeBots from '../dashboard/free-bots';
+import RiskDisclaimer from '../../components/risk-disclaimer/risk-disclaimer';
 import ChartModal from '../chart/chart-modal';
 import Dashboard from '../dashboard';
 import RunStrategy from '../dashboard/run-strategy';
@@ -80,7 +87,7 @@ const AppWrapper = observer(() => {
     const { clear } = summary_card;
     const { DASHBOARD, BOT_BUILDER } = DBOT_TABS;
     const init_render = React.useRef(true);
-    const hash = ['dashboard', 'bot_builder', 'chart', 'tutorial', 'bulk_trader'];
+    const hash = ['dashboard', 'bot_builder', 'free_bots', 'chart', 'tutorial', 'bulk_trader'];
     const { isDesktop } = useDevice();
     const location = useLocation();
     const navigate = useNavigate();
@@ -370,6 +377,7 @@ const AppWrapper = observer(() => {
     // [/AI]
     return (
         <React.Fragment>
+            <RiskDisclaimer />
             <div className='main'>
                 <div
                     className={classNames('main__container', {
@@ -407,6 +415,40 @@ const AppWrapper = observer(() => {
                                 }
                                 id='id-bot-builder'
                             />
+                            <div
+                                label={
+                                    <>
+                                        <LabelPairedGridCaptionBoldIcon
+                                            height='24px'
+                                            width='24px'
+                                            fill='var(--text-general)'
+                                        />
+                                        <Localize i18n_default_text='Free Bots' />
+                                    </>
+                                }
+                                id='id-free-bots'
+                            >
+                                <div className='free-bots-tab'>
+                                    <FreeBots />
+                                </div>
+                            </div>
+                            <div
+                                label={
+                                    <>
+                                        <LabelPairedGridCaptionBoldIcon
+                                            height='24px'
+                                            width='24px'
+                                            fill='var(--text-general)'
+                                        />
+                                        <Localize i18n_default_text='Free Bots' />
+                                    </>
+                                }
+                                id='id-free-bots'
+                            >
+                                <div className='free-bots-tab'>
+                                    <FreeBots />
+                                </div>
+                            </div>
                             <div
                                 label={
                                     <>

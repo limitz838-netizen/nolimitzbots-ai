@@ -25,31 +25,29 @@ const QuickActions = observer(() => {
         setActiveTab(DBOT_TABS.BOT_BUILDER);
     };
 
-    const scrollToFreeBots = () => {
-        document.getElementById('free-bots-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    };
+    const openFreeBots = () => setActiveTab(DBOT_TABS.FREE_BOTS);
 
     const actions = [
         {
             id: 'upload',
-            accent: 'orange',
-            icon: <LabelPairedArrowUpFromBracketCaptionBoldIcon height='26px' width='26px' fill='#fb923c' />,
+            accent: 'gold',
+            icon: <LabelPairedArrowUpFromBracketCaptionBoldIcon height='26px' width='26px' fill='#e8cf7a' />,
             title: 'Upload Bot',
             desc: 'Import an XML bot from your device',
             onClick: uploadBot,
         },
         {
             id: 'freebots',
-            accent: 'green',
-            icon: <LabelPairedGridCaptionBoldIcon height='26px' width='26px' fill='#4ade80' />,
+            accent: 'gold',
+            icon: <LabelPairedGridCaptionBoldIcon height='26px' width='26px' fill='#e8cf7a' />,
             title: 'Free Bots',
             desc: 'Browse ready-made trading strategies',
-            onClick: scrollToFreeBots,
+            onClick: openFreeBots,
         },
         {
             id: 'editor',
-            accent: 'purple',
-            icon: <LabelPairedPuzzlePieceTwoCaptionBoldIcon height='26px' width='26px' fill='#a78bfa' />,
+            accent: 'gold',
+            icon: <LabelPairedPuzzlePieceTwoCaptionBoldIcon height='26px' width='26px' fill='#e8cf7a' />,
             title: 'Bot Editor',
             desc: 'Build a custom bot with the visual editor',
             onClick: () => setActiveTab(DBOT_TABS.BOT_BUILDER),
