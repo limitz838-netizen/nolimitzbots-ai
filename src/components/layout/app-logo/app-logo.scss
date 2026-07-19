@@ -67,3 +67,14 @@
     display: block;
     max-width: 180px;
 }
+
+// NolimitzBots: round the logo image + badge so it never looks boxy.
+.app-header__logo-img,
+.app-header__logo-badge {
+    border-radius: 1rem;
+    overflow: hidden;
+}
+.app-header__logo-badge {
+    width: 3.4rem;
+    height: 3.4rem;
+}

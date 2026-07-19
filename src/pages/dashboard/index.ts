@@ -3,3 +3,4 @@ import './dashboard.scss';
 
 export default Dashboard;
 import './gold-theme.scss';
+import './light-theme.scss';

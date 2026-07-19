@@ -4,7 +4,7 @@ $nlb-gold-soft: #e8cf7a;
 $nlb-grad: radial-gradient(1200px 500px at 85% -10%, rgba(212, 175, 55, 0.12), transparent 60%),
     linear-gradient(180deg, #0a0e17 0%, #0c1120 55%, #0a0e17 100%);
 
-.tab__dashboard {
+.theme--dark .tab__dashboard {
     --text-prominent: #f5f1e6;
     --text-general: #d9dce4;
     --text-less-prominent: #a0a7b6;
@@ -135,6 +135,101 @@ $nlb-grad: radial-gradient(1200px 500px at 85% -10%, rgba(212, 175, 55, 0.12), t
                 background: rgba(245, 158, 11, 0.16) !important;
                 color: #fbbf24 !important;
             }
+        }
+    }
+}
+
+// ================= App shell — header + tab bar in gold/black =================
+.app-header {
+    background: #0a0e17 !important;
+    border-bottom: 1px solid rgba(212, 175, 55, 0.22) !important;
+
+    .dc-text,
+    .account-info .dc-text {
+        color: #f2f4f8 !important;
+    }
+}
+
+.main__tabs {
+    .dc-tabs__list {
+        background: #0c1120 !important;
+        border-bottom: 1px solid rgba(212, 175, 55, 0.18);
+    }
+
+    .dc-tabs__item {
+        color: #aeb6c6;
+
+        svg {
+            fill: #aeb6c6;
+        }
+    }
+
+    .dc-tabs__active {
+        background: rgba(212, 175, 55, 0.14) !important;
+        color: #e8cf7a !important;
+
+        .dc-text {
+            color: #e8cf7a !important;
+        }
+
+        svg {
+            fill: #e8cf7a !important;
+        }
+    }
+
+    .dc-tabs__active-line {
+        background: linear-gradient(90deg, #e8cf7a, #d4af37) !important;
+    }
+}
+
+// ================= Free Bots tab wrapper =================
+.free-bots-tab {
+    min-height: var(--tab-content-height);
+    overflow-y: auto;
+    padding: 1.6rem;
+    background: radial-gradient(1200px 500px at 85% -10%, rgba(212, 175, 55, 0.12), transparent 60%),
+        linear-gradient(180deg, #0a0e17 0%, #0c1120 55%, #0a0e17 100%);
+}
+
+.free-bots-tab .free-bots {
+    &__title {
+        color: #e8cf7a !important;
+        letter-spacing: 0.04em;
+    }
+
+    &__card {
+        background: rgba(255, 255, 255, 0.04) !important;
+        border: 1px solid rgba(212, 175, 55, 0.25) !important;
+        box-shadow: none !important;
+
+        .dc-text {
+            color: #d9dce4 !important;
+        }
+
+        &:hover {
+            border-color: #d4af37 !important;
+            box-shadow: 0 8px 22px rgba(212, 175, 55, 0.16) !important;
+        }
+    }
+
+    &__desc {
+        color: #a0a7b6 !important;
+    }
+
+    &__run {
+        background: linear-gradient(135deg, #e8cf7a, #d4af37) !important;
+        color: #141004 !important;
+        font-weight: 700;
+    }
+
+    &__badge {
+        &--low {
+            background: rgba(34, 197, 94, 0.16) !important;
+            color: #4ade80 !important;
+        }
+        &--medium {
+            background: rgba(245, 158, 11, 0.16) !important;
+            color: #fbbf24 !important;
         }
     }
 }

@@ -1,0 +1,110 @@
+// NolimitzBots light theme — clean, dbtraders-style. Scoped to .theme--light.
+.theme--light {
+    .tab__dashboard {
+        background: linear-gradient(180deg, #f7f9fc 0%, #eef2f8 100%) !important;
+
+        .tab__dashboard__content {
+            background: transparent !important;
+            overflow-y: auto !important;
+        }
+        .quick-panel {
+            background: transparent !important;
+        }
+    }
+
+    // Hide the legacy tile row (QuickActions replaces it) in light too
+    .tab__dashboard__table__tiles {
+        display: none !important;
+    }
+
+    // Quick Actions cards: white with soft shadow + pastel chips
+    .quick-actions {
+        &__label {
+            color: #64748b;
+        }
+        &__card {
+            background: #ffffff;
+            border-color: #e6ebf3;
+            box-shadow: 0 6px 18px rgba(20, 40, 80, 0.06);
+
+            &:hover {
+                box-shadow: 0 12px 28px rgba(20, 40, 80, 0.1);
+            }
+        }
+        &__title {
+            color: #0f1b3d;
+        }
+        &__desc {
+            color: #64748b;
+        }
+        &__open--orange {
+            color: #f97316;
+        }
+        &__open--green {
+            color: #16a34a;
+        }
+        &__open--purple {
+            color: #7c3aed;
+        }
+        &__open--gold {
+            color: #ca8a04;
+        }
+        &__chip--orange {
+            background: #eff6ff;
+            border-color: #dbeafe;
+        }
+        &__chip--green {
+            background: #ecfdf5;
+            border-color: #d1fae5;
+        }
+        &__chip--purple {
+            background: #f5f3ff;
+            border-color: #ede9fe;
+        }
+        &__chip--gold {
+            background: #fffbeb;
+            border-color: #fef3c7;
+        }
+    }
+
+    // Your bots list + free bots inline gallery text
+    .free-bots__title {
+        color: #0f1b3d !important;
+    }
+    .free-bots__card {
+        background: #ffffff !important;
+        border-color: #e6ebf3 !important;
+        box-shadow: 0 6px 18px rgba(20, 40, 80, 0.05) !important;
+
+        .dc-text {
+            color: #1e293b !important;
+        }
+    }
+    .free-bots__desc {
+        color: #64748b !important;
+    }
+
+    // Free Bots tab wrapper background
+    .free-bots-tab {
+        background: linear-gradient(180deg, #f7f9fc 0%, #eef2f8 100%);
+    }
+
+    // Bulk / speedbot / ai panels in light
+    .bulk-trader,
+    .speedbot,
+    .ai-software {
+        background: linear-gradient(180deg, #f7f9fc 0%, #eef2f8 100%);
+
+        &__panel {
+            background: #ffffff;
+            border-color: #e6ebf3;
+            box-shadow: 0 6px 20px rgba(20, 40, 80, 0.06);
+        }
+        &__title {
+            color: #b8860b;
+        }
+        &__subtitle {
+            color: #64748b;
+        }
+    }
+}

@@ -1,0 +1,47 @@
+.nlb-greeting {
+    text-align: center;
+    padding: 2.4rem 1.6rem 1.2rem;
+
+    &__hello {
+        font-size: 2.6rem;
+        font-weight: 800;
+        letter-spacing: -0.01em;
+    }
+
+    &__id {
+        color: #d4af37;
+    }
+
+    &__wave {
+        display: inline-block;
+    }
+
+    &__tagline {
+        margin-top: 0.6rem;
+        font-size: 1.4rem;
+        font-style: italic;
+    }
+}
+
+// Dark (gold) theme colors
+.theme--dark .nlb-greeting {
+    &__hello {
+        color: #f5f1e6;
+    }
+    &__tagline {
+        color: #9aa1b0;
+    }
+}
+
+// Light theme colors
+.theme--light .nlb-greeting {
+    &__hello {
+        color: #0f1b3d;
+    }
+    &__id {
+        color: #b8860b;
+    }
+    &__tagline {
+        color: #64748b;
+    }
+}

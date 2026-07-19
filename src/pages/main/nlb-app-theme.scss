@@ -3,7 +3,7 @@ $nlb-gold: #d4af37;
 $nlb-gold-soft: #e8cf7a;
 
 // ---- App header → dark glass ----
-.app-header {
+.theme--dark .app-header {
     background: linear-gradient(180deg, #0d1322 0%, #0a0e17 100%) !important;
     border-bottom: 1px solid rgba(212, 175, 55, 0.25) !important;
 
@@ -21,7 +21,7 @@ $nlb-gold-soft: #e8cf7a;
 }
 
 // Account dropdown on dark
-.acc-dropdown {
+.theme--dark .acc-dropdown {
     background: #10162a !important;
     border: 1px solid rgba(212, 175, 55, 0.3) !important;
 
@@ -36,11 +36,11 @@ $nlb-gold-soft: #e8cf7a;
 }
 
 // ---- Tab bar → dark glass with gold active pill ----
-.main {
+.theme--dark .main {
     background: #0a0e17;
 }
 
-.main__tabs {
+.theme--dark .main__tabs {
     &.dc-tabs,
     .dc-tabs {
         background: linear-gradient(180deg, #0c1120 0%, #0a0e17 100%) !important;
