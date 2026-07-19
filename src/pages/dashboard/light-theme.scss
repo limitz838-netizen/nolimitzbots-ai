@@ -9,21 +9,27 @@
     .app-header .acc-info__balance { color: #0f1b3d !important; }
     .app-header .acc-info__select-arrow svg { fill: #0f1b3d; }
 
-    // ---- Tab bar: light with colored active tab ----
+    // ---- Tab bar: goldish glass ----
     .main__tabs {
-        .dc-tabs__list, .dc-tabs__wrapper { background: #eef2f8 !important; }
-        .dc-tabs__item { color: #64748b !important; }
+        .dc-tabs__list, .dc-tabs__wrapper {
+            background: linear-gradient(180deg, #fbf6e6 0%, #f4eed7 100%) !important;
+            border-bottom: 1px solid rgba(212,175,55,.35) !important;
+        }
+        .dc-tabs__item { color: #7a6a3a !important; }
+        .dc-tabs__item svg [fill] { fill: #7a6a3a; }
         .dc-tabs__active {
-            background: #ffffff !important;
-            color: #0f1b3d !important;
+            background: linear-gradient(135deg, rgba(232,207,122,.55), rgba(212,175,55,.35)) !important;
+            color: #4a3a10 !important;
             border-radius: 1rem 1rem 0 0;
         }
-        .dc-tabs__active svg [fill] { fill: #0f1b3d; }
+        .dc-tabs__active svg [fill] { fill: #4a3a10; }
         .dc-tabs__active-line { background-color: #d4af37 !important; }
     }
 
     .tab__dashboard {
-        background: linear-gradient(180deg, #f7f9fc 0%, #eef2f8 100%) !important;
+        background:
+            radial-gradient(900px 400px at 90% -10%, rgba(212,175,55,.14), transparent 60%),
+            linear-gradient(180deg, #fbfcff 0%, #eef1f7 100%) !important;
 
         .tab__dashboard__content {
             background: transparent !important;
@@ -45,12 +51,14 @@
             color: #64748b;
         }
         &__card {
-            background: #ffffff;
-            border-color: #e6ebf3;
-            box-shadow: 0 6px 18px rgba(20, 40, 80, 0.06);
+            background: rgba(255,255,255,0.72);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(212,175,55,0.28);
+            box-shadow: 0 8px 24px rgba(20, 40, 80, 0.08);
 
             &:hover {
-                box-shadow: 0 12px 28px rgba(20, 40, 80, 0.1);
+                box-shadow: 0 14px 32px rgba(212,175,55,0.18);
+                border-color: rgba(212,175,55,0.5);
             }
         }
         &__card--orange { border-top-color: #f97316; }

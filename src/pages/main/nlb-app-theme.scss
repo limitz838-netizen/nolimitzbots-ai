@@ -104,3 +104,35 @@ $nlb-gold-soft: #e8cf7a;
         font-weight: 700;
     }
 }
+
+// ===== Auth buttons (Log in / Sign up) — visible in BOTH themes =====
+.auth-actions {
+    display: flex;
+    gap: 0.8rem;
+    align-items: center;
+
+    .dc-btn,
+    button {
+        border-radius: 0.9rem !important;
+        font-weight: 700 !important;
+    }
+
+    // Log in = outlined gold
+    .dc-btn:first-child,
+    button:first-child {
+        background: transparent !important;
+        border: 1px solid #d4af37 !important;
+        color: #d4af37 !important;
+    }
+    // Sign up = solid gold
+    .dc-btn:last-child,
+    button:last-child {
+        background: linear-gradient(135deg, #e8cf7a, #d4af37) !important;
+        border: none !important;
+        color: #141004 !important;
+    }
+    .dc-btn:disabled,
+    button:disabled {
+        opacity: 0.6 !important;
+    }
+}
