@@ -1,5 +1,27 @@
 // NolimitzBots light theme — clean, dbtraders-style. Scoped to .theme--light.
 .theme--light {
+    // ---- Header: light glass so account name + balance are readable ----
+    .app-header {
+        background: #ffffff !important;
+        border-bottom: 1px solid #e6ebf3 !important;
+    }
+    .app-header .acc-info__account-type { color: #b8860b !important; }
+    .app-header .acc-info__balance { color: #0f1b3d !important; }
+    .app-header .acc-info__select-arrow svg { fill: #0f1b3d; }
+
+    // ---- Tab bar: light with colored active tab ----
+    .main__tabs {
+        .dc-tabs__list, .dc-tabs__wrapper { background: #eef2f8 !important; }
+        .dc-tabs__item { color: #64748b !important; }
+        .dc-tabs__active {
+            background: #ffffff !important;
+            color: #0f1b3d !important;
+            border-radius: 1rem 1rem 0 0;
+        }
+        .dc-tabs__active svg [fill] { fill: #0f1b3d; }
+        .dc-tabs__active-line { background-color: #d4af37 !important; }
+    }
+
     .tab__dashboard {
         background: linear-gradient(180deg, #f7f9fc 0%, #eef2f8 100%) !important;
 
@@ -31,6 +53,10 @@
                 box-shadow: 0 12px 28px rgba(20, 40, 80, 0.1);
             }
         }
+        &__card--orange { border-top-color: #f97316; }
+        &__card--green { border-top-color: #22c55e; }
+        &__card--purple { border-top-color: #8b5cf6; }
+        &__card--gold { border-top-color: #f59e0b; }
         &__title {
             color: #0f1b3d;
         }
@@ -89,22 +115,46 @@
         background: linear-gradient(180deg, #f7f9fc 0%, #eef2f8 100%);
     }
 
-    // Bulk / speedbot / ai panels in light
+}
+
+// Trading terminals stay dark in BOTH themes — dense data reads best on dark,
+// and it matches traderscheme/dbtraders. Force readable dark styling in light mode.
+.theme--light {
     .bulk-trader,
     .speedbot,
     .ai-software {
-        background: linear-gradient(180deg, #f7f9fc 0%, #eef2f8 100%);
+        background: radial-gradient(1200px 500px at 85% -10%, rgba(212, 175, 55, 0.12), transparent 60%),
+            linear-gradient(180deg, #0a0e17 0%, #0c1120 55%, #0a0e17 100%) !important;
 
         &__panel {
-            background: #ffffff;
-            border-color: #e6ebf3;
-            box-shadow: 0 6px 20px rgba(20, 40, 80, 0.06);
+            background: rgba(255, 255, 255, 0.04) !important;
+            border-color: rgba(212, 175, 55, 0.28) !important;
         }
-        &__title {
-            color: #b8860b;
+        &__title { color: #e8cf7a !important; }
+        &__subtitle,
+        &__label { color: #9aa1b0 !important; }
+
+        input, select {
+            background: rgba(0, 0, 0, 0.35) !important;
+            color: #f2f4f8 !important;
+            border-color: rgba(255, 255, 255, 0.14) !important;
         }
-        &__subtitle {
-            color: #64748b;
+
+        .bulk-trader__field span,
+        .speedbot__field span,
+        .ai-software__field span,
+        .bulk-trader__current-label,
+        .speedbot__toggle,
+        .ai-software__card-name { color: #cbd5e1 !important; }
+
+        .bulk-trader__digit-num,
+        .speedbot__status div,
+        .ai-software__status div { color: #f2f4f8 !important; }
+
+        .ai-software__card {
+            background: rgba(255, 255, 255, 0.04) !important;
+            border-color: rgba(255,255,255,0.1) !important;
         }
+        .ai-software__card-trigger { color: #9aa1b0 !important; }
     }
 }
