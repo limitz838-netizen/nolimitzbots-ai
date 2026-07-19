@@ -4,6 +4,7 @@ import { observer } from 'mobx-react-lite';
 import { api_base } from '@/external/bot-skeleton';
 import { useStore } from '@/hooks/useStore';
 import { isProduction, WS_SERVERS } from '@/components/shared/utils/config/config';
+import { playLoss, playWin, unlockAudio } from '@/components/shared/nlb/trade-sounds';
 import './bulk-trader.scss';
 
 const MARKETS = [
@@ -207,6 +208,8 @@ const BulkTrader = observer(() => {
         const total = profits.reduce((a, p) => a + p, 0);
         const wins = profits.filter(p => p > 0).length;
         setSettling(null);
+        if (total >= 0) playWin();
+        else playLoss();
         setResult({
             total,
             wins,
@@ -262,6 +265,7 @@ const BulkTrader = observer(() => {
     // ---- fire a batch ----
     const fire = async side => {
         if (!api_base?.api || is_busy || !is_logged_in || stake_num < 0.35) return;
+        unlockAudio();
         setIsBusy(true);
         setResult(null);
         setReceipts([]);

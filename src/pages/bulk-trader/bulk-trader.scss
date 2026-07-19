@@ -1,7 +1,8 @@
 .bulk-trader {
-    min-height: var(--tab-content-height);
+    height: var(--tab-content-height);
     overflow-y: auto;
-    padding: 1.6rem;
+    -webkit-overflow-scrolling: touch;
+    padding: 1.6rem 1.6rem 14rem;
     background: radial-gradient(1200px 500px at 85% -10%, rgba(212, 175, 55, 0.12), transparent 60%),
         linear-gradient(180deg, #0a0e17 0%, #0c1120 55%, #0a0e17 100%);
 
