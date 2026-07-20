@@ -230,6 +230,12 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
 
                 <div className='ai-scanner__title'>AI MARKET SCANNER</div>
                 <div className='ai-scanner__subtitle'>Recent-frequency analysis · Digit markets</div>
+                {(phase === 'scanning' || phase === 'firing' || phase === 'settling') && (
+                    <div className='ai-scanner__running'>
+                        <span className='ai-scanner__running-dot' />
+                        {phase === 'scanning' ? 'Scanner running — analysing markets…' : phase === 'firing' ? 'Scanner running — placing trades…' : 'Scanner running — settling trades…'}
+                    </div>
+                )}
 
                 <div className='ai-scanner__markets'>
                     {(rows.length ? rows : SCAN_MARKETS.map(m => ({ ...m, best: null }))).map(r => (
@@ -279,45 +285,6 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                     </div>
                 )}
 
-                {phase === 'done' && batchResult && (
-                    <div
-                        className={`ai-scanner__batch ${batchResult.total >= 0 ? 'ai-scanner__batch--win' : 'ai-scanner__batch--loss'}`}
-                    >
-                        <div className='ai-scanner__batch-tag'>Total profit</div>
-                        <div className='ai-scanner__batch-head'>
-                            Scanner batch {batchResult.total >= 0 ? 'won' : 'lost'}
-                        </div>
-                        <div className='ai-scanner__batch-amt'>
-                            {batchResult.total >= 0 ? '+' : ''}
-                            {batchResult.total.toFixed(2)}
-                        </div>
-                        <div className='ai-scanner__batch-grid'>
-                            <div>
-                                <span>Market</span>
-                                {result.label}
-                            </div>
-                            <div>
-                                <span>Contract</span>
-                                {batchResult.side}
-                            </div>
-                            <div>
-                                <span>Trades</span>
-                                {batchResult.settled}/{batchResult.count}
-                            </div>
-                            <div>
-                                <span>Wins</span>
-                                {batchResult.wins}
-                            </div>
-                        </div>
-                        <button className='ai-scanner__rescan' onClick={scan}>
-                            Scan again
-                        </button>
-                        <div className='ai-scanner__result-note'>
-                            Wide contracts (Over/Under) win often but pay small — recent skew, not a prediction.
-                        </div>
-                    </div>
-                )}
-
                 {phase === 'done' && !batchResult && result && (
                     <div className='ai-scanner__result'>
                         <div className='ai-scanner__result-tag'>Strongest recent skew</div>
@@ -335,6 +302,36 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                     </div>
                 )}
             </div>
+
+            {batchResult && (
+                <div className='ai-scanner__batch-overlay' role='dialog' aria-modal='true'>
+                    <div
+                        className={`ai-scanner__batch ai-scanner__batch--pop ${batchResult.total >= 0 ? 'ai-scanner__batch--win' : 'ai-scanner__batch--loss'}`}
+                    >
+                        <button className='ai-scanner__batch-close' onClick={() => setBatchResult(null)}>✕</button>
+                        <div className='ai-scanner__batch-tag'>Total profit</div>
+                        <div className='ai-scanner__batch-head'>
+                            Scanner batch {batchResult.total >= 0 ? 'won' : 'lost'}
+                        </div>
+                        <div className='ai-scanner__batch-amt'>
+                            {batchResult.total >= 0 ? '+' : ''}
+                            {batchResult.total.toFixed(2)}
+                        </div>
+                        <div className='ai-scanner__batch-grid'>
+                            <div><span>Market</span>{batchResult.market}</div>
+                            <div><span>Contract</span>{batchResult.side}</div>
+                            <div><span>Trades</span>{batchResult.settled}/{batchResult.count}</div>
+                            <div><span>Wins</span>{batchResult.wins}</div>
+                        </div>
+                        <button className='ai-scanner__rescan' onClick={() => { setBatchResult(null); scan(); }}>
+                            Scan again
+                        </button>
+                        <div className='ai-scanner__result-note'>
+                            Wide contracts (Over/Under) win often but pay small — recent skew, not a prediction.
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };
