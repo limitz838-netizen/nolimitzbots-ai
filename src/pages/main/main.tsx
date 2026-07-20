@@ -93,7 +93,7 @@ const AppWrapper = observer(() => {
     const { clear } = summary_card;
     const { DASHBOARD, BOT_BUILDER } = DBOT_TABS;
     const init_render = React.useRef(true);
-    const hash = ['dashboard', 'bot_builder', 'free_bots', 'chart', 'tutorial', 'bulk_trader', 'speedbot', 'ai_software'];
+    const hash = ['dashboard', 'bot_builder', 'free_bots', 'bulk_trader', 'speedbot', 'ai_software', 'chart', 'tutorial'];
     const { isDesktop } = useDevice();
     const location = useLocation();
     const navigate = useNavigate();
@@ -441,6 +441,51 @@ const AppWrapper = observer(() => {
                             <div
                                 label={
                                     <>
+                                        <LabelPairedChartMixedCaptionBoldIcon
+                                            height='24px'
+                                            width='24px'
+                                            fill='var(--text-general)'
+                                        />
+                                        <Localize i18n_default_text='Bulk Trader' />
+                                    </>
+                                }
+                                id='id-bulk-trader'
+                            >
+                                <BulkTrader />
+                            </div>
+                            <div
+                                label={
+                                    <>
+                                        <LabelPairedStopwatchCaptionBoldIcon
+                                            height='24px'
+                                            width='24px'
+                                            fill='var(--text-general)'
+                                        />
+                                        <Localize i18n_default_text='Speedbot' />
+                                    </>
+                                }
+                                id='id-speedbot'
+                            >
+                                <Speedbot />
+                            </div>
+                            <div
+                                label={
+                                    <>
+                                        <LabelPairedCircleStarCaptionBoldIcon
+                                            height='24px'
+                                            width='24px'
+                                            fill='var(--text-general)'
+                                        />
+                                        <Localize i18n_default_text='AI Software' />
+                                    </>
+                                }
+                                id='id-ai-software'
+                            >
+                                <AiSoftware />
+                            </div>
+                            <div
+                                label={
+                                    <>
                                         <LabelPairedChartLineCaptionRegularIcon
                                             height='24px'
                                             width='24px'
@@ -484,51 +529,6 @@ const AppWrapper = observer(() => {
                                         <Tutorial handleTabChange={handleTabChange} />
                                     </Suspense>
                                 </div>
-                            </div>
-                            <div
-                                label={
-                                    <>
-                                        <LabelPairedChartMixedCaptionBoldIcon
-                                            height='24px'
-                                            width='24px'
-                                            fill='var(--text-general)'
-                                        />
-                                        <Localize i18n_default_text='Bulk Trader' />
-                                    </>
-                                }
-                                id='id-bulk-trader'
-                            >
-                                <BulkTrader />
-                            </div>
-                            <div
-                                label={
-                                    <>
-                                        <LabelPairedStopwatchCaptionBoldIcon
-                                            height='24px'
-                                            width='24px'
-                                            fill='var(--text-general)'
-                                        />
-                                        <Localize i18n_default_text='Speedbot' />
-                                    </>
-                                }
-                                id='id-speedbot'
-                            >
-                                <Speedbot />
-                            </div>
-                            <div
-                                label={
-                                    <>
-                                        <LabelPairedCircleStarCaptionBoldIcon
-                                            height='24px'
-                                            width='24px'
-                                            fill='var(--text-general)'
-                                        />
-                                        <Localize i18n_default_text='AI Software' />
-                                    </>
-                                }
-                                id='id-ai-software'
-                            >
-                                <AiSoftware />
                             </div>
                         </Tabs>
                         {!isDesktop && right_tab_shadow && <span className='tabs-shadow tabs-shadow--right' />}{' '}
