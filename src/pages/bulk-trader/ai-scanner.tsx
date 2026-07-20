@@ -215,15 +215,35 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
 
     React.useEffect(() => () => track_ref.current?.cancel(), []);
 
+    const handleClose = () => {
+        try {
+            ws_ref.current?.close();
+        } catch {
+            /* noop */
+        }
+        ws_ref.current = null;
+        track_ref.current?.cancel();
+        track_ref.current = null;
+        setPhase('idle');
+        setLogs([]);
+        setRows([]);
+        setResult(null);
+        setFireLog([]);
+        setSettle(null);
+        setBatchResult(null);
+        onClose?.();
+    };
+
+    if (!open) return null;
 
     return (
-        <div className='ai-scanner__overlay' role='dialog' aria-modal='true'>
-            <div className='ai-scanner'>
+        <div className='ai-scanner__overlay' role='dialog' aria-modal='true' onClick={handleClose}>
+            <div className='ai-scanner' onClick={e => e.stopPropagation()}>
                 <div className='ai-scanner__bar'>
                     <span className='ai-scanner__dots'>
                         <i /> <i /> <i />
                     </span>
-                    <button className='ai-scanner__close' onClick={onClose}>
+                    <button className='ai-scanner__close' onClick={handleClose}>
                         ✕
                     </button>
                 </div>
@@ -304,11 +324,12 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
             </div>
 
             {batchResult && (
-                <div className='ai-scanner__batch-overlay' role='dialog' aria-modal='true'>
+                <div className='ai-scanner__batch-overlay' role='dialog' aria-modal='true' onClick={handleClose}>
                     <div
                         className={`ai-scanner__batch ai-scanner__batch--pop ${batchResult.total >= 0 ? 'ai-scanner__batch--win' : 'ai-scanner__batch--loss'}`}
+                        onClick={e => e.stopPropagation()}
                     >
-                        <button className='ai-scanner__batch-close' onClick={() => setBatchResult(null)}>✕</button>
+                        <button className='ai-scanner__batch-close' onClick={handleClose}>✕</button>
                         <div className='ai-scanner__batch-tag'>Total profit</div>
                         <div className='ai-scanner__batch-head'>
                             Scanner batch {batchResult.total >= 0 ? 'won' : 'lost'}

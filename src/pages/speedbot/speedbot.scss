@@ -405,3 +405,76 @@
     gap: 1rem;
     flex-wrap: wrap;
 }
+
+// Trade Once button
+.speedbot__once {
+    flex: 0 0 auto;
+    border: 1px solid rgba(212, 175, 55, 0.5);
+    background: rgba(212, 175, 55, 0.1);
+    color: #e8cf7a;
+    border-radius: 1rem;
+    padding: 1rem 1.4rem;
+    font-size: 1.3rem;
+    font-weight: 700;
+    cursor: pointer;
+    &:disabled { opacity: 0.45; cursor: default; }
+}
+
+// AI scanner button
+.speedbot__scanner-btn {
+    width: 100%;
+    margin: 0.4rem 0 1rem;
+    padding: 1.1rem;
+    border-radius: 1rem;
+    border: 1px solid #16f08a66;
+    background: linear-gradient(90deg, rgba(22,240,138,0.12), rgba(22,240,138,0.04));
+    color: #16f08a;
+    font-weight: 700;
+    font-size: 1.25rem;
+    cursor: pointer;
+    &:hover { box-shadow: 0 0 24px rgba(22, 240, 138, 0.3); }
+    &:disabled { opacity: 0.5; cursor: default; }
+}
+
+// Live pattern panel
+.speedbot__pattern {
+    margin-bottom: 1.2rem;
+    padding: 1.2rem;
+    border-radius: 1.1rem;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(94, 234, 212, 0.3);
+}
+.speedbot__pattern-head {
+    color: #aeb6c6;
+    font-size: 1.1rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 0.7rem;
+}
+.speedbot__pattern-stream {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.9rem;
+    min-height: 2.6rem;
+    align-items: center;
+}
+.speedbot__pattern-empty { color: #6f7788; font-size: 1.6rem; }
+.speedbot__eo {
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: 0.6rem;
+    display: grid;
+    place-items: center;
+    font-weight: 700;
+    font-size: 1.15rem;
+    color: #06121a;
+    &.e { background: #5eead4; }
+    &.o { background: #f87171; }
+}
+.speedbot__pattern-stats {
+    display: flex;
+    gap: 1.4rem;
+    span { color: #4ade80; font-size: 1.3rem; font-weight: 700; }
+    span:last-child { color: #9aa1b0; }
+}

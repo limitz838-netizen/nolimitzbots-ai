@@ -7,6 +7,7 @@ import { isProduction, WS_SERVERS } from '@/components/shared/utils/config/confi
 import { playLoss, playWin, unlockAudio } from '@/components/shared/nlb/trade-sounds';
 import { trackContracts, describeError } from '@/components/shared/nlb/settlement';
 import Guide, { GuideButton } from '@/components/shared/nlb/guide';
+import AiScanner from '../bulk-trader/ai-scanner';
 import './speedbot.scss';
 
 const MARKETS = [
@@ -53,6 +54,8 @@ const Speedbot = observer(() => {
     const [alt_on_loss, setAltOnLoss] = React.useState(false);
     const [martingale, setMartingale] = React.useState(false);
     const [mult, setMult] = React.useState('2.0');
+    const [recovery, setRecovery] = React.useState(false);
+    const [digits, setDigits] = React.useState([]);
 
     const [running, setRunning] = React.useState(false);
     const [stats, setStats] = React.useState({ ticks: 0, last_digit: null, pnl: 0, trades: 0, wins: 0, losses: 0, cur_stake: 0 });
@@ -60,6 +63,7 @@ const Speedbot = observer(() => {
     const [result, setResult] = React.useState(null);
     const [quote, setQuote] = React.useState(null);
     const [guide_open, setGuideOpen] = React.useState(false);
+    const [scanner_open, setScannerOpen] = React.useState(false);
 
     const run_ref = React.useRef(null);
     const settle_handles_ref = React.useRef(new Set());
@@ -77,8 +81,9 @@ const Speedbot = observer(() => {
         const ws = new WebSocket(isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING);
         ws_ref.current = ws;
         const sub = () => {
+            setDigits([]);
             ws.send(JSON.stringify({ forget_all: 'ticks' }));
-            ws.send(JSON.stringify({ ticks_history: sym_ref.current, count: 1, end: 'latest', style: 'ticks', subscribe: 1 }));
+            ws.send(JSON.stringify({ ticks_history: sym_ref.current, count: 20, end: 'latest', style: 'ticks', subscribe: 1 }));
         };
         ws.onopen = () => {
             if (!alive) return;
@@ -100,11 +105,19 @@ const Speedbot = observer(() => {
                 });
                 return;
             }
+            if (data.msg_type === 'history' && data.echo_req?.ticks_history === sym_ref.current) {
+                const dec = decimals_ref.current[sym_ref.current] ?? 2;
+                const ds = (data.history?.prices || []).map(pr => Number(Number(pr).toFixed(dec).slice(-1)));
+                setDigits(ds.slice(-20));
+                return;
+            }
             if (data.msg_type === 'tick' && data.tick?.symbol === sym_ref.current) {
                 const dec = decimals_ref.current[sym_ref.current] ?? 2;
                 const q = Number(data.tick.quote).toFixed(dec);
+                const d = Number(q.slice(-1));
                 setQuote(q);
-                setStats(prev => ({ ...prev, ticks: prev.ticks + 1, last_digit: Number(q.slice(-1)) }));
+                setDigits(prev => [...prev, d].slice(-20));
+                setStats(prev => ({ ...prev, ticks: prev.ticks + 1, last_digit: d }));
             }
         };
         const resub = () => ws.readyState === WebSocket.OPEN && sub();
@@ -165,6 +178,37 @@ const Speedbot = observer(() => {
             if (won) playWin();
             else playLoss();
             setResult({ reason, pnl: final_pnl, trades: r.trades, wins: r.wins, losses: r.losses });
+        }
+    };
+
+    // Fire a single trade with current settings (no loop).
+    const tradeOnce = async () => {
+        if (running || !is_logged_in || !api_base?.api) return;
+        const amount = Math.max(0.35, parseFloat(stake) || 0.5);
+        const t = TYPES.find(x => x.code === type_code);
+        unlockAudio();
+        setResult(null);
+        try {
+            log(`▶ Trade Once — ${t.label} @ ${amount.toFixed(2)}`);
+            const cid = await buyOnce(t.code, t.barrier, amount);
+            const profit = await settleContract(cid, (duration + 30) * 1000);
+            if (profit === null) {
+                log('⚠ settlement timeout');
+                return;
+            }
+            const won = profit > 0;
+            if (won) playWin();
+            else playLoss();
+            log(`${won ? '✔' : '✘'} ${won ? '+' : ''}${profit.toFixed(2)}`);
+            setStats(prev => ({
+                ...prev,
+                pnl: prev.pnl + profit,
+                trades: prev.trades + 1,
+                wins: prev.wins + (won ? 1 : 0),
+                losses: prev.losses + (won ? 0 : 1),
+            }));
+        } catch (e) {
+            log(`✘ ${describeError(e)}`);
         }
     };
 
@@ -232,6 +276,12 @@ const Speedbot = observer(() => {
                     } else {
                         r.cur_stake = Math.min(r.cur_stake * mult_v, base_stake * 200);
                     }
+                } else if (recovery) {
+                    // Recovery Mode: gentler than martingale — add just enough to recover
+                    // the accumulated loss at ~1.9x payout, capped at 5x base.
+                    const deficit = Math.max(0, -r.pnl);
+                    r.cur_stake = Math.min(base_stake + deficit / 1.9, base_stake * 5);
+                    log(`↻ recovery stake → ${r.cur_stake.toFixed(2)}`);
                 }
                 if (alt_on_loss) r.cur_type = TYPES.find(t => t.code === opposite(r.cur_type.code)) || r.cur_type;
             }
@@ -300,6 +350,13 @@ const Speedbot = observer(() => {
                     >
                         {running ? '■ STOP' : '▶ START'}
                     </button>
+                    <button
+                        className='speedbot__once'
+                        disabled={!is_logged_in || running}
+                        onClick={tradeOnce}
+                    >
+                        Trade Once
+                    </button>
                     <div className='speedbot__speed'>
                         <span className='speedbot__speed-label'>Execution speed</span>
                         <div className='speedbot__speed-btns'>
@@ -345,6 +402,34 @@ const Speedbot = observer(() => {
                     </select>
                 </div>
 
+                <button className='speedbot__scanner-btn' disabled={running} onClick={() => setScannerOpen(true)}>
+                    ⚙ AI SCANNER — find & auto-trade best market
+                </button>
+
+                {(() => {
+                    const evenCount = digits.filter(d => d % 2 === 0).length;
+                    const total = digits.length || 1;
+                    const evenPct = (100 * evenCount) / total;
+                    return (
+                        <div className='speedbot__pattern'>
+                            <div className='speedbot__pattern-head'>Even/Odd pattern (last {digits.length})</div>
+                            <div className='speedbot__pattern-stream'>
+                                {digits.slice(-16).map((d, i) => (
+                                    <span key={i} className={`speedbot__eo ${d % 2 === 0 ? 'e' : 'o'}`}>
+                                        {d % 2 === 0 ? 'E' : 'O'}
+                                    </span>
+                                ))}
+                                {digits.length === 0 && <span className='speedbot__pattern-empty'>—</span>}
+                            </div>
+                            <div className='speedbot__pattern-stats'>
+                                <span>Even: {digits.length ? evenPct.toFixed(1) : '0.0'}%</span>
+                                <span>Odd: {digits.length ? (100 - evenPct).toFixed(1) : '0.0'}%</span>
+                                <span>Total: {digits.length}</span>
+                            </div>
+                        </div>
+                    );
+                })()}
+
                 <div className='speedbot__grid'>
                     <div className='speedbot__field'>
                         <span>Ticks</span>
@@ -386,7 +471,19 @@ const Speedbot = observer(() => {
                             <input type='number' min='1' max='5' step='0.05' value={mult} disabled={running} onChange={e => setMult(e.target.value)} />
                         </div>
                     )}
+                    <label className='speedbot__toggle'>
+                        <span>Recovery Mode (gentler than martingale)</span>
+                        <input type='checkbox' checked={recovery} disabled={running || martingale} onChange={e => setRecovery(e.target.checked)} />
+                        <i />
+                    </label>
                 </div>
+
+                {recovery && !martingale && (
+                    <div className='speedbot__mart-warn'>
+                        Recovery Mode raises stake just enough to recover the running loss, capped at 5× base. Gentler
+                        than martingale but still risk — test on demo.
+                    </div>
+                )}
 
                 {martingale && (
                     <div className='speedbot__mart-warn'>
@@ -432,6 +529,8 @@ const Speedbot = observer(() => {
                     edge.
                 </div>
             </div>
+
+            <AiScanner open={scanner_open} onClose={() => setScannerOpen(false)} stake={stake} count={5} currency={currency} isLoggedIn={is_logged_in} />
 
             {result && (
                 <div className='speedbot__overlay' role='dialog'>
