@@ -946,3 +946,31 @@
         }
     }
 }
+
+// AI Scanner trigger button
+.bulk-trader__scanner-btn {
+    width: 100%;
+    margin: 1.2rem 0 0.4rem;
+    padding: 1.1rem;
+    border-radius: 1rem;
+    border: 1px solid #16f08a66;
+    background: linear-gradient(90deg, rgba(22,240,138,0.12), rgba(22,240,138,0.04));
+    color: #16f08a;
+    font-weight: 700;
+    font-size: 1.25rem;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    transition: box-shadow 0.15s ease, transform 0.12s ease;
+
+    &:hover {
+        box-shadow: 0 0 24px rgba(22, 240, 138, 0.3);
+        transform: translateY(-1px);
+    }
+}
+.bulk-trader__scanner-chip {
+    font-size: 1.4rem;
+}

@@ -5,6 +5,8 @@ import { api_base } from '@/external/bot-skeleton';
 import { useStore } from '@/hooks/useStore';
 import { isProduction, WS_SERVERS } from '@/components/shared/utils/config/config';
 import { playLoss, playWin, unlockAudio } from '@/components/shared/nlb/trade-sounds';
+import { trackContracts, describeError } from '@/components/shared/nlb/settlement';
+import AiScanner from './ai-scanner';
 import './bulk-trader.scss';
 
 const MARKETS = [
@@ -45,6 +47,7 @@ const BulkTrader = observer(() => {
     const [receipts, setReceipts] = React.useState([]);
     const [settling, setSettling] = React.useState(null); // {settled, total}
     const [result, setResult] = React.useState(null); // popup
+    const [scanner_open, setScannerOpen] = React.useState(false);
 
     const ws_ref = React.useRef(null);
     const decimals_ref = React.useRef({ ...FALLBACK_DECIMALS });
@@ -169,6 +172,22 @@ const BulkTrader = observer(() => {
         };
     }, []);
 
+
+    const applyScan = scan => {
+        setSymbol(scan.symbol);
+        setStatus('connecting');
+        if (scan.contract_type === 'DIGITEVEN' || scan.contract_type === 'DIGITODD') {
+            setPair('EO');
+        } else {
+            setPair('OU');
+            if (scan.barrier !== undefined) {
+                if (scan.contract_type === 'DIGITOVER') setOverDigit(scan.barrier);
+                else setUnderDigit(scan.barrier);
+            }
+        }
+        notifyCfg('ticks');
+    };
+
     const notifyCfg = detail => setTimeout(() => window.dispatchEvent(new CustomEvent('nlb-bulk-cfg', { detail })), 0);
 
     // Debounced payout refresh on input changes
@@ -196,71 +215,30 @@ const BulkTrader = observer(() => {
         return pct.slice(0, under_digit).reduce((a, b) => a + b, 0);
     };
 
-    // ---- settlement tracking (global poc stream on the authorized connection) ----
-    const finalizeBatch = () => {
-        const b = batch_ref.current;
-        if (!b || b.finalized) return;
-        b.finalized = true;
-        if (b.sub) b.sub.unsubscribe();
-        if (b.poll) clearInterval(b.poll);
-        if (b.timeout) clearTimeout(b.timeout);
-        const profits = Object.values(b.profits);
-        const total = profits.reduce((a, p) => a + p, 0);
-        const wins = profits.filter(p => p > 0).length;
-        setSettling(null);
-        if (total >= 0) playWin();
-        else playLoss();
-        setResult({
-            total,
-            wins,
-            settled: profits.length,
-            count: b.count,
-            market: MARKETS.find(m => m.code === b.symbol)?.label || b.symbol,
-            side: b.side_label,
-        });
-        batch_ref.current = null;
-    };
-
-    const trackBatch = (ids, side_label) => {
-        const b = {
-            pending: new Set(ids),
-            profits: {},
-            count: ids.length,
-            symbol,
-            side_label,
-            finalized: false,
-        };
-        batch_ref.current = b;
+    // ---- settlement tracking via shared hardened tracker ----
+    const trackBatch = (ids, side_label, batch_symbol) => {
         setSettling({ settled: 0, total: ids.length });
-
-        const handle = contract => {
-            if (!contract || !b.pending.has(contract.contract_id)) return;
-            if (contract.is_sold) {
-                b.pending.delete(contract.contract_id);
-                b.profits[contract.contract_id] = Number(contract.profit ?? 0);
-                setSettling({ settled: Object.keys(b.profits).length, total: b.count });
-                if (b.pending.size === 0) finalizeBatch();
-            }
-        };
-
-        b.sub = api_base.api.onMessage().subscribe(({ data }) => {
-            if (data?.msg_type === 'proposal_open_contract') handle(data.proposal_open_contract);
+        batch_ref.current = trackContracts(ids, {
+            onUpdate: ({ settled, total }) => setSettling({ settled, total }),
+            onDone: ({ total, wins, settled, count }) => {
+                setSettling(null);
+                if (total >= 0) playWin();
+                else playLoss();
+                setResult({
+                    total,
+                    wins,
+                    settled,
+                    count,
+                    market: MARKETS.find(m => m.code === batch_symbol)?.label || batch_symbol,
+                    side: side_label,
+                });
+                batch_ref.current = null;
+            },
         });
-        // Poll fallback in case stream misses an update
-        b.poll = setInterval(() => {
-            b.pending.forEach(id => {
-                try {
-                    api_base.api.send({ proposal_open_contract: 1, contract_id: id });
-                } catch {
-                    /* noop */
-                }
-            });
-        }, 4000);
-        // Safety net: never hang forever
-        b.timeout = setTimeout(finalizeBatch, 120000);
     };
 
-    React.useEffect(() => () => finalizeBatch(), []);
+    // Clean teardown on unmount — silent, no popup.
+    React.useEffect(() => () => batch_ref.current?.cancel(), []);
 
     // ---- fire a batch ----
     const fire = async side => {
@@ -295,14 +273,14 @@ const BulkTrader = observer(() => {
                 if (cid) ids.push(cid);
                 out.push({ ok: true, msg: `#${i + 1} bought — ${currency} ${Number(res?.buy?.buy_price ?? stake_num).toFixed(2)}` });
             } catch (e) {
-                out.push({ ok: false, msg: `#${i + 1} failed — ${e?.error?.message || e?.message || 'error'}` });
+                out.push({ ok: false, msg: `#${i + 1} failed — ${describeError(e)}` });
             }
             setReceipts([...out]);
             // eslint-disable-next-line no-await-in-loop
             await new Promise(r => setTimeout(r, 300));
         }
         setIsBusy(false);
-        if (ids.length) trackBatch(ids, side.label);
+        if (ids.length) trackBatch(ids, side.label, symbol);
     };
 
     return (
@@ -396,6 +374,10 @@ const BulkTrader = observer(() => {
                         <span className='bulk-trader__current-value'>{quote ?? '—'}</span>
                     </div>
                 </div>
+
+                <button className='bulk-trader__scanner-btn' onClick={() => setScannerOpen(true)}>
+                    <span className='bulk-trader__scanner-chip'>⚙</span> AI SCANNER — find strongest market
+                </button>
 
                 <div className='bulk-trader__digits'>
                     {pct.map((p, d) => (
@@ -491,6 +473,8 @@ const BulkTrader = observer(() => {
                     Digit contracts settle on random tick outcomes — bulk buying multiplies stake, not odds.
                 </div>
             </div>
+
+            <AiScanner open={scanner_open} onClose={() => setScannerOpen(false)} onApply={applyScan} />
 
             {result && (
                 <div className='bulk-trader__overlay' role='dialog' aria-modal='true'>

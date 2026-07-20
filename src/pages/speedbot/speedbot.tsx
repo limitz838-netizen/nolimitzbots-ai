@@ -5,6 +5,7 @@ import { api_base } from '@/external/bot-skeleton';
 import { useStore } from '@/hooks/useStore';
 import { isProduction, WS_SERVERS } from '@/components/shared/utils/config/config';
 import { playLoss, playWin, unlockAudio } from '@/components/shared/nlb/trade-sounds';
+import { trackContracts, describeError } from '@/components/shared/nlb/settlement';
 import './speedbot.scss';
 
 const MARKETS = [
@@ -59,6 +60,7 @@ const Speedbot = observer(() => {
     const [quote, setQuote] = React.useState(null);
 
     const run_ref = React.useRef(null);
+    const settle_handles_ref = React.useRef(new Set());
     const ws_ref = React.useRef(null);
     const decimals_ref = React.useRef({ ...FALLBACK_DECIMALS });
     const sym_ref = React.useRef(symbol);
@@ -108,6 +110,9 @@ const Speedbot = observer(() => {
         return () => {
             alive = false;
             window.removeEventListener('nlb-speed-symbol', resub);
+            if (run_ref.current) run_ref.current.active = false;
+            settle_handles_ref.current.forEach(h => h.cancel());
+            settle_handles_ref.current.clear();
             try {
                 ws.close();
             } catch {
@@ -116,31 +121,18 @@ const Speedbot = observer(() => {
         };
     }, []);
 
+    // Single-contract settlement via the shared hardened tracker.
     const settleContract = (contract_id, timeout_ms) =>
         new Promise(resolve => {
-            let done = false;
-            const finish = profit => {
-                if (done) return;
-                done = true;
-                sub.unsubscribe();
-                clearInterval(poll);
-                clearTimeout(to);
-                resolve(profit);
-            };
-            const sub = api_base.api.onMessage().subscribe(({ data }) => {
-                const c = data?.proposal_open_contract;
-                if (data?.msg_type === 'proposal_open_contract' && c?.contract_id === contract_id && c?.is_sold) {
-                    finish(Number(c.profit ?? 0));
-                }
+            const handle = trackContracts([contract_id], {
+                timeoutMs: timeout_ms,
+                onDone: ({ profits, settled }) => {
+                    settle_handles_ref.current.delete(handle);
+                    const val = Object.values(profits);
+                    resolve(settled > 0 ? val[0] : null);
+                },
             });
-            const poll = setInterval(() => {
-                try {
-                    api_base.api.send({ proposal_open_contract: 1, contract_id });
-                } catch {
-                    /* noop */
-                }
-            }, 3000);
-            const to = setTimeout(() => finish(null), timeout_ms);
+            settle_handles_ref.current.add(handle);
         });
 
     const buyOnce = async (contract_type, barrier, amount) => {
@@ -265,7 +257,7 @@ const Speedbot = observer(() => {
                     });
                 }
             } catch (e) {
-                log(`✘ ${e?.error?.message || e?.message || 'trade error'}`);
+                log(`✘ ${describeError(e)}`);
                 // eslint-disable-next-line no-await-in-loop
                 await new Promise(res => setTimeout(res, 1500));
             }
@@ -274,8 +266,14 @@ const Speedbot = observer(() => {
         }
     };
 
+    const cancelSettlers = () => {
+        settle_handles_ref.current.forEach(h => h.cancel());
+        settle_handles_ref.current.clear();
+    };
+
     const stop = () => {
         log('Stopped by user');
+        cancelSettlers();
         if (run_ref.current) stopRun(null, 0, run_ref.current);
         setRunning(false);
     };

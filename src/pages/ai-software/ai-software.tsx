@@ -5,6 +5,7 @@ import { api_base } from '@/external/bot-skeleton';
 import { useStore } from '@/hooks/useStore';
 import { isProduction, WS_SERVERS } from '@/components/shared/utils/config/config';
 import { playLoss, playWin, unlockAudio } from '@/components/shared/nlb/trade-sounds';
+import { trackContracts, describeError } from '@/components/shared/nlb/settlement';
 import './ai-software.scss';
 
 const MARKETS = [
@@ -101,6 +102,7 @@ const AiSoftware = observer(() => {
     const [result, setResult] = React.useState(null);
 
     const run_ref = React.useRef(null);
+    const settle_handles_ref = React.useRef(new Set());
     const ws_ref = React.useRef(null);
     const digits_ref = React.useRef([]);
     const decimals_ref = React.useRef({ ...FALLBACK_DECIMALS });
@@ -160,6 +162,8 @@ const AiSoftware = observer(() => {
             alive = false;
             window.removeEventListener('nlb-ai-symbol', resub);
             if (run_ref.current) run_ref.current.active = false;
+            settle_handles_ref.current.forEach(h => h.cancel());
+            settle_handles_ref.current.clear();
             try {
                 ws.close();
             } catch {
@@ -170,29 +174,15 @@ const AiSoftware = observer(() => {
 
     const settleContract = (contract_id, timeout_ms) =>
         new Promise(resolve => {
-            let done = false;
-            const finish = profit => {
-                if (done) return;
-                done = true;
-                sub.unsubscribe();
-                clearInterval(poll);
-                clearTimeout(to);
-                resolve(profit);
-            };
-            const sub = api_base.api.onMessage().subscribe(({ data }) => {
-                const c = data?.proposal_open_contract;
-                if (data?.msg_type === 'proposal_open_contract' && c?.contract_id === contract_id && c?.is_sold) {
-                    finish(Number(c.profit ?? 0));
-                }
+            const handle = trackContracts([contract_id], {
+                timeoutMs: timeout_ms,
+                onDone: ({ profits, settled }) => {
+                    settle_handles_ref.current.delete(handle);
+                    const val = Object.values(profits);
+                    resolve(settled > 0 ? val[0] : null);
+                },
             });
-            const poll = setInterval(() => {
-                try {
-                    api_base.api.send({ proposal_open_contract: 1, contract_id });
-                } catch {
-                    /* noop */
-                }
-            }, 3000);
-            const to = setTimeout(() => finish(null), timeout_ms);
+            settle_handles_ref.current.add(handle);
         });
 
     const stopRun = (reason, r) => {
@@ -251,7 +241,7 @@ const AiSoftware = observer(() => {
                 log('⚠ settlement timeout');
             }
         } catch (e) {
-            log(`✘ ${e?.error?.message || e?.message || 'trade error'}`);
+            log(`✘ ${describeError(e)}`);
         } finally {
             if (run_ref.current) run_ref.current.in_trade = false;
         }
