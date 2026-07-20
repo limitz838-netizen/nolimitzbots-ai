@@ -183,3 +183,82 @@
     from { opacity: 0; transform: translateX(-4px); }
     to { opacity: 1; transform: translateX(0); }
 }
+
+// Auto-fire states
+.ai-scanner {
+    &__firing {
+        border: 1px solid #16f08a44;
+        border-radius: 1rem;
+        padding: 1rem;
+        background: #020a06;
+    }
+    &__firing-head {
+        color: #16f08a;
+        font-size: 1.3rem;
+        font-weight: 700;
+        margin-bottom: 0.6rem;
+    }
+    &__settle {
+        margin-top: 0.6rem;
+        color: #e8cf7a;
+        font-size: 1.2rem;
+        font-weight: 700;
+    }
+
+    &__batch {
+        text-align: center;
+        border-radius: 1.2rem;
+        padding: 1.6rem;
+        &--win {
+            border: 1px solid #16f08a88;
+            background: radial-gradient(circle at 50% 0%, rgba(22, 240, 138, 0.14), transparent 60%), #020a06;
+            box-shadow: 0 0 34px rgba(22, 240, 138, 0.25);
+        }
+        &--loss {
+            border: 1px solid #f8717188;
+            background: radial-gradient(circle at 50% 0%, rgba(248, 113, 113, 0.14), transparent 60%), #0a0303;
+        }
+    }
+    &__batch-tag {
+        color: #6ee7b7;
+        font-size: 1rem;
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+    }
+    &__batch-head {
+        color: #eafff4;
+        font-size: 1.5rem;
+        font-weight: 700;
+        margin-top: 0.3rem;
+    }
+    &__batch-amt {
+        font-size: 3.4rem;
+        font-weight: 800;
+        margin: 0.4rem 0 1rem;
+        .ai-scanner__batch--win & { color: #16f08a; text-shadow: 0 0 24px rgba(22, 240, 138, 0.5); }
+        .ai-scanner__batch--loss & { color: #f87171; }
+    }
+    &__batch-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.6rem;
+        margin-bottom: 1rem;
+        div {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 0.9rem;
+            padding: 0.8rem;
+            color: #eafff4;
+            font-size: 1.3rem;
+            font-weight: 700;
+            span {
+                display: block;
+                color: #7f9e8d;
+                font-size: 0.9rem;
+                text-transform: uppercase;
+                letter-spacing: 0.12em;
+                margin-bottom: 0.2rem;
+            }
+        }
+    }
+}

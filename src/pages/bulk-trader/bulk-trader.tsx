@@ -179,21 +179,6 @@ const BulkTrader = observer(() => {
     }, []);
 
 
-    const applyScan = scan => {
-        setSymbol(scan.symbol);
-        setStatus('connecting');
-        if (scan.contract_type === 'DIGITEVEN' || scan.contract_type === 'DIGITODD') {
-            setPair('EO');
-        } else {
-            setPair('OU');
-            if (scan.barrier !== undefined) {
-                if (scan.contract_type === 'DIGITOVER') setOverDigit(scan.barrier);
-                else setUnderDigit(scan.barrier);
-            }
-        }
-        notifyCfg('ticks');
-    };
-
     const notifyCfg = detail => setTimeout(() => window.dispatchEvent(new CustomEvent('nlb-bulk-cfg', { detail })), 0);
 
     // Debounced payout refresh on input changes
@@ -529,7 +514,7 @@ const BulkTrader = observer(() => {
                 </div>
             </div>
 
-            <AiScanner open={scanner_open} onClose={() => setScannerOpen(false)} onApply={applyScan} />
+            <AiScanner open={scanner_open} onClose={() => setScannerOpen(false)} stake={stake} count={count} currency={currency} isLoggedIn={is_logged_in} />
 
             {result && (
                 <div className='bulk-trader__overlay' role='dialog' aria-modal='true'>

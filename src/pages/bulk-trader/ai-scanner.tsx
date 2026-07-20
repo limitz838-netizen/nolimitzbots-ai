@@ -4,6 +4,9 @@
 // honestly as recent frequency, never a prediction of the next tick.
 import React from 'react';
 import { isProduction, WS_SERVERS } from '@/components/shared/utils/config/config';
+import { api_base } from '@/external/bot-skeleton';
+import { trackContracts, describeError } from '@/components/shared/nlb/settlement';
+import { playLoss, playWin, unlockAudio } from '@/components/shared/nlb/trade-sounds';
 import './ai-scanner.scss';
 
 const SCAN_MARKETS = [
@@ -50,8 +53,12 @@ const analyze = digits => {
     return { best: cands[0], pct, total: digits.length };
 };
 
-const AiScanner = ({ open, onClose, onApply }) => {
-    const [phase, setPhase] = React.useState('idle'); // idle | scanning | done
+const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn = false }) => {
+    const [phase, setPhase] = React.useState('idle'); // idle | scanning | firing | settling | done
+    const [fireLog, setFireLog] = React.useState([]);
+    const [settle, setSettle] = React.useState(null); // {settled,total}
+    const [batchResult, setBatchResult] = React.useState(null);
+    const track_ref = React.useRef(null);
     const [logs, setLogs] = React.useState([]);
     const [rows, setRows] = React.useState([]); // {label, code, best}
     const [result, setResult] = React.useState(null);
@@ -64,6 +71,10 @@ const AiScanner = ({ open, onClose, onApply }) => {
             setLogs([]);
             setRows([]);
             setResult(null);
+            setFireLog([]);
+            setSettle(null);
+            setBatchResult(null);
+            track_ref.current?.cancel();
             if (ws_ref.current) {
                 try {
                     ws_ref.current.close();
@@ -125,15 +136,15 @@ const AiScanner = ({ open, onClose, onApply }) => {
                     // pick market with strongest recent skew
                     const ranked = Object.values(collected).sort((x, y) => y.best.freq - x.best.freq);
                     const top = ranked[0];
-                    setTimeout(() => {
-                        setResult(top);
-                        setPhase('done');
-                    }, 600);
                     try {
                         ws.close();
                     } catch {
                         /* noop */
                     }
+                    setTimeout(() => {
+                        setResult(top);
+                        autoFire(top);
+                    }, 600);
                 }
             }
         };
@@ -143,7 +154,67 @@ const AiScanner = ({ open, onClose, onApply }) => {
         };
     };
 
-    if (!open) return null;
+    // Auto-fire the batch on the chosen market + contract, then track settlement.
+    const autoFire = async top => {
+        if (!isLoggedIn || !api_base?.api) {
+            setPhase('done'); // fall back to showing the pick if not logged in
+            return;
+        }
+        unlockAudio();
+        setPhase('firing');
+        setFireLog([]);
+        const n = Math.max(1, Math.min(20, parseInt(count, 10) || 5));
+        const amount = Math.max(0.35, parseFloat(stake) || 0.5);
+        const ids = [];
+        for (let i = 0; i < n; i++) {
+            try {
+                const proposal_req = {
+                    proposal: 1,
+                    amount,
+                    basis: 'stake',
+                    contract_type: top.best.type,
+                    currency,
+                    duration: 1,
+                    duration_unit: 't',
+                    underlying_symbol: top.code,
+                    ...(top.best.barrier !== undefined ? { barrier: String(top.best.barrier) } : {}),
+                };
+                // eslint-disable-next-line no-await-in-loop
+                const prop = await api_base.api.send(proposal_req);
+                const pid = prop?.proposal?.id;
+                if (!pid) throw new Error('No proposal');
+                // eslint-disable-next-line no-await-in-loop
+                const res = await api_base.api.send({ buy: pid, price: Number(prop.proposal.ask_price) });
+                const cid = res?.buy?.contract_id;
+                if (cid) ids.push(cid);
+                setFireLog(p => [...p, `[BUY] #${i + 1} ${top.best.label} — ${currency} ${amount.toFixed(2)}`]);
+            } catch (e) {
+                setFireLog(p => [...p, `[FAIL] #${i + 1} — ${describeError(e)}`]);
+            }
+            // eslint-disable-next-line no-await-in-loop
+            await new Promise(r => setTimeout(r, 300));
+        }
+        if (!ids.length) {
+            setPhase('done');
+            return;
+        }
+        setPhase('settling');
+        setSettle({ settled: 0, total: ids.length });
+        track_ref.current = trackContracts(ids, {
+            onUpdate: ({ settled, total }) => setSettle({ settled, total }),
+            onDone: ({ total, wins, settled, count: c }) => {
+                setSettle(null);
+                if (total >= 0) playWin();
+                else playLoss();
+                setBatchResult({ total, wins, settled, count: c, market: top.label, side: top.best.label });
+                setPhase('done');
+                track_ref.current = null;
+            },
+        });
+    };
+
+    React.useEffect(() => () => track_ref.current?.cancel(), []);
+
 
     return (
         <div className='ai-scanner__overlay' role='dialog' aria-modal='true'>
@@ -184,37 +255,82 @@ const AiScanner = ({ open, onClose, onApply }) => {
                     ))}
                 </div>
 
-                {phase !== 'done' && (
+                {phase !== 'done' && phase !== 'firing' && phase !== 'settling' && (
                     <button className='ai-scanner__scan' disabled={phase === 'scanning'} onClick={scan}>
-                        {phase === 'scanning' ? 'Scanning live markets…' : '⚡ Scan for strongest market'}
+                        {phase === 'scanning' ? 'Scanning live markets…' : '⚡ Scan & auto-trade best market'}
                     </button>
                 )}
 
-                {phase === 'done' && result && (
+                {(phase === 'firing' || phase === 'settling') && result && (
+                    <div className='ai-scanner__firing'>
+                        <div className='ai-scanner__firing-head'>
+                            {phase === 'firing' ? 'Placing batch' : 'Settling'} — {result.best.label} on {result.label}
+                        </div>
+                        {fireLog.slice(-6).map((l, i) => (
+                            <div key={i} className='ai-scanner__log'>
+                                {l}
+                            </div>
+                        ))}
+                        {phase === 'settling' && settle && (
+                            <div className='ai-scanner__settle'>
+                                Settling contracts… {settle.settled}/{settle.total}
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {phase === 'done' && batchResult && (
+                    <div
+                        className={`ai-scanner__batch ${batchResult.total >= 0 ? 'ai-scanner__batch--win' : 'ai-scanner__batch--loss'}`}
+                    >
+                        <div className='ai-scanner__batch-tag'>Total profit</div>
+                        <div className='ai-scanner__batch-head'>
+                            Scanner batch {batchResult.total >= 0 ? 'won' : 'lost'}
+                        </div>
+                        <div className='ai-scanner__batch-amt'>
+                            {batchResult.total >= 0 ? '+' : ''}
+                            {batchResult.total.toFixed(2)}
+                        </div>
+                        <div className='ai-scanner__batch-grid'>
+                            <div>
+                                <span>Market</span>
+                                {result.label}
+                            </div>
+                            <div>
+                                <span>Contract</span>
+                                {batchResult.side}
+                            </div>
+                            <div>
+                                <span>Trades</span>
+                                {batchResult.settled}/{batchResult.count}
+                            </div>
+                            <div>
+                                <span>Wins</span>
+                                {batchResult.wins}
+                            </div>
+                        </div>
+                        <button className='ai-scanner__rescan' onClick={scan}>
+                            Scan again
+                        </button>
+                        <div className='ai-scanner__result-note'>
+                            Wide contracts (Over/Under) win often but pay small — recent skew, not a prediction.
+                        </div>
+                    </div>
+                )}
+
+                {phase === 'done' && !batchResult && result && (
                     <div className='ai-scanner__result'>
                         <div className='ai-scanner__result-tag'>Strongest recent skew</div>
                         <div className='ai-scanner__result-market'>{result.label}</div>
                         <div className='ai-scanner__result-side'>{result.best.label}</div>
                         <div className='ai-scanner__result-freq'>{result.best.freq.toFixed(1)}%</div>
                         <div className='ai-scanner__result-note'>
-                            of the last {WINDOW} ticks — recent history, not a prediction of the next tick.
+                            {isLoggedIn
+                                ? 'No trades placed. Tap Scan again to retry.'
+                                : 'Sign in with Deriv to let the scanner auto-trade.'}
                         </div>
-                        <button
-                            className='ai-scanner__apply'
-                            onClick={() => {
-                                onApply?.({
-                                    symbol: result.code,
-                                    contract_type: result.best.type,
-                                    barrier: result.best.barrier,
-                                    label: result.best.label,
-                                });
-                                onClose?.();
-                            }}
-                        >
-                            Load {result.best.label} on {result.label} →
-                        </button>
                         <button className='ai-scanner__rescan' onClick={scan}>
-                            Re-scan
+                            Scan again
                         </button>
                     </div>
                 )}
