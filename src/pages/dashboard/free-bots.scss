@@ -12,3 +12,14 @@
     &__run { margin-top: auto; border: 1px solid #d4af37; color: #1a1405; background: linear-gradient(135deg, #e9c860, #c9a227); font-weight: 700; border-radius: 8px; padding: 0.9rem; cursor: pointer; font-size: 1.3rem;
         &:hover { opacity: 0.9; } &:active { transform: scale(0.99); } }
 }
+
+.free-bots__badge--high {
+    background: rgba(239, 68, 68, 0.16);
+    color: #f87171;
+}
+.free-bots__head-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.6rem;
+}

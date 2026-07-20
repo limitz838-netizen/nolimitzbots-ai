@@ -7,6 +7,7 @@ import { isProduction, WS_SERVERS } from '@/components/shared/utils/config/confi
 import { playLoss, playWin, unlockAudio } from '@/components/shared/nlb/trade-sounds';
 import { trackContracts, describeError } from '@/components/shared/nlb/settlement';
 import AiScanner from './ai-scanner';
+import Guide, { GuideButton } from '@/components/shared/nlb/guide';
 import './bulk-trader.scss';
 
 const MARKETS = [
@@ -35,6 +36,10 @@ const BulkTrader = observer(() => {
     const [duration, setDuration] = React.useState(1);
     const [stake, setStake] = React.useState('0.5');
     const [count, setCount] = React.useState(5);
+    const [martingale, setMartingale] = React.useState(false);
+    const [mult, setMult] = React.useState('2.0');
+    const [next_stake, setNextStake] = React.useState(null); // martingale-adjusted stake for next batch
+    const mart_steps_ref = React.useRef(0);
 
     // live data
     const [digits, setDigits] = React.useState([]);
@@ -48,6 +53,7 @@ const BulkTrader = observer(() => {
     const [settling, setSettling] = React.useState(null); // {settled, total}
     const [result, setResult] = React.useState(null); // popup
     const [scanner_open, setScannerOpen] = React.useState(false);
+    const [guide_open, setGuideOpen] = React.useState(false);
 
     const ws_ref = React.useRef(null);
     const decimals_ref = React.useRef({ ...FALLBACK_DECIMALS });
@@ -224,6 +230,24 @@ const BulkTrader = observer(() => {
                 setSettling(null);
                 if (total >= 0) playWin();
                 else playLoss();
+                // Optional martingale: bump next batch stake after a losing batch.
+                if (martingale) {
+                    const base = parseFloat(stake) || 0.5;
+                    const m = Math.max(1, parseFloat(mult) || 1);
+                    if (total < 0) {
+                        mart_steps_ref.current += 1;
+                        if (mart_steps_ref.current > 7) {
+                            mart_steps_ref.current = 0;
+                            setNextStake(null);
+                        } else {
+                            const bumped = Math.min((next_stake ?? base) * m, base * 200);
+                            setNextStake(Number(bumped.toFixed(2)));
+                        }
+                    } else {
+                        mart_steps_ref.current = 0;
+                        setNextStake(null);
+                    }
+                }
                 setResult({
                     total,
                     wins,
@@ -242,7 +266,8 @@ const BulkTrader = observer(() => {
 
     // ---- fire a batch ----
     const fire = async side => {
-        if (!api_base?.api || is_busy || !is_logged_in || stake_num < 0.35) return;
+        const fire_stake = next_stake ?? stake_num;
+        if (!api_base?.api || is_busy || !is_logged_in || fire_stake < 0.35) return;
         unlockAudio();
         setIsBusy(true);
         setResult(null);
@@ -253,7 +278,7 @@ const BulkTrader = observer(() => {
             try {
                 const proposal_req = {
                     proposal: 1,
-                    amount: stake_num,
+                    amount: fire_stake,
                     basis: 'stake',
                     contract_type: side.contract_type,
                     currency,
@@ -265,13 +290,13 @@ const BulkTrader = observer(() => {
                 // eslint-disable-next-line no-await-in-loop
                 const prop = await api_base.api.send(proposal_req);
                 const proposal_id = prop?.proposal?.id;
-                const ask_price = Number(prop?.proposal?.ask_price ?? stake_num);
+                const ask_price = Number(prop?.proposal?.ask_price ?? fire_stake);
                 if (!proposal_id) throw new Error('No proposal returned');
                 // eslint-disable-next-line no-await-in-loop
                 const res = await api_base.api.send({ buy: proposal_id, price: ask_price });
                 const cid = res?.buy?.contract_id;
                 if (cid) ids.push(cid);
-                out.push({ ok: true, msg: `#${i + 1} bought — ${currency} ${Number(res?.buy?.buy_price ?? stake_num).toFixed(2)}` });
+                out.push({ ok: true, msg: `#${i + 1} bought — ${currency} ${Number(res?.buy?.buy_price ?? fire_stake).toFixed(2)}` });
             } catch (e) {
                 out.push({ ok: false, msg: `#${i + 1} failed — ${describeError(e)}` });
             }
@@ -286,7 +311,11 @@ const BulkTrader = observer(() => {
     return (
         <div className='bulk-trader'>
             <div className='bulk-trader__panel'>
-                <div className='bulk-trader__title'>Bulk Trader</div>
+                <div className='bulk-trader__titlerow'>
+                    <div className='bulk-trader__title'>Bulk Trader</div>
+                    <GuideButton onClick={() => setGuideOpen(true)} />
+                </div>
+                <Guide tool='bulk-trader' open={guide_open} onClose={() => setGuideOpen(false)} />
                 <div className='bulk-trader__subtitle'>
                     Fire multiple digit contracts in one tap. Test on your demo account first.
                 </div>
@@ -429,6 +458,32 @@ const BulkTrader = observer(() => {
                         />
                     </div>
                 </div>
+
+                <label className='bulk-trader__toggle'>
+                    <span>Enable Martingale (raise stake after a losing batch)</span>
+                    <input type='checkbox' checked={martingale} disabled={is_busy || !!settling} onChange={e => {
+                        setMartingale(e.target.checked);
+                        if (!e.target.checked) { setNextStake(null); mart_steps_ref.current = 0; }
+                    }} />
+                    <i />
+                </label>
+                {martingale && (
+                    <>
+                        <div className='bulk-trader__field bulk-trader__field--inline'>
+                            <span>Multiplier</span>
+                            <input type='number' min='1' max='5' step='0.05' value={mult} disabled={is_busy || !!settling} onChange={e => setMult(e.target.value)} />
+                        </div>
+                        {next_stake && (
+                            <div className='bulk-trader__mart-next'>
+                                Next batch stake: {currency} {next_stake.toFixed(2)} (recovering) · resets on a winning batch
+                            </div>
+                        )}
+                        <div className='bulk-trader__mart-warn'>
+                            After a losing batch the next batch's stake is multiplied to recover. Capped at 7 steps, then
+                            resets. Losing streaks grow stake fast — keep the multiplier low and test on demo.
+                        </div>
+                    </>
+                )}
 
                 <div className='bulk-trader__sides'>
                     {sides.map(side => {

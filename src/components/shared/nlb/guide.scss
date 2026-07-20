@@ -1,0 +1,119 @@
+.nlb-guide {
+    &__overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 9996;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 1.4rem;
+        background: rgba(4, 6, 12, 0.78);
+        backdrop-filter: blur(6px);
+    }
+
+    width: 100%;
+    max-width: 540px;
+    max-height: 88vh;
+    overflow-y: auto;
+    border-radius: 1.6rem;
+    padding: 1.8rem;
+    background: linear-gradient(165deg, #10162a 0%, #0b0f1a 100%);
+    border: 1px solid rgba(212, 175, 55, 0.35);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+
+    &__bar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 1rem;
+    }
+    &__title {
+        color: #e8cf7a;
+        font-size: 1.8rem;
+        font-weight: 800;
+    }
+    &__close {
+        width: 3.2rem;
+        height: 3.2rem;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        border-radius: 0.8rem;
+        background: rgba(255, 255, 255, 0.06);
+        color: #f2f4f8;
+        font-size: 1.4rem;
+        cursor: pointer;
+    }
+    &__intro {
+        color: #d9dce4;
+        font-size: 1.4rem;
+        line-height: 1.6;
+        margin-bottom: 1.4rem;
+    }
+    &__section {
+        margin-bottom: 1.2rem;
+        padding-left: 1rem;
+        border-left: 2px solid rgba(212, 175, 55, 0.4);
+    }
+    &__h {
+        color: #f5f1e6;
+        font-size: 1.35rem;
+        font-weight: 700;
+        margin-bottom: 0.3rem;
+    }
+    &__p {
+        color: #9aa1b0;
+        font-size: 1.25rem;
+        line-height: 1.6;
+    }
+    &__foot {
+        margin-top: 1.4rem;
+        padding: 1rem;
+        border-radius: 0.9rem;
+        background: rgba(239, 68, 68, 0.08);
+        border: 1px solid rgba(239, 68, 68, 0.25);
+        color: #fca5a5;
+        font-size: 1.15rem;
+        line-height: 1.5;
+    }
+    &__done {
+        width: 100%;
+        margin-top: 1.2rem;
+        padding: 1.2rem;
+        border: none;
+        border-radius: 1.1rem;
+        background: linear-gradient(135deg, #e8cf7a, #d4af37);
+        color: #141004;
+        font-weight: 800;
+        font-size: 1.35rem;
+        cursor: pointer;
+    }
+}
+
+.nlb-guide-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1.1rem;
+    border-radius: 999px;
+    border: 1px solid rgba(212, 175, 55, 0.5);
+    background: rgba(212, 175, 55, 0.1);
+    color: #e8cf7a;
+    font-size: 1.15rem;
+    font-weight: 600;
+    cursor: pointer;
+
+    &__i {
+        display: inline-grid;
+        place-items: center;
+        width: 1.7rem;
+        height: 1.7rem;
+        border-radius: 50%;
+        background: #d4af37;
+        color: #141004;
+        font-weight: 800;
+        font-size: 1.05rem;
+    }
+
+    &:hover {
+        background: rgba(212, 175, 55, 0.18);
+    }
+}

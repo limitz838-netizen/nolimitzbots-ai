@@ -6,6 +6,7 @@ import { useStore } from '@/hooks/useStore';
 import { isProduction, WS_SERVERS } from '@/components/shared/utils/config/config';
 import { playLoss, playWin, unlockAudio } from '@/components/shared/nlb/trade-sounds';
 import { trackContracts, describeError } from '@/components/shared/nlb/settlement';
+import Guide, { GuideButton } from '@/components/shared/nlb/guide';
 import './ai-software.scss';
 
 const MARKETS = [
@@ -25,6 +26,27 @@ const FALLBACK_DECIMALS = {
 
 // Trigger robots: watch the digit stream, enter when the pattern appears.
 const ROBOTS = [
+    {
+        id: 'smart',
+        name: 'Smart Selective',
+        accent: 'gold',
+        trigger_text: 'Trades selectively — only enters Over 1 after low digits cluster, sits out otherwise',
+        setup: 'Adaptive Over 1',
+        contract_type: 'DIGITOVER',
+        barrier: 1,
+        smart: true,
+        // Enter only when the recent window shows an unusually low share of digits 0-1,
+        // i.e. a "cluster" just passed and the high-digit regime is likely continuing.
+        // This is selectivity (trade less, avoid weak spots), NOT prediction.
+        trigger: d => {
+            if (d.length < 10) return false;
+            const window = d.slice(-10);
+            const lowCount = window.filter(x => x <= 1).length;
+            const last = d[d.length - 1];
+            // Only act right after a low digit prints, when lows have been rare in the window.
+            return last <= 1 && lowCount <= 2;
+        },
+    },
     {
         id: 'over1',
         name: 'Over 1',
@@ -96,10 +118,13 @@ const AiSoftware = observer(() => {
     const [stake, setStake] = React.useState('0.5');
     const [tp, setTp] = React.useState('10');
     const [sl, setSl] = React.useState('50');
+    const [martingale, setMartingale] = React.useState(false);
+    const [mult, setMult] = React.useState('2.0');
     const [active_id, setActiveId] = React.useState(null);
     const [stats, setStats] = React.useState({ pnl: 0, trades: 0, wins: 0, losses: 0, last_digit: null });
     const [logs, setLogs] = React.useState([]);
     const [result, setResult] = React.useState(null);
+    const [guide_open, setGuideOpen] = React.useState(false);
 
     const run_ref = React.useRef(null);
     const settle_handles_ref = React.useRef(new Set());
@@ -200,10 +225,31 @@ const AiSoftware = observer(() => {
     const onDigit = async () => {
         const r = run_ref.current;
         if (!r || !r.active || r.in_trade) return;
-        if (!r.robot.trigger(digits_ref.current)) return;
+
+        // Self-aware risk: after 3 consecutive losses, a Smart bot backs off for a
+        // few ticks to break the streak rhythm (survival management, not prediction).
+        if (r.robot.smart && r.loss_streak >= 3) {
+            r.cooldown = (r.cooldown ?? 0) + 1;
+            if (r.cooldown <= 4) {
+                return; // sit out this tick
+            }
+            r.cooldown = 0;
+            r.loss_streak = 0;
+            log('↺ backing off streak — resuming');
+        }
+
+        if (!r.robot.trigger(digits_ref.current)) {
+            // Smart bot narrates why it's waiting (throttled to avoid log spam).
+            if (r.robot.smart) {
+                r.skip_count = (r.skip_count ?? 0) + 1;
+                if (r.skip_count % 15 === 0) log('… waiting for setup (filter not met)');
+            }
+            return;
+        }
+        if (r.robot.smart) log('✓ setup found — entering');
         r.in_trade = true;
         try {
-            const amount = r.stake;
+            const amount = Number((r.cur_stake ?? r.stake).toFixed(2));
             const prop = await api_base.api.send({
                 proposal: 1,
                 amount,
@@ -223,8 +269,25 @@ const AiSoftware = observer(() => {
             if (profit !== null) {
                 r.trades += 1;
                 r.pnl += profit;
-                if (profit > 0) r.wins += 1;
-                else r.losses += 1;
+                if (profit > 0) {
+                    r.wins += 1;
+                    r.loss_streak = 0;
+                    r.steps = 0;
+                    r.cur_stake = r.stake; // reset after a win
+                } else {
+                    r.losses += 1;
+                    r.loss_streak = (r.loss_streak ?? 0) + 1;
+                    if (r.martingale) {
+                        r.steps += 1;
+                        if (r.steps > 7) {
+                            log('⚠ Martingale cap reached — resetting stake');
+                            r.steps = 0;
+                            r.cur_stake = r.stake;
+                        } else {
+                            r.cur_stake = Math.min(r.cur_stake * r.mult, r.stake * 200);
+                        }
+                    }
+                }
                 log(`${profit > 0 ? '✔' : '✘'} ${profit > 0 ? '+' : ''}${profit.toFixed(2)} — P/L ${r.pnl.toFixed(2)}`);
                 setStats(prev => ({ ...prev, pnl: r.pnl, trades: r.trades, wins: r.wins, losses: r.losses }));
                 if (r.tp > 0 && r.pnl >= r.tp) {
@@ -263,6 +326,10 @@ const AiSoftware = observer(() => {
             in_trade: false,
             robot,
             stake: Math.max(0.35, parseFloat(stake) || 0.5),
+            cur_stake: Math.max(0.35, parseFloat(stake) || 0.5),
+            martingale,
+            mult: Math.max(1, parseFloat(mult) || 1),
+            steps: 0,
             tp: parseFloat(tp) || 0,
             sl: parseFloat(sl) || 0,
             pnl: 0,
@@ -279,7 +346,11 @@ const AiSoftware = observer(() => {
     return (
         <div className='ai-software'>
             <div className='ai-software__panel'>
-                <div className='ai-software__title'>AI Software</div>
+                <div className='ai-software__titlerow'>
+                    <div className='ai-software__title'>AI Software</div>
+                    <GuideButton onClick={() => setGuideOpen(true)} />
+                </div>
+                <Guide tool='ai-software' open={guide_open} onClose={() => setGuideOpen(false)} />
                 <div className='ai-software__subtitle'>
                     Pattern robots that watch the digit stream and enter automatically when their setup appears.
                 </div>
@@ -317,6 +388,24 @@ const AiSoftware = observer(() => {
                         <input type='number' min='0' step='1' value={sl} disabled={!!active_id} onChange={e => setSl(e.target.value)} />
                     </div>
                 </div>
+
+                <label className='ai-software__toggle'>
+                    <span>Enable Martingale (recover losses — higher risk)</span>
+                    <input type='checkbox' checked={martingale} disabled={!!active_id} onChange={e => setMartingale(e.target.checked)} />
+                    <i />
+                </label>
+                {martingale && (
+                    <>
+                        <div className='ai-software__field ai-software__field--inline'>
+                            <span>Martingale multiplier</span>
+                            <input type='number' min='1' max='5' step='0.05' value={mult} disabled={!!active_id} onChange={e => setMult(e.target.value)} />
+                        </div>
+                        <div className='ai-software__mart-warn'>
+                            Martingale raises stake after each loss to recover it. Capped at 7 steps, then resets. A long
+                            losing streak grows the stake fast — keep the multiplier low and test on demo.
+                        </div>
+                    </>
+                )}
 
                 <div className='ai-software__status'>
                     <div>

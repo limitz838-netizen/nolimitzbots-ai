@@ -4,6 +4,7 @@ import { observer } from 'mobx-react-lite';
 import Text from '@/components/shared_ui/text';
 import { DBOT_TABS } from '@/constants/bot-contents';
 import { useStore } from '@/hooks/useStore';
+import Guide, { GuideButton } from '@/components/shared/nlb/guide';
 import './free-bots.scss';
 
 const S = (tradetype, purchase, prediction) => `<xml xmlns="http://www.w3.org/1999/xhtml" collection="false" is_dbot="true">
@@ -72,16 +73,22 @@ const S = (tradetype, purchase, prediction) => `<xml xmlns="http://www.w3.org/19
 </xml>`;
 
 export const FREE_BOTS = [
-    { id: 'nlb-even-flow', name: 'Even Flow', risk: 'LOW', desc: 'Trades Even on every tick with a fixed stake. Simple, steady digit rhythm on Volatility 100.', xml: S('evenodd', 'DIGITEVEN', null) },
-    { id: 'nlb-odd-rush', name: 'Odd Rush', risk: 'LOW', desc: 'Trades Odd continuously with a fixed stake — the mirror of Even Flow.', xml: S('evenodd', 'DIGITODD', null) },
-    { id: 'nlb-over-2', name: 'Over 2 Steady', risk: 'MEDIUM', desc: 'Wins when the last digit is 3-9. High win-rate profile with smaller payouts. Fixed stake.', xml: S('overunder', 'DIGITOVER', 2) },
+    { id: 'nlb-over-1', name: 'Over 1 Shield', risk: 'LOW', desc: 'Wins whenever the last digit is 2-9 — a high hit-rate, small-payout play. Wins often, but losses are larger, so it is not guaranteed profit. Fixed stake.', xml: S('overunder', 'DIGITOVER', 1) },
+    { id: 'nlb-under-8', name: 'Under 8 Shield', risk: 'LOW', desc: 'Wins whenever the last digit is 0-7 — mirror of Over 1 Shield. High hit-rate, small payout, larger occasional losses. Fixed stake.', xml: S('overunder', 'DIGITUNDER', 8) },
+    { id: 'nlb-even-flow', name: 'Even Flow', risk: 'MEDIUM', desc: 'Trades Even every tick with a fixed stake. Close to 50/50 with a bigger payout and bigger swings than the Shield bots.', xml: S('evenodd', 'DIGITEVEN', null) },
+    { id: 'nlb-odd-rush', name: 'Odd Rush', risk: 'MEDIUM', desc: 'Trades Odd continuously with a fixed stake — the mirror of Even Flow.', xml: S('evenodd', 'DIGITODD', null) },
+    { id: 'nlb-over-2', name: 'Over 2 Steady', risk: 'MEDIUM', desc: 'Wins when the last digit is 3-9. Balanced win-rate and payout. Fixed stake.', xml: S('overunder', 'DIGITOVER', 2) },
     { id: 'nlb-under-7', name: 'Under 7 Guard', risk: 'MEDIUM', desc: 'Wins when the last digit is 0-6. Defensive digit play with a fixed stake.', xml: S('overunder', 'DIGITUNDER', 7) },
+    { id: 'nlb-over-4', name: 'Over 4 Bold', risk: 'HIGH', desc: 'Wins only when the last digit is 5-9 — roughly a coin flip with a larger payout. Higher risk, bigger swings. Fixed stake.', xml: S('overunder', 'DIGITOVER', 4) },
+    { id: 'nlb-under-5', name: 'Under 5 Bold', risk: 'HIGH', desc: 'Wins only when the last digit is 0-4 — mirror of Over 4 Bold. Larger payout, lower win rate. Fixed stake.', xml: S('overunder', 'DIGITUNDER', 5) },
+    { id: 'nlb-over-7', name: 'Over 7 Payout', risk: 'HIGH', desc: 'Wins only when the last digit is 8 or 9 — rare, but a large payout when it lands. Expect long losing stretches. High risk, fixed stake.', xml: S('overunder', 'DIGITOVER', 7) },
 ];
 
 const FreeBots = observer(() => {
     const { dashboard, load_modal } = useStore();
     const { setActiveTab } = dashboard;
     const { loadStrategyToBuilder } = load_modal;
+    const [guide_open, setGuideOpen] = React.useState(false);
 
     const runBot = async bot => {
         await loadStrategyToBuilder({ id: bot.id, name: bot.name, save_type: 'unsaved', xml: bot.xml }, false);
@@ -90,10 +97,14 @@ const FreeBots = observer(() => {
 
     return (
         <div className='free-bots' id='free-bots-section'>
-            <Text weight='bold' size='m' className='free-bots__title'>Free Bots</Text>
+            <div className='free-bots__head-row'>
+                <Text weight='bold' size='m' className='free-bots__title'>Free Bots</Text>
+                <GuideButton onClick={() => setGuideOpen(true)} />
+            </div>
             <Text size='xs' color='less-prominent'>
                 NolimitzBots starter strategies — fixed stake, no martingale. Tap a bot to load it into the builder, review the stake, then press Run.
             </Text>
+            <Guide tool='free-bots' open={guide_open} onClose={() => setGuideOpen(false)} />
             <div className='free-bots__grid'>
                 {FREE_BOTS.map(bot => (
                     <div key={bot.id} className='free-bots__card'>

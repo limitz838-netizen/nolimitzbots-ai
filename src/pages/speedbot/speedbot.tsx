@@ -6,6 +6,7 @@ import { useStore } from '@/hooks/useStore';
 import { isProduction, WS_SERVERS } from '@/components/shared/utils/config/config';
 import { playLoss, playWin, unlockAudio } from '@/components/shared/nlb/trade-sounds';
 import { trackContracts, describeError } from '@/components/shared/nlb/settlement';
+import Guide, { GuideButton } from '@/components/shared/nlb/guide';
 import './speedbot.scss';
 
 const MARKETS = [
@@ -58,6 +59,7 @@ const Speedbot = observer(() => {
     const [logs, setLogs] = React.useState([]);
     const [result, setResult] = React.useState(null);
     const [quote, setQuote] = React.useState(null);
+    const [guide_open, setGuideOpen] = React.useState(false);
 
     const run_ref = React.useRef(null);
     const settle_handles_ref = React.useRef(new Set());
@@ -281,7 +283,11 @@ const Speedbot = observer(() => {
     return (
         <div className='speedbot'>
             <div className='speedbot__panel'>
-                <div className='speedbot__title'>Speedbot</div>
+                <div className='speedbot__titlerow'>
+                    <div className='speedbot__title'>Speedbot</div>
+                    <GuideButton onClick={() => setGuideOpen(true)} />
+                </div>
+                <Guide tool='speedbot' open={guide_open} onClose={() => setGuideOpen(false)} />
                 <div className='speedbot__subtitle'>Execute a trade on every cycle with TP/SL protection. Demo first.</div>
 
                 {!is_logged_in && <div className='speedbot__warn'>Sign in with your Deriv account to run Speedbot.</div>}
