@@ -110,7 +110,7 @@ const ROBOTS = [
 ];
 
 const AiSoftware = observer(() => {
-    const { client } = useStore();
+    const { client, run_panel } = useStore();
     const is_logged_in = !!client?.is_logged_in;
     const currency = client?.currency || 'USD';
 
@@ -214,6 +214,7 @@ const AiSoftware = observer(() => {
         if (run_ref.current) run_ref.current.active = false;
         run_ref.current = null;
         setActiveId(null);
+        try { run_panel?.setIsRunning?.(false); } catch { /* noop */ }
         if (reason && r) {
             if (r.pnl >= 0) playWin();
             else playLoss();
@@ -340,6 +341,7 @@ const AiSoftware = observer(() => {
         run_ref.current = r;
         setStats({ pnl: 0, trades: 0, wins: 0, losses: 0, last_digit: stats.last_digit });
         setActiveId(robot.id);
+        try { run_panel?.setIsRunning?.(true); } catch { /* noop */ }
         log(`${robot.name} armed on ${symbol} — ${robot.trigger_text}`);
     };
 

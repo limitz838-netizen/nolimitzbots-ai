@@ -1,7 +1,19 @@
 // @ts-nocheck — shared settlement utility for NolimitzBots trading tools.
 // One robust implementation so Bulk Trader, Speedbot and AI Software all
 // settle contracts the same reliable way: dedupe, poll fallback, clean teardown.
+// It also feeds the run panel (Transactions / Summary / Journal) by emitting
+// 'bot.contract' events for every contract update, exactly like the bot engine.
 import { api_base } from '@/external/bot-skeleton';
+import { observer as globalObserver } from '@/external/bot-skeleton/utils/observer';
+
+// Report a contract update into the run panel so Transactions/Summary/Journal fill.
+export const reportContract = poc => {
+    try {
+        if (poc) globalObserver.emit('bot.contract', poc);
+    } catch {
+        /* noop */
+    }
+};
 
 // Human-readable reason for a Deriv API error.
 export const describeError = e => {
@@ -59,7 +71,10 @@ export const trackContracts = (contract_ids, { onUpdate, onDone, timeoutMs = 120
     };
 
     const record = contract => {
-        if (!contract || !contract.is_sold) return;
+        if (!contract) return;
+        // Feed the run panel on every update (open + sold) so it shows live.
+        reportContract(contract);
+        if (!contract.is_sold) return;
         const id = contract.contract_id;
         if (!pending.has(id)) return; // dedupe: already recorded
         pending.delete(id);

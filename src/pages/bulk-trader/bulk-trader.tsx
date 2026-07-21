@@ -23,7 +23,7 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const lastDigit = (quote, decimals) => Number(Number(quote).toFixed(decimals).slice(-1));
 
 const BulkTrader = observer(() => {
-    const { client } = useStore();
+    const { client, run_panel } = useStore();
     const is_logged_in = !!client?.is_logged_in;
     const currency = client?.currency || 'USD';
 
@@ -213,6 +213,7 @@ const BulkTrader = observer(() => {
             onUpdate: ({ settled, total }) => setSettling({ settled, total }),
             onDone: ({ total, wins, settled, count }) => {
                 setSettling(null);
+                try { run_panel?.setIsRunning?.(false); } catch { /* noop */ }
                 if (total >= 0) playWin();
                 else playLoss();
                 // Optional martingale: bump next batch stake after a losing batch.
@@ -254,6 +255,7 @@ const BulkTrader = observer(() => {
         const fire_stake = next_stake ?? stake_num;
         if (!api_base?.api || is_busy || !is_logged_in || fire_stake < 0.35) return;
         unlockAudio();
+        try { run_panel?.setIsRunning?.(true); } catch { /* noop */ }
         setIsBusy(true);
         setResult(null);
         setReceipts([]);

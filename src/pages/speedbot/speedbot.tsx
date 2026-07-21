@@ -39,7 +39,7 @@ const MAX_MARTINGALE_STEPS = 7;
 const opposite = t => ({ DIGITEVEN: 'DIGITODD', DIGITODD: 'DIGITEVEN', DIGITOVER: 'DIGITUNDER', DIGITUNDER: 'DIGITOVER' })[t];
 
 const Speedbot = observer(() => {
-    const { client } = useStore();
+    const { client, run_panel } = useStore();
     const is_logged_in = !!client?.is_logged_in;
     const currency = client?.currency || 'USD';
 
@@ -173,6 +173,7 @@ const Speedbot = observer(() => {
         if (run_ref.current) run_ref.current.active = false;
         run_ref.current = null;
         setRunning(false);
+        try { run_panel?.setIsRunning?.(false); } catch { /* noop */ }
         if (reason) {
             const won = final_pnl >= 0;
             if (won) playWin();
@@ -235,6 +236,7 @@ const Speedbot = observer(() => {
         };
         run_ref.current = r;
         setRunning(true);
+        try { run_panel?.setIsRunning?.(true); } catch { /* noop */ }
         log(`Started — ${r.cur_type.label} on ${symbol}, stake ${base_stake.toFixed(2)}`);
 
         const checkStop = () => {
