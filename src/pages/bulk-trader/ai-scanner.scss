@@ -322,3 +322,53 @@
     from { opacity: 0; transform: scale(0.9) translateY(10px); }
     to { opacity: 1; transform: scale(1) translateY(0); }
 }
+
+// ===== trap-scanner additions =====
+.ai-scanner {
+    &__mkt--hit {
+        border-color: #16f08a;
+        box-shadow: 0 0 14px rgba(22, 240, 138, 0.35);
+    }
+    &__mkt--match {
+        background: rgba(22, 240, 138, 0.14);
+        border-color: #16f08a;
+    }
+    &__log--ok {
+        color: #16f08a;
+        font-weight: 700;
+    }
+    &__log--warn {
+        color: #fbbf24;
+    }
+    &__statusbar {
+        margin-bottom: 1.1rem;
+        padding: 0.9rem 1rem;
+        border-radius: 0.9rem;
+        border: 1px solid #16f08a44;
+        background: #04150c;
+    }
+    &__statusbar-tag {
+        display: block;
+        color: #16f08a;
+        font-size: 1rem;
+        letter-spacing: 0.14em;
+        margin-bottom: 0.25rem;
+    }
+    &__statusbar-text {
+        color: #d1fae5;
+        font-size: 1.2rem;
+        font-weight: 600;
+    }
+    &__scan--stop {
+        background: linear-gradient(135deg, #fca5a5, #ef4444);
+        color: #1a0606;
+    }
+    &__foot-note {
+        margin-top: 1rem;
+        color: #7f9e8d;
+        font-size: 1rem;
+        line-height: 1.5;
+        text-align: center;
+        em { color: #a7d3bf; font-style: normal; font-weight: 700; }
+    }
+}
