@@ -28,10 +28,10 @@ const FALLBACK_DECIMALS = {
 const ROBOTS = [
     {
         id: 'smart',
-        name: 'Smart Selective',
+        name: 'Sentinel ⭐',
         accent: 'gold',
-        trigger_text: 'Trades selectively — only enters Over 1 after low digits cluster, sits out otherwise',
-        setup: 'Adaptive Over 1',
+        trigger_text: 'Flagship risk-managed bot — enters Over 1 selectively, walks away after losing streaks, and stops itself at your take-profit or stop-loss',
+        setup: 'Sentinel · Over 1',
         contract_type: 'DIGITOVER',
         barrier: 1,
         smart: true,
@@ -229,14 +229,21 @@ const AiSoftware = observer(() => {
 
         // Self-aware risk: after 3 consecutive losses, a Smart bot backs off for a
         // few ticks to break the streak rhythm (survival management, not prediction).
+        // Sentinel survival logic: after a severe losing streak (5), stop the whole
+        // session and walk away — the single most important discipline in a losing game.
+        if (r.robot.smart && r.loss_streak >= 5) {
+            log('🛡 Sentinel: 5-loss streak — walking away to protect balance');
+            stopRun('Sentinel stopped — streak protection', r);
+            return;
+        }
+        // After 3 losses, cool off for a few ticks to break the rhythm.
         if (r.robot.smart && r.loss_streak >= 3) {
             r.cooldown = (r.cooldown ?? 0) + 1;
             if (r.cooldown <= 4) {
                 return; // sit out this tick
             }
             r.cooldown = 0;
-            r.loss_streak = 0;
-            log('↺ backing off streak — resuming');
+            log('↺ Sentinel: resuming after cool-off');
         }
 
         if (!r.robot.trigger(digits_ref.current)) {
