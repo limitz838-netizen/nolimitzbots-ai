@@ -38,9 +38,6 @@ import {
     LabelPairedGridCaptionBoldIcon,
     LabelPairedStopwatchCaptionBoldIcon,
     LabelPairedCircleStarCaptionBoldIcon,
-    LabelPairedGridCaptionBoldIcon,
-    LabelPairedStopwatchCaptionBoldIcon,
-    LabelPairedCircleStarCaptionBoldIcon,
 } from '@deriv/quill-icons/LabelPaired';
 import { LegacyGuide1pxIcon } from '@deriv/quill-icons/Legacy';
 import { Localize, localize } from '@deriv-com/translations';
@@ -51,9 +48,8 @@ import Speedbot from '../speedbot/speedbot';
 import AiSoftware from '../ai-software/ai-software';
 import FreeBots from '../dashboard/free-bots';
 import RiskDisclaimer from '../../components/risk-disclaimer/risk-disclaimer';
+import MatchesPro from '../matches-pro/matches-pro';
 import './nlb-app-theme.scss';
-import FreeBots from '../dashboard/free-bots';
-import RiskDisclaimer from '../../components/risk-disclaimer/risk-disclaimer';
 import ChartModal from '../chart/chart-modal';
 import Dashboard from '../dashboard';
 import RunStrategy from '../dashboard/run-strategy';
@@ -93,7 +89,7 @@ const AppWrapper = observer(() => {
     const { clear } = summary_card;
     const { DASHBOARD, BOT_BUILDER } = DBOT_TABS;
     const init_render = React.useRef(true);
-    const hash = ['dashboard', 'bot_builder', 'free_bots', 'bulk_trader', 'speedbot', 'ai_software', 'chart', 'tutorial'];
+    const hash = ['dashboard', 'bot_builder', 'free_bots', 'bulk_trader', 'speedbot', 'ai_software', 'matches_pro', 'chart', 'tutorial'];
     const { isDesktop } = useDevice();
     const location = useLocation();
     const navigate = useNavigate();
@@ -482,6 +478,21 @@ const AppWrapper = observer(() => {
                                 id='id-ai-software'
                             >
                                 <AiSoftware />
+                            </div>
+                            <div
+                                label={
+                                    <>
+                                        <LabelPairedGridCaptionBoldIcon
+                                            height='24px'
+                                            width='24px'
+                                            fill='var(--text-general)'
+                                        />
+                                        <Localize i18n_default_text='Matches Pro' />
+                                    </>
+                                }
+                                id='id-matches-pro'
+                            >
+                                <MatchesPro />
                             </div>
                             <div
                                 label={
