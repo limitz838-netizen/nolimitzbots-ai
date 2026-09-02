@@ -401,6 +401,104 @@
         color: #e8cf7a;
     }
 
+    &__locks {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+        margin-bottom: 1.2rem;
+    }
+
+    &__lock {
+        padding: 0.4rem 0.9rem;
+        border-radius: 999px;
+        font-size: 1.1rem;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.04);
+
+        &.ok { color: #34d399; border-color: rgba(52, 211, 153, 0.4); }
+        &.bad { color: #f87171; border-color: rgba(248, 113, 113, 0.4); }
+    }
+
+    &__limits {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0.9rem;
+        margin-bottom: 1.4rem;
+
+        @media (max-width: 600px) {
+            grid-template-columns: repeat(2, 1fr);
+        }
+    }
+
+    &__trade-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 1rem;
+        margin-bottom: 1.4rem;
+    }
+
+    &__auto {
+        flex: 0 0 auto;
+        padding: 1rem 1.8rem;
+        border-radius: 1rem;
+        border: 1px solid rgba(212, 175, 55, 0.5);
+        background: linear-gradient(180deg, rgba(212, 175, 55, 0.25), rgba(212, 175, 55, 0.12));
+        color: #e8cf7a;
+        font-size: 1.3rem;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        cursor: pointer;
+
+        &.on {
+            border-color: rgba(248, 113, 113, 0.6);
+            background: linear-gradient(180deg, rgba(248, 113, 113, 0.25), rgba(248, 113, 113, 0.12));
+            color: #fca5a5;
+        }
+
+        &:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+    }
+
+    &__gate {
+        flex: 1 1 200px;
+        color: #9aa1b0;
+        font-size: 1.15rem;
+        line-height: 1.45;
+
+        &.ok { color: #34d399; }
+    }
+
+    &__trades {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+        font-family: monospace;
+        font-size: 1.1rem;
+        margin-top: 1rem;
+    }
+
+    &__trade-row {
+        display: grid;
+        grid-template-columns: 1.4fr 0.6fr 1fr 1fr 1fr;
+        gap: 0.6rem;
+        padding: 0.45rem 0.8rem;
+        border-radius: 0.6rem;
+        background: rgba(255, 255, 255, 0.03);
+        color: #9aa1b0;
+
+        &.head { color: #6b7280; background: none; }
+        &.win { color: #34d399; background: rgba(52, 211, 153, 0.08); }
+        &.loss { color: #8b93a3; }
+
+        span:not(:first-child) { text-align: right; }
+    }
+
+    &__stat strong.pos { color: #34d399; }
+    &__stat strong.neg { color: #f87171; }
+
     &__note {
         margin-top: 1.8rem;
         padding: 1rem;
