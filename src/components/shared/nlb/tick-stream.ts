@@ -32,6 +32,15 @@ const decimals = {}; // symbol -> decimal places, learned from active_symbols pi
 const stream_ids = {}; // symbol -> Deriv subscription id
 let symbols_cache = [];
 
+// Diagnostics - surfaced in the UI so a stalled stream is diagnosable at a
+// glance instead of guessed at.
+const diag = { messages: 0, last_msg_type: '-', last_error: '', symbols_seen: 0, pip_source: '-' };
+export const getDiagnostics = () => ({
+    ...diag,
+    ready_state: ws ? ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][ws.readyState] : 'NONE',
+    known_decimals: Object.keys(decimals).length,
+});
+
 // ---------------------------------------------------------------- helpers
 
 // Last digit at the symbol's real precision. 1234.5 with 3 decimals is
@@ -107,26 +116,38 @@ const handleMessage = raw => {
     }
 
     // Learn precision for every symbol before we interpret any digit.
+    diag.messages += 1;
+    if (data.msg_type) diag.last_msg_type = data.msg_type;
+
     if (data.msg_type === 'active_symbols' && Array.isArray(data.active_symbols)) {
         symbols_cache = data.active_symbols
             .filter(s => /volatility/i.test(s.display_name || '') || /^(R_|1HZ)/.test(s.symbol || s.underlying_symbol || ''))
             .map(s => ({
                 code: s.symbol || s.underlying_symbol,
-                label: s.display_name,
+                label: s.display_name || s.name || s.symbol || s.underlying_symbol,
                 open: s.exchange_is_open !== 0,
             }))
             .filter(s => s.code);
         data.active_symbols.forEach(s => {
             const code = s.symbol || s.underlying_symbol;
-            if (code && typeof s.pip === 'number') {
+            if (!code) return;
+            // Field naming differs between Deriv gateways: pip is a fractional
+            // value (0.01 -> 2 places), pip_size is already a place count.
+            if (typeof s.pip_size === 'number') {
+                decimals[code] = s.pip_size;
+                diag.pip_source = 'active_symbols.pip_size';
+            } else if (typeof s.pip === 'number') {
                 decimals[code] = `${s.pip}`.split('.')[1]?.length ?? 0;
+                diag.pip_source = 'active_symbols.pip';
             }
         });
+        diag.symbols_seen = data.active_symbols.length;
         subscribers.forEach(s => s.onSymbols?.(symbols_cache));
         return;
     }
 
     if (data.error) {
+        diag.last_error = `${data.error.code || 'error'}: ${data.error.message || 'Deriv API error'}`;
         subscribers.forEach(s => s.onError?.(data.error.message || 'Deriv API error', data.error.code));
         return;
     }
@@ -134,8 +155,17 @@ const handleMessage = raw => {
     if (data.msg_type === 'history' && data.echo_req?.ticks_history) {
         const symbol = data.echo_req.ticks_history;
         if (data.subscription?.id) stream_ids[symbol] = data.subscription.id;
+        // pip_size ships with the response and is authoritative. Prefer it over
+        // anything learned from the symbol list.
+        if (typeof data.pip_size === 'number') {
+            decimals[symbol] = data.pip_size;
+            diag.pip_source = 'history.pip_size';
+        }
         const dec = decimals[symbol];
-        if (dec === undefined) return; // wait for active_symbols rather than guess
+        if (dec === undefined) {
+            diag.last_error = 'no precision for ' + symbol;
+            return;
+        }
         const prices = data.history?.prices || [];
         const digits = prices.map(p => lastDigitOf(p, dec));
         subscribers.forEach(s => {
@@ -154,8 +184,15 @@ const handleMessage = raw => {
     if (data.msg_type === 'tick' && data.tick) {
         const symbol = data.tick.symbol || data.tick.underlying_symbol;
         if (data.subscription?.id) stream_ids[symbol] = data.subscription.id;
+        if (typeof data.tick.pip_size === 'number') {
+            decimals[symbol] = data.tick.pip_size;
+            diag.pip_source = 'tick.pip_size';
+        }
         const dec = decimals[symbol];
-        if (dec === undefined || data.tick.quote === undefined) return;
+        if (dec === undefined || data.tick.quote === undefined) {
+            if (dec === undefined) diag.last_error = 'no precision for ' + symbol;
+            return;
+        }
         const digit = lastDigitOf(data.tick.quote, dec);
         if (!Number.isFinite(digit)) return; // malformed tick - drop it
         subscribers.forEach(s => {

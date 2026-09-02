@@ -3,7 +3,7 @@
 // This phase deliberately contains NO prediction and NO trading.
 // It proves the tick pipeline is correct before anything can place an order.
 import React from 'react';
-import { subscribeTicks, TICK_STATUS } from '@/components/shared/nlb/tick-stream';
+import { subscribeTicks, TICK_STATUS, getDiagnostics } from '@/components/shared/nlb/tick-stream';
 import './matches-pro.scss';
 
 const DEFAULT_SYMBOLS = [
@@ -38,6 +38,7 @@ const MatchesPro = () => {
     const [digits, setDigits] = React.useState([]);
     const [window_size, setWindowSize] = React.useState(100);
     const [error, setError] = React.useState('');
+    const [diag, setDiag] = React.useState(null);
 
     React.useEffect(() => {
         setDigits([]);
@@ -50,7 +51,14 @@ const MatchesPro = () => {
             onStatus: setStatus,
             onError: message => setError(message),
             onSymbols: list => {
-                if (list?.length) setSymbols(list.map(s => ({ code: s.code, label: s.label || s.code })));
+                if (!list?.length) return;
+                const known = Object.fromEntries(DEFAULT_SYMBOLS.map(s => [s.code, s.label]));
+                setSymbols(
+                    list.map(s => ({
+                        code: s.code,
+                        label: s.label && s.label !== s.code ? s.label : known[s.code] || s.code,
+                    }))
+                );
             },
             onHistory: ({ digits: d, quote: q, decimals: dec }) => {
                 setDigits(d);
@@ -66,6 +74,11 @@ const MatchesPro = () => {
 
         return unsubscribe;
     }, [symbol]);
+
+    React.useEffect(() => {
+        const id = setInterval(() => setDiag(getDiagnostics()), 1000);
+        return () => clearInterval(id);
+    }, []);
 
     const sample = React.useMemo(() => digits.slice(-window_size), [digits, window_size]);
 
@@ -166,6 +179,14 @@ const MatchesPro = () => {
                     ))}
                     {!digits.length && <span className='matches-pro__muted'>Waiting for ticks...</span>}
                 </div>
+
+                {diag && (
+                    <div className='matches-pro__diag'>
+                        socket {diag.ready_state} | messages {diag.messages} | last {diag.last_msg_type} | symbols{' '}
+                        {diag.symbols_seen} | precision {diag.pip_source} ({diag.known_decimals} known)
+                        {diag.last_error ? ` | ${diag.last_error}` : ''}
+                    </div>
+                )}
 
                 <div className='matches-pro__note'>
                     Each digit on a volatility index is independent and roughly 10% likely. Deviations you see in this
