@@ -1,9 +1,11 @@
-// @ts-nocheck - Matches Pro (Phase 1: live tick + last-digit engine only).
+// @ts-nocheck -- Matches Pro (Phase 2: prediction engine + live backtest).
 //
-// This phase deliberately contains NO prediction and NO trading.
-// It proves the tick pipeline is correct before anything can place an order.
+// Still no trading. Every prediction is graded against the next tick so the
+// engine's real accuracy is visible before a single order can be placed.
 import React from 'react';
 import { subscribeTicks, TICK_STATUS, getDiagnostics } from '@/components/shared/nlb/tick-stream';
+import { predict, Z_CRITICAL } from '@/components/shared/nlb/matches-engine';
+import { record, read, reset, summarise } from '@/components/shared/nlb/backtest-store';
 import './matches-pro.scss';
 
 const DEFAULT_SYMBOLS = [
@@ -19,7 +21,7 @@ const DEFAULT_SYMBOLS = [
     { code: '1HZ10V', label: 'Volatility 10 (1s) Index' },
 ];
 
-const WINDOWS = [50, 100, 250, 500, 1000];
+const WINDOW_CHOICES = [50, 100, 250, 500, 1000];
 const HISTORY = 1000;
 
 const STATUS_TEXT = {
@@ -29,6 +31,9 @@ const STATUS_TEXT = {
     [TICK_STATUS.DISCONNECTED]: 'DISCONNECTED',
 };
 
+const pct = v => `${(v * 100).toFixed(2)}%`;
+const clockOf = ts => new Date(ts).toLocaleTimeString('en-GB');
+
 const MatchesPro = () => {
     const [symbol, setSymbol] = React.useState('R_100');
     const [symbols, setSymbols] = React.useState(DEFAULT_SYMBOLS);
@@ -37,13 +42,73 @@ const MatchesPro = () => {
     const [decimals, setDecimals] = React.useState(null);
     const [digits, setDigits] = React.useState([]);
     const [window_size, setWindowSize] = React.useState(100);
+    const [payout, setPayout] = React.useState(9.3);
     const [error, setError] = React.useState('');
     const [diag, setDiag] = React.useState(null);
+    const [prediction, setPrediction] = React.useState(null);
+    const [stats, setStats] = React.useState(null);
+    const [feed, setFeed] = React.useState([]);
+    const [show_why, setShowWhy] = React.useState(false);
+
+    const digits_ref = React.useRef([]);
+    const pending_ref = React.useRef(null);
+    const payout_ref = React.useRef(payout);
+    payout_ref.current = payout;
+
+    const refreshStats = React.useCallback(sym => {
+        const state = read(sym);
+        setStats({ state, summary: summarise(state) });
+    }, []);
+
+    // One prediction per tick, graded against the tick that follows it.
+    const step = React.useCallback(
+        (sym, actual_digit, ts) => {
+            const pending = pending_ref.current;
+            if (pending && pending.predicted !== null && pending.symbol === sym) {
+                record(sym, {
+                    t: ts,
+                    predicted: pending.predicted,
+                    actual: actual_digit,
+                    quality: pending.quality,
+                    score: pending.score,
+                });
+                setFeed(prev =>
+                    [
+                        {
+                            t: ts,
+                            predicted: pending.predicted,
+                            actual: actual_digit,
+                            hit: pending.predicted === actual_digit,
+                            quality: pending.quality,
+                            score: pending.score,
+                        },
+                        ...prev,
+                    ].slice(0, 12)
+                );
+            }
+
+            const next = predict(digits_ref.current, { payout: payout_ref.current });
+            setPrediction(next);
+            pending_ref.current = {
+                symbol: sym,
+                predicted: next.predictedDigit,
+                quality: next.signalQuality,
+                score: next.score,
+            };
+            refreshStats(sym);
+        },
+        [refreshStats]
+    );
 
     React.useEffect(() => {
+        digits_ref.current = [];
+        pending_ref.current = null;
         setDigits([]);
         setQuote(null);
         setError('');
+        setFeed([]);
+        setPrediction(null);
+        refreshStats(symbol);
 
         const unsubscribe = subscribeTicks({
             symbol,
@@ -61,19 +126,31 @@ const MatchesPro = () => {
                 );
             },
             onHistory: ({ digits: d, quote: q, decimals: dec }) => {
+                digits_ref.current = [...d];
                 setDigits(d);
                 setQuote(q);
                 setDecimals(dec);
+                // Seed a first prediction, but do not grade the seeded history.
+                const seeded = predict(digits_ref.current, { payout: payout_ref.current });
+                setPrediction(seeded);
+                pending_ref.current = {
+                    symbol,
+                    predicted: seeded.predictedDigit,
+                    quality: seeded.signalQuality,
+                    score: seeded.score,
+                };
             },
             onTick: ({ digit, quote: q, decimals: dec }) => {
                 setDecimals(dec);
                 setQuote(q);
-                setDigits(prev => [...prev, digit].slice(-HISTORY));
+                digits_ref.current = [...digits_ref.current, digit].slice(-HISTORY);
+                setDigits(digits_ref.current);
+                step(symbol, digit, Date.now());
             },
         });
 
         return unsubscribe;
-    }, [symbol]);
+    }, [symbol, step, refreshStats]);
 
     React.useEffect(() => {
         const id = setInterval(() => setDiag(getDiagnostics()), 1000);
@@ -88,12 +165,20 @@ const MatchesPro = () => {
             counts[d] += 1;
         });
         const total = sample.length || 1;
-        return counts.map((c, d) => ({ digit: d, count: c, pct: (c / total) * 100 }));
+        return counts.map((c, d) => ({ digit: d, count: c, p: (c / total) * 100 }));
     }, [sample]);
 
-    const max_pct = Math.max(10, ...distribution.map(d => d.pct));
+    const max_pct = Math.max(10, ...distribution.map(d => d.p));
     const current_digit = digits.length ? digits[digits.length - 1] : null;
     const status_text = STATUS_TEXT[status] || STATUS_TEXT[TICK_STATUS.DISCONNECTED];
+    const predicted = prediction?.predictedDigit;
+    const quality = prediction?.signalQuality || 'NO SIGNAL';
+
+    const onReset = () => {
+        reset(symbol);
+        setFeed([]);
+        refreshStats(symbol);
+    };
 
     return (
         <div className='matches-pro'>
@@ -102,7 +187,7 @@ const MatchesPro = () => {
                     <div>
                         <div className='matches-pro__title'>MATCHES PRO</div>
                         <div className='matches-pro__subtitle'>
-                            Phase 1 - live tick and digit engine. No prediction, no trading yet.
+                            Phase 2 - prediction engine with live scoring. No trading yet.
                         </div>
                     </div>
                     <div className={`matches-pro__status matches-pro__status--${status}`}>
@@ -125,14 +210,24 @@ const MatchesPro = () => {
                         </select>
                     </label>
                     <label className='matches-pro__field'>
-                        <span>Analysis window</span>
+                        <span>Distribution window</span>
                         <select value={window_size} onChange={e => setWindowSize(Number(e.target.value))}>
-                            {WINDOWS.map(w => (
+                            {WINDOW_CHOICES.map(w => (
                                 <option key={w} value={w}>
                                     {w} ticks
                                 </option>
                             ))}
                         </select>
+                    </label>
+                    <label className='matches-pro__field'>
+                        <span>Match payout multiplier</span>
+                        <input
+                            type='number'
+                            step='0.1'
+                            min='1.1'
+                            value={payout}
+                            onChange={e => setPayout(Number(e.target.value) || 9.3)}
+                        />
                     </label>
                 </div>
 
@@ -150,34 +245,136 @@ const MatchesPro = () => {
                         <strong>{decimals ?? '-'}</strong>
                     </div>
                     <div className='matches-pro__stat'>
-                        <span>Sample</span>
-                        <strong>
-                            {sample.length}/{window_size}
-                        </strong>
+                        <span>History</span>
+                        <strong>{digits.length}</strong>
                     </div>
+                </div>
+
+                <div className='matches-pro__section-title'>Statistical analysis</div>
+                <div className={`matches-pro__signal matches-pro__signal--${quality.replace(' ', '-').toLowerCase()}`}>
+                    <div className='matches-pro__signal-main'>
+                        <div className='matches-pro__signal-digit'>{predicted ?? '-'}</div>
+                        <div>
+                            <div className='matches-pro__signal-quality'>{quality}</div>
+                            <div className='matches-pro__signal-sub'>
+                                Score {prediction?.score ?? 0}/100, sample {prediction?.sampleSize ?? 0}
+                            </div>
+                        </div>
+                    </div>
+                    <div className='matches-pro__signal-nums'>
+                        <div>
+                            <span>Estimated probability</span>
+                            <strong>{prediction ? pct(prediction.probabilityEstimate) : '-'}</strong>
+                        </div>
+                        <div>
+                            <span>Break-even needed</span>
+                            <strong>{prediction ? pct(prediction.breakeven) : '-'}</strong>
+                        </div>
+                    </div>
+                </div>
+
+                {prediction && (
+                    <>
+                        <button type='button' className='matches-pro__link' onClick={() => setShowWhy(v => !v)}>
+                            {show_why ? 'Hide reasoning' : 'Why?'}
+                        </button>
+                        {show_why && (
+                            <div className='matches-pro__why'>
+                                <p>{prediction.reason}</p>
+                                <table>
+                                    <tbody>
+                                        {prediction.factors.map(f => (
+                                            <tr key={f.label}>
+                                                <td>{f.label}</td>
+                                                <td className={f.value >= 0 ? 'pos' : 'neg'}>
+                                                    {f.value >= 0 ? '+' : ''}
+                                                    {f.value.toFixed(2)} sigma
+                                                </td>
+                                                <td className='note'>{f.note || ''}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                                <p className='matches-pro__why-foot'>
+                                    Significance bar is {Z_CRITICAL} sigma, corrected for testing 10 digits across 5
+                                    windows on every tick. Probability is shrunk toward 10% with a 500-observation
+                                    prior, so a lucky run inside the window does not become a claimed edge.
+                                </p>
+                            </div>
+                        )}
+                    </>
+                )}
+
+                <div className='matches-pro__section-title'>
+                    Backtest
+                    <button type='button' className='matches-pro__reset' onClick={onReset}>
+                        Reset
+                    </button>
+                </div>
+                {stats && (
+                    <>
+                        <div className='matches-pro__readout'>
+                            <div className='matches-pro__stat'>
+                                <span>Predictions</span>
+                                <strong>{stats.summary.n}</strong>
+                            </div>
+                            <div className='matches-pro__stat'>
+                                <span>Correct</span>
+                                <strong>{stats.summary.k}</strong>
+                            </div>
+                            <div className='matches-pro__stat'>
+                                <span>Accuracy</span>
+                                <strong>{stats.summary.n ? pct(stats.summary.accuracy) : '-'}</strong>
+                            </div>
+                            <div className='matches-pro__stat'>
+                                <span>Baseline</span>
+                                <strong>10.00%</strong>
+                            </div>
+                        </div>
+                        <div className='matches-pro__verdict'>{stats.summary.verdict}</div>
+                        <div className='matches-pro__mini'>
+                            Last 100: {pct(stats.summary.recent_accuracy)}, longest hit streak{' '}
+                            {stats.state.longest_win}, longest miss streak {stats.state.longest_loss}
+                        </div>
+                        {Object.keys(stats.state.by_quality).length > 0 && (
+                            <div className='matches-pro__mini'>
+                                {Object.entries(stats.state.by_quality).map(([q, v]) => (
+                                    <span key={q} className='matches-pro__tag'>
+                                        {q}: {v.correct}/{v.n} ({v.n ? ((v.correct / v.n) * 100).toFixed(1) : '0.0'}%)
+                                    </span>
+                                ))}
+                            </div>
+                        )}
+                    </>
+                )}
+
+                <div className='matches-pro__section-title'>Signal feed</div>
+                <div className='matches-pro__feed'>
+                    {feed.map(f => (
+                        <div key={f.t} className={`matches-pro__feed-row ${f.hit ? 'hit' : 'miss'}`}>
+                            <span>{clockOf(f.t)}</span>
+                            <span>MATCH {f.predicted}</span>
+                            <span>actual {f.actual}</span>
+                            <span>{f.quality}</span>
+                            <span>{f.hit ? 'HIT' : 'miss'}</span>
+                        </div>
+                    ))}
+                    {!feed.length && <span className='matches-pro__muted'>Waiting for the next tick...</span>}
                 </div>
 
                 <div className='matches-pro__section-title'>Digit distribution - last {sample.length} ticks</div>
                 <div className='matches-pro__dist'>
                     {distribution.map(d => (
                         <div key={d.digit} className='matches-pro__row'>
-                            <span className='matches-pro__row-digit'>{d.digit}</span>
-                            <span className='matches-pro__bar'>
-                                <span style={{ width: `${(d.pct / max_pct) * 100}%` }} />
+                            <span className={`matches-pro__row-digit ${d.digit === predicted ? 'is-predicted' : ''}`}>
+                                {d.digit}
                             </span>
-                            <span className='matches-pro__row-pct'>{d.pct.toFixed(1)}%</span>
+                            <span className='matches-pro__bar'>
+                                <span style={{ width: `${(d.p / max_pct) * 100}%` }} />
+                            </span>
+                            <span className='matches-pro__row-pct'>{d.p.toFixed(1)}%</span>
                         </div>
                     ))}
-                </div>
-
-                <div className='matches-pro__section-title'>Recent digits</div>
-                <div className='matches-pro__recent'>
-                    {digits.slice(-40).map((d, i) => (
-                        <span key={`${i}-${d}`} className='matches-pro__chip'>
-                            {d}
-                        </span>
-                    ))}
-                    {!digits.length && <span className='matches-pro__muted'>Waiting for ticks...</span>}
                 </div>
 
                 {diag && (
@@ -189,9 +386,10 @@ const MatchesPro = () => {
                 )}
 
                 <div className='matches-pro__note'>
-                    Each digit on a volatility index is independent and roughly 10% likely. Deviations you see in this
-                    window are ordinary sampling noise, not a pattern. The prediction engine arrives in Phase 2, and it
-                    will be scored against that 10% baseline before any trading is enabled.
+                    The engine grades every prediction it makes, including the ones it labels NO SIGNAL. Expect the
+                    accuracy to converge on 10%. At a {payout}x payout you need {pct(1 / payout)} just to break even,
+                    so a strategy can be genuinely above 10% and still lose money. Trading stays disabled until this
+                    panel has hundreds of graded predictions behind it.
                 </div>
             </div>
         </div>
