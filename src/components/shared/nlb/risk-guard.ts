@@ -17,8 +17,19 @@ const DAY_KEY = symbol => `nlb_matches_day_v1_${symbol}`;
 // Minimum graded predictions before auto-trading unlocks on a market.
 export const MIN_EVIDENCE = 500;
 
-// Signal qualities allowed to trade. WEAK and NO SIGNAL never trade.
-export const TRADEABLE = ['STRONG', 'MEDIUM'];
+// Signal quality ranking. The user picks the floor; anything at or above it
+// may trade. ANY means every tick qualifies - that is a pipeline test, not a
+// strategy, and it is only reachable on a demo account like everything else here.
+export const QUALITY_RANK = { 'NO SIGNAL': 0, WEAK: 1, MEDIUM: 2, STRONG: 3 };
+
+export const QUALITY_FLOORS = [
+    { value: 'STRONG', label: 'STRONG only (strictest)' },
+    { value: 'MEDIUM', label: 'MEDIUM and above' },
+    { value: 'WEAK', label: 'WEAK and above' },
+    { value: 'ANY', label: 'Any tick - validation mode, not a strategy' },
+];
+
+const FLOOR_RANK = { ANY: 0, WEAK: 1, MEDIUM: 2, STRONG: 3 };
 
 export const DEFAULT_LIMITS = {
     stake: 0.35,
@@ -28,6 +39,7 @@ export const DEFAULT_LIMITS = {
     daily_loss_limit: 5,
     cooldown_ticks: 3,
     max_open: 1,
+    min_quality: 'MEDIUM',
 };
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -119,7 +131,10 @@ export const evaluate = ctx => {
         };
     }
 
-    if (!TRADEABLE.includes(quality)) return { allowed: false, reason: `Signal is ${quality}` };
+    const floor = FLOOR_RANK[limits.min_quality] ?? FLOOR_RANK.MEDIUM;
+    if ((QUALITY_RANK[quality] ?? 0) < floor) {
+        return { allowed: false, reason: `Signal is ${quality}, floor is ${limits.min_quality}` };
+    }
 
     if (open_count >= limits.max_open) return { allowed: false, reason: 'A contract is still open' };
     if (cooldown_remaining > 0) return { allowed: false, reason: `Cooldown: ${cooldown_remaining} ticks` };

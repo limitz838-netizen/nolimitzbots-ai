@@ -430,6 +430,11 @@
         }
     }
 
+    &__field--wide {
+        margin-bottom: 1.2rem;
+        max-width: 34rem;
+    }
+
     &__trade-bar {
         display: flex;
         flex-wrap: wrap;
