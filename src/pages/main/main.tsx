@@ -49,6 +49,7 @@ import AiSoftware from '../ai-software/ai-software';
 import FreeBots from '../dashboard/free-bots';
 import RiskDisclaimer from '../../components/risk-disclaimer/risk-disclaimer';
 import MatchesPro from '../matches-pro/matches-pro';
+import MyPerformance from '../my-performance/my-performance';
 import './nlb-app-theme.scss';
 import ChartModal from '../chart/chart-modal';
 import Dashboard from '../dashboard';
@@ -89,7 +90,7 @@ const AppWrapper = observer(() => {
     const { clear } = summary_card;
     const { DASHBOARD, BOT_BUILDER } = DBOT_TABS;
     const init_render = React.useRef(true);
-    const hash = ['dashboard', 'bot_builder', 'free_bots', 'bulk_trader', 'speedbot', 'ai_software', 'matches_pro', 'chart', 'tutorial'];
+    const hash = ['dashboard', 'bot_builder', 'free_bots', 'bulk_trader', 'speedbot', 'ai_software', 'matches_pro', 'my_performance', 'chart', 'tutorial'];
     const { isDesktop } = useDevice();
     const location = useLocation();
     const navigate = useNavigate();
@@ -493,6 +494,21 @@ const AppWrapper = observer(() => {
                                 id='id-matches-pro'
                             >
                                 <MatchesPro />
+                            </div>
+                            <div
+                                label={
+                                    <>
+                                        <LabelPairedChartMixedCaptionBoldIcon
+                                            height='24px'
+                                            width='24px'
+                                            fill='var(--text-general)'
+                                        />
+                                        <Localize i18n_default_text='My Performance' />
+                                    </>
+                                }
+                                id='id-my-performance'
+                            >
+                                <MyPerformance />
                             </div>
                             <div
                                 label={
