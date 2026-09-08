@@ -14,6 +14,8 @@ import {
     byWeekday,
     decode,
     headline,
+    humanDuration,
+    MIN_FOR_HEADLINE,
     pace,
 } from '@/components/shared/nlb/history-analytics';
 import './my-performance.scss';
@@ -92,6 +94,7 @@ const MyPerformance = () => {
     }, [trades, view]);
 
     const worst = Math.max(1, ...groups.map(g => Math.abs(g.profit)));
+    const provisional = trades.length < MIN_FOR_HEADLINE;
 
     if (!isAuthorized) {
         return (
@@ -152,6 +155,14 @@ const MyPerformance = () => {
                 {stats.n > 0 && (
                     <>
                         {lede && <div className='my-performance__lede'>{lede}</div>}
+                        {provisional && (
+                            <div className='my-performance__building'>
+                                {trades.length} of {MIN_FOR_HEADLINE} trades. The rates below are computed from what
+                                is here, but a short history swings wildly - especially if your stake changes after
+                                losses, where one sequence can dominate the whole sample. Treat them as provisional
+                                until this fills up.
+                            </div>
+                        )}
 
                         <div className='my-performance__readout'>
                             <div className='my-performance__stat'>
@@ -190,7 +201,10 @@ const MyPerformance = () => {
                         </div>
 
                         {/* ------------------------------- pace ------------------------------- */}
-                        <div className='my-performance__section-title'>What your pace costs</div>
+                        <div className='my-performance__section-title'>
+                            What your pace costs
+                            {provisional && <span className='my-performance__flag'>provisional</span>}
+                        </div>
                         <div className='my-performance__readout'>
                             <div className='my-performance__stat'>
                                 <span>Cost per hour</span>
@@ -228,12 +242,11 @@ const MyPerformance = () => {
                                     <>Enter a balance to see how long it lasts at this rate.</>
                                 ) : (
                                     <>
-                                        At {paceStats.cost_per_hour.toFixed(2)} {currency} an hour, a balance of{' '}
-                                        {Number(balance).toFixed(2)} lasts about{' '}
-                                        <strong>{paceStats.hours_left} hours</strong> of screen time - roughly{' '}
-                                        {Math.max(1, Math.round(paceStats.hours_left / (paceStats.avg_session_minutes / 60 || 1)))}{' '}
-                                        more sessions at your usual length. Halving your trades per hour roughly
-                                        doubles that.
+                                        You trade about {paceStats.hours_per_day.toFixed(1)} hours a day, which costs{' '}
+                                        {paceStats.cost_per_day.toFixed(2)} {currency} a day. At that rate a balance of{' '}
+                                        {Number(balance).toFixed(2)} lasts roughly{' '}
+                                        <strong>{humanDuration(paceStats.days_left)}</strong>. Trading half as fast
+                                        roughly doubles it.
                                     </>
                                 )}
                             </div>
@@ -242,7 +255,7 @@ const MyPerformance = () => {
                         {/* --------------------------- after losses --------------------------- */}
                         <div className='my-performance__section-title'>What you do after losses</div>
                         <div className='my-performance__table'>
-                            <div className='my-performance__row head five'>
+                            <div className='my-performance__trow head five'>
                                 <span>Losses before</span>
                                 <span>Trades</span>
                                 <span>Avg stake</span>
@@ -250,7 +263,7 @@ const MyPerformance = () => {
                                 <span>P/L</span>
                             </div>
                             {chase.map(b => (
-                                <div key={b.key} className={`my-performance__row five ${b.profit >= 0 ? 'win' : 'loss'}`}>
+                                <div key={b.key} className={`my-performance__trow five ${b.profit >= 0 ? 'win' : 'loss'}`}>
                                     <span>{b.key}</span>
                                     <span>{b.n}</span>
                                     <span>
@@ -311,7 +324,7 @@ const MyPerformance = () => {
                         {/* ------------------------------ recent ------------------------------ */}
                         <div className='my-performance__section-title'>Most recent trades</div>
                         <div className='my-performance__table'>
-                            <div className='my-performance__row head'>
+                            <div className='my-performance__trow head'>
                                 <span>Bought</span>
                                 <span>Market</span>
                                 <span>Type</span>
@@ -319,7 +332,7 @@ const MyPerformance = () => {
                                 <span>P/L</span>
                             </div>
                             {recent.map(t => (
-                                <div key={t.id} className={`my-performance__row ${t.profit > 0 ? 'win' : 'loss'}`}>
+                                <div key={t.id} className={`my-performance__trow ${t.profit > 0 ? 'win' : 'loss'}`}>
                                     <span>{dateOf(t.buy_time)}</span>
                                     <span>{t.symbol}</span>
                                     <span>{t.type}</span>

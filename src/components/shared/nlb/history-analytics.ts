@@ -97,19 +97,41 @@ export const pace = (trades, balance) => {
     const hours = seconds / 3600;
     const totals = summariseGroup(trades);
 
+    // Calendar days the history spans, so screen time can be expressed as a
+    // daily habit rather than an abstract block of hours.
+    const span_days = trades.length
+        ? Math.max(1, (trades[trades.length - 1].buy_time - trades[0].buy_time) / 86400)
+        : 1;
+    const hours_per_day = hours / span_days;
+
     const trades_per_hour = hours ? trades.length / hours : 0;
     const cost_per_hour = hours ? -totals.profit / hours : 0;
     const hours_left = cost_per_hour > 0 && balance > 0 ? balance / cost_per_hour : null;
+    const days_left = hours_left !== null && hours_per_day > 0 ? hours_left / hours_per_day : null;
 
     return {
         sessions: list.length,
         hours: Number(hours.toFixed(2)),
+        span_days: Number(span_days.toFixed(1)),
+        hours_per_day: Number(hours_per_day.toFixed(2)),
         trades_per_hour: Number(trades_per_hour.toFixed(1)),
         cost_per_hour: Number(cost_per_hour.toFixed(2)),
+        cost_per_day: Number((cost_per_hour * hours_per_day).toFixed(2)),
         hours_left: hours_left === null ? null : Number(hours_left.toFixed(1)),
+        days_left: days_left === null ? null : Number(days_left.toFixed(1)),
         avg_session_minutes: list.length ? Math.round(seconds / list.length / 60) : 0,
         longest_session_minutes: list.length ? Math.round(Math.max(...list.map(s => s.seconds)) / 60) : 0,
     };
+};
+
+/** Turn a day count into something a person reads without doing arithmetic. */
+export const humanDuration = days => {
+    if (days === null || !Number.isFinite(days)) return null;
+    if (days < 1) return `${Math.max(1, Math.round(days * 24))} hours`;
+    if (days < 14) return `${Math.round(days)} days`;
+    if (days < 70) return `${Math.round(days / 7)} weeks`;
+    if (days < 730) return `${Math.round(days / 30)} months`;
+    return `${(days / 365).toFixed(1)} years`;
 };
 
 /**
@@ -139,7 +161,10 @@ export const afterLosses = trades => {
 };
 
 /** The single sentence worth putting at the top of the page. */
+export const MIN_FOR_HEADLINE = 200;
+
 export const headline = (trades, paceStats) => {
+    if (trades.length < MIN_FOR_HEADLINE) return '';
     const chase = afterLosses(trades).find(b => b.key === '3+');
     const totals = summariseGroup(trades);
 

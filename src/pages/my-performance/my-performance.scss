@@ -590,20 +590,32 @@
         font-size: 1.1rem;
     }
 
-    &__row {
+    &__trow {
         display: grid;
-        grid-template-columns: 1.8fr 1fr 1.2fr 0.8fr 0.8fr;
+        grid-template-columns: 1.8fr 1fr 1.2fr 0.9fr 0.9fr;
+        align-items: center;
         gap: 0.6rem;
-        padding: 0.45rem 0.8rem;
+        padding: 0.5rem 0.8rem;
         border-radius: 0.6rem;
         background: rgba(255, 255, 255, 0.03);
         color: #9aa1b0;
+        line-height: 1.4;
 
         &.head { color: #6b7280; background: none; }
         &.win { color: #34d399; background: rgba(52, 211, 153, 0.08); }
         &.loss { color: #8b93a3; }
 
+        span {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
         span:not(:first-child) { text-align: right; }
+
+        &.five {
+            grid-template-columns: 1.3fr 0.7fr 1.3fr 1fr 1fr;
+        }
     }
 
     &__lede {
@@ -726,8 +738,28 @@
         }
     }
 
-    &__row.five {
-        grid-template-columns: 1.4fr 0.8fr 1.2fr 1fr 1fr;
+    &__building {
+        padding: 1rem 1.2rem;
+        border-radius: 1rem;
+        background: rgba(245, 158, 11, 0.1);
+        border: 1px solid rgba(245, 158, 11, 0.3);
+        color: #fbbf24;
+        font-size: 1.2rem;
+        line-height: 1.55;
+        margin-bottom: 1.4rem;
+    }
+
+    &__flag {
+        margin-left: 0.8rem;
+        padding: 0.15rem 0.7rem;
+        border-radius: 999px;
+        background: rgba(245, 158, 11, 0.15);
+        border: 1px solid rgba(245, 158, 11, 0.35);
+        color: #fbbf24;
+        font-size: 0.95rem;
+        text-transform: none;
+        letter-spacing: 0;
+        font-weight: 600;
     }
 
     &__note {
