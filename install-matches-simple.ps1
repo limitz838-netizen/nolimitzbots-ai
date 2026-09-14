@@ -1,3 +1,214 @@
+# ==========================================================================
+#  NolimitzBots - Matches Pro: simpler auto trader
+#   * Trading section reduced to Stake, Stop after losing, and Trade on
+#   * everything else folded behind "Advanced limits"
+#   * in-page trade table removed - the run panel shows it already
+#   * evidence gate lowered from 500 to 100 graded predictions
+#
+#      powershell -ExecutionPolicy Bypass -File .\install-matches-simple.ps1
+#
+#  Flags:  -SkipBuild   -NoPush
+# ==========================================================================
+param([switch]$SkipBuild, [switch]$NoPush)
+
+$ErrorActionPreference = 'Stop'
+
+function Fail($msg) { Write-Host "  FAILED: $msg" -ForegroundColor Red; exit 1 }
+function Ok($msg)   { Write-Host "  OK: $msg" -ForegroundColor Green }
+function Info($msg) { Write-Host $msg -ForegroundColor Cyan }
+
+try { $root = (git rev-parse --show-toplevel).Trim() } catch { Fail 'Not inside a git repository.' }
+Set-Location $root
+if (-not (Test-Path 'src/components/shared/nlb/risk-guard.ts')) { Fail 'Phase 3 not installed.' }
+Info "Repo: $root"
+
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+function Write-File($relPath, $text) {
+    $full = Join-Path $root $relPath
+    $dir  = Split-Path -Parent $full
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [System.IO.File]::WriteAllText($full, $text.Replace("`r`n", "`n"), $utf8NoBom)
+    Ok "wrote $relPath"
+}
+
+$guardSrc = @'
+// @ts-nocheck -- Matches Pro risk guard.
+//
+// Every condition that must hold before an order can be sent lives here, in one
+// place, as data. The UI cannot bypass it: the execution path calls evaluate()
+// and refuses to proceed on anything other than an explicit allow.
+//
+// Two of these gates are deliberate hard stops rather than warnings:
+//   * demo only  - a real login id is refused outright in this phase
+//   * evidence   - no auto-trading on a market until its backtest has enough
+//                  graded predictions to say anything at all
+
+import { isDemoAccount } from '@/utils/account-helpers';
+
+const LIMITS_KEY = 'nlb_matches_limits_v1';
+const DAY_KEY = symbol => `nlb_matches_day_v1_${symbol}`;
+
+// Minimum graded predictions before auto-trading unlocks on a market. The bar
+// exists so nobody trades a market before its backtest has said anything; once
+// a few hundred predictions are in, the answer is already visible.
+export const MIN_EVIDENCE = 100;
+
+// Signal quality ranking. The user picks the floor; anything at or above it
+// may trade. ANY means every tick qualifies - that is a pipeline test, not a
+// strategy, and it is only reachable on a demo account like everything else here.
+export const QUALITY_RANK = { 'NO SIGNAL': 0, WEAK: 1, MEDIUM: 2, STRONG: 3 };
+
+export const QUALITY_FLOORS = [
+    { value: 'STRONG', label: 'STRONG only (strictest)' },
+    { value: 'MEDIUM', label: 'MEDIUM and above' },
+    { value: 'WEAK', label: 'WEAK and above' },
+    { value: 'ANY', label: 'Any tick - validation mode, not a strategy' },
+];
+
+const FLOOR_RANK = { ANY: 0, WEAK: 1, MEDIUM: 2, STRONG: 3 };
+
+export const DEFAULT_LIMITS = {
+    stake: 0.35,
+    max_trades: 20,
+    max_consecutive_losses: 3,
+    daily_profit_target: 10,
+    daily_loss_limit: 5,
+    cooldown_ticks: 3,
+    max_open: 1,
+    min_quality: 'MEDIUM',
+};
+
+const today = () => new Date().toISOString().slice(0, 10);
+
+export const loadLimits = () => {
+    try {
+        const raw = window.localStorage.getItem(LIMITS_KEY);
+        return raw ? { ...DEFAULT_LIMITS, ...JSON.parse(raw) } : { ...DEFAULT_LIMITS };
+    } catch {
+        return { ...DEFAULT_LIMITS };
+    }
+};
+
+export const saveLimits = limits => {
+    try {
+        window.localStorage.setItem(LIMITS_KEY, JSON.stringify(limits));
+    } catch {
+        /* noop */
+    }
+};
+
+const emptyDay = () => ({ date: today(), trades: [], pl: 0, consecutive_losses: 0, wins: 0, losses: 0 });
+
+export const loadDay = symbol => {
+    try {
+        const raw = window.localStorage.getItem(DAY_KEY(symbol));
+        if (!raw) return emptyDay();
+        const parsed = JSON.parse(raw);
+        // A new day wipes the counters. Yesterday's loss limit does not carry.
+        if (parsed.date !== today()) return emptyDay();
+        return { ...emptyDay(), ...parsed };
+    } catch {
+        return emptyDay();
+    }
+};
+
+const saveDay = (symbol, day) => {
+    try {
+        window.localStorage.setItem(DAY_KEY(symbol), JSON.stringify(day));
+    } catch {
+        /* noop */
+    }
+};
+
+export const resetDay = symbol => {
+    const day = emptyDay();
+    saveDay(symbol, day);
+    return day;
+};
+
+export const recordTrade = (symbol, trade) => {
+    const day = loadDay(symbol);
+    const won = Number(trade.profit) > 0;
+
+    day.trades.unshift(trade);
+    if (day.trades.length > 200) day.trades = day.trades.slice(0, 200);
+    day.pl = Number((day.pl + Number(trade.profit || 0)).toFixed(4));
+    if (won) {
+        day.wins += 1;
+        day.consecutive_losses = 0;
+    } else {
+        day.losses += 1;
+        day.consecutive_losses += 1;
+    }
+    saveDay(symbol, day);
+    return day;
+};
+
+/**
+ * The pre-trade gate. Returns { allowed, reason }.
+ * Called immediately before every proposal request - never cached.
+ */
+export const evaluate = ctx => {
+    const {
+        limits,
+        day,
+        quality,
+        is_authorized,
+        loginid,
+        open_count,
+        cooldown_remaining,
+        evidence,
+        auto_on,
+        min_evidence = MIN_EVIDENCE,
+    } = ctx;
+
+    if (!auto_on) return { allowed: false, reason: 'Auto trade is off' };
+    if (!is_authorized) return { allowed: false, reason: 'Not signed in to Deriv' };
+    if (!loginid) return { allowed: false, reason: 'No account selected' };
+
+    // Hard stop. Phase 3 is demo only, enforced here rather than in the UI.
+    if (!isDemoAccount(loginid)) {
+        return { allowed: false, reason: `Real account ${loginid} - demo only in this phase` };
+    }
+
+    if (evidence < min_evidence) {
+        return {
+            allowed: false,
+            reason: `Only ${evidence} graded results. Needs ${min_evidence} before auto trading unlocks.`,
+        };
+    }
+
+    const floor = FLOOR_RANK[limits.min_quality] ?? FLOOR_RANK.MEDIUM;
+    if ((QUALITY_RANK[quality] ?? 0) < floor) {
+        return { allowed: false, reason: `Signal is ${quality}, floor is ${limits.min_quality}` };
+    }
+
+    if (open_count >= limits.max_open) return { allowed: false, reason: 'A contract is still open' };
+    if (cooldown_remaining > 0) return { allowed: false, reason: `Cooldown: ${cooldown_remaining} ticks` };
+
+    if (day.trades.length >= limits.max_trades) {
+        return { allowed: false, reason: `Max trades reached (${limits.max_trades})` };
+    }
+    if (day.consecutive_losses >= limits.max_consecutive_losses) {
+        return {
+            allowed: false,
+            reason: `${day.consecutive_losses} losses in a row - stopped at limit of ${limits.max_consecutive_losses}`,
+        };
+    }
+    if (day.pl <= -Math.abs(limits.daily_loss_limit)) {
+        return { allowed: false, reason: `Daily loss limit hit (${day.pl.toFixed(2)})` };
+    }
+    if (day.pl >= Math.abs(limits.daily_profit_target)) {
+        return { allowed: false, reason: `Daily profit target reached (${day.pl.toFixed(2)})` };
+    }
+
+    if (!(Number(limits.stake) > 0)) return { allowed: false, reason: 'Stake must be greater than zero' };
+
+    return { allowed: true, reason: 'All checks passed' };
+};
+'@
+
+$pageSrc = @'
 // @ts-nocheck -- Matches Pro (Phase 3: demo-only DIGITMATCH execution).
 //
 // Trading is off by default. Two hard locks sit in risk-guard.evaluate(), not
@@ -904,3 +1115,33 @@ const MatchesPro = () => {
 };
 
 export default MatchesPro;
+'@
+
+Info ''
+Info '[1/3] Writing files'
+Write-File 'src/components/shared/nlb/risk-guard.ts' $guardSrc
+Write-File 'src/pages/matches-pro/matches-pro.tsx'   $pageSrc
+
+$ErrorActionPreference = 'Continue'
+
+Info ''
+if ($SkipBuild) { Info '[2/3] Build skipped' } else {
+    Info '[2/3] Running npm run build (a few minutes)'
+    npm run build
+    if ($LASTEXITCODE -ne 0) { Write-Host ''; Fail 'Build failed. Nothing committed.' }
+    Ok 'build succeeded'
+}
+
+Info ''
+Info '[3/3] Commit and push'
+git pull --rebase origin main
+git add -A
+git commit -m "Matches Pro: simpler auto trader, advanced limits collapsed"
+if ($LASTEXITCODE -ne 0) { Info 'Nothing new to commit.' }
+if ($NoPush) { Info 'Push skipped.' } else {
+    git push
+    if ($LASTEXITCODE -ne 0) { Fail 'Push failed.' }
+    Ok 'pushed - Vercel will start the deployment now'
+}
+Write-Host ''
+Write-Host 'Done. Hard refresh once Vercel is green.' -ForegroundColor Yellow

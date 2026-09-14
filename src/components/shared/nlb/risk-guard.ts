@@ -14,8 +14,10 @@ import { isDemoAccount } from '@/utils/account-helpers';
 const LIMITS_KEY = 'nlb_matches_limits_v1';
 const DAY_KEY = symbol => `nlb_matches_day_v1_${symbol}`;
 
-// Minimum graded predictions before auto-trading unlocks on a market.
-export const MIN_EVIDENCE = 500;
+// Minimum graded predictions before auto-trading unlocks on a market. The bar
+// exists so nobody trades a market before its backtest has said anything; once
+// a few hundred predictions are in, the answer is already visible.
+export const MIN_EVIDENCE = 100;
 
 // Signal quality ranking. The user picks the floor; anything at or above it
 // may trade. ANY means every tick qualifies - that is a pipeline test, not a
@@ -113,7 +115,18 @@ export const recordTrade = (symbol, trade) => {
  * Called immediately before every proposal request - never cached.
  */
 export const evaluate = ctx => {
-    const { limits, day, quality, is_authorized, loginid, open_count, cooldown_remaining, evidence, auto_on } = ctx;
+    const {
+        limits,
+        day,
+        quality,
+        is_authorized,
+        loginid,
+        open_count,
+        cooldown_remaining,
+        evidence,
+        auto_on,
+        min_evidence = MIN_EVIDENCE,
+    } = ctx;
 
     if (!auto_on) return { allowed: false, reason: 'Auto trade is off' };
     if (!is_authorized) return { allowed: false, reason: 'Not signed in to Deriv' };
@@ -124,10 +137,10 @@ export const evaluate = ctx => {
         return { allowed: false, reason: `Real account ${loginid} - demo only in this phase` };
     }
 
-    if (evidence < MIN_EVIDENCE) {
+    if (evidence < min_evidence) {
         return {
             allowed: false,
-            reason: `Only ${evidence} graded predictions on this market. Needs ${MIN_EVIDENCE} before auto trading unlocks.`,
+            reason: `Only ${evidence} graded results. Needs ${min_evidence} before auto trading unlocks.`,
         };
     }
 
