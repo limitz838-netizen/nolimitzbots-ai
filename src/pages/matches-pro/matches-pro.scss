@@ -504,6 +504,135 @@
     &__stat strong.pos { color: #34d399; }
     &__stat strong.neg { color: #f87171; }
 
+    &__analyse {
+        margin-bottom: 1.6rem;
+    }
+
+    &__analyse-controls {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        gap: 1rem;
+        margin-bottom: 1.2rem;
+    }
+
+    &__analyse-btn {
+        padding: 1.1rem 2.4rem;
+        border-radius: 1rem;
+        border: 1px solid rgba(212, 175, 55, 0.55);
+        background: linear-gradient(180deg, rgba(212, 175, 55, 0.3), rgba(212, 175, 55, 0.14));
+        color: #e8cf7a;
+        font-size: 1.4rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+
+        &:disabled { opacity: 0.4; cursor: not-allowed; }
+    }
+
+    &__analyse-card {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 1.4rem;
+        padding: 1.4rem;
+        border-radius: 1.2rem;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.03);
+
+        &.live { border-color: rgba(212, 175, 55, 0.55); }
+        &.done { border-color: rgba(148, 163, 184, 0.35); }
+
+        @media (max-width: 600px) {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    &__analyse-digit {
+        width: 9rem;
+        height: 9rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 1.4rem;
+        background: rgba(212, 175, 55, 0.14);
+        border: 1px solid rgba(212, 175, 55, 0.4);
+        color: #e8cf7a;
+        font-size: 5rem;
+        font-weight: 800;
+        line-height: 1;
+    }
+
+    &__analyse-body {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 0.6rem;
+    }
+
+    &__analyse-count {
+        color: #e8eaf0;
+        font-size: 2.4rem;
+        font-weight: 800;
+        font-variant-numeric: tabular-nums;
+    }
+
+    &__analyse-bar {
+        height: 0.6rem;
+        background: rgba(255, 255, 255, 0.07);
+        border-radius: 999px;
+        overflow: hidden;
+
+        span {
+            display: block;
+            height: 100%;
+            background: linear-gradient(90deg, rgba(212, 175, 55, 0.6), #e8cf7a);
+            transition: width 0.25s linear;
+        }
+    }
+
+    &__analyse-sub {
+        color: #9aa1b0;
+        font-size: 1.2rem;
+        line-height: 1.5;
+    }
+
+    &__analyse-nums {
+        color: #7c8698;
+        font-size: 1.1rem;
+    }
+
+    &__analyse-ticks {
+        grid-column: 1 / -1;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+
+        span {
+            min-width: 2.4rem;
+            text-align: center;
+            padding: 0.35rem 0.5rem;
+            border-radius: 0.6rem;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            color: #9aa1b0;
+            font-family: monospace;
+            font-size: 1.2rem;
+
+            &.hit {
+                color: #34d399;
+                border-color: rgba(52, 211, 153, 0.5);
+                background: rgba(52, 211, 153, 0.12);
+            }
+        }
+    }
+
+    &__note-inline {
+        margin-top: 1rem;
+        color: #7c8698;
+        font-size: 1.15rem;
+        line-height: 1.55;
+    }
+
     &__note {
         margin-top: 1.8rem;
         padding: 1rem;
