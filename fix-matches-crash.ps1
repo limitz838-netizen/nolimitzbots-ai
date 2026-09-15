@@ -1,3 +1,147 @@
+# ==========================================================================
+#  NolimitzBots - HOTFIX: Matches Pro crash
+#
+#  The proposal stream called back into its own handle before that handle
+#  existed. When Deriv replayed a cached proposal during subscribe(), the
+#  callback threw and took the tab down ("Sorry for the interruption").
+#
+#  The callback now receives the payout multiplier directly and never
+#  reaches back into the handle. Both call sites are wrapped so live
+#  pricing can fail without stopping trading.
+#
+#      powershell -ExecutionPolicy Bypass -File .\fix-matches-crash.ps1
+#
+#  Flags:  -SkipBuild   -NoPush
+# ==========================================================================
+param([switch]$SkipBuild, [switch]$NoPush)
+
+$ErrorActionPreference = 'Stop'
+
+function Fail($msg) { Write-Host "  FAILED: $msg" -ForegroundColor Red; exit 1 }
+function Ok($msg)   { Write-Host "  OK: $msg" -ForegroundColor Green }
+function Info($msg) { Write-Host $msg -ForegroundColor Cyan }
+
+try { $root = (git rev-parse --show-toplevel).Trim() } catch { Fail 'Not inside a git repository.' }
+Set-Location $root
+if (-not (Test-Path 'src/components/shared/nlb/proposal-stream.ts')) { Fail 'proposal-stream.ts not found - run install-matches-fast first.' }
+Info "Repo: $root"
+
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+function Write-File($relPath, $text) {
+    $full = Join-Path $root $relPath
+    [System.IO.File]::WriteAllText($full, $text.Replace("`r`n", "`n"), $utf8NoBom)
+    Ok "wrote $relPath"
+}
+
+$streamSrc = @'
+// @ts-nocheck -- Live DIGITMATCH proposal stream.
+//
+// Without this, buying takes two round-trips to Deriv: request a proposal,
+// wait, then buy against the id it returns. On a one-tick contract that delay
+// can push the order onto a later tick than the one the engine was reasoning
+// about.
+//
+// Here we keep a subscribed proposal open for all ten barriers at once. Deriv
+// pushes a fresh id and price on every tick, so a buy is a single message with
+// an id we already hold.
+//
+// It also gives the real payout multiplier continuously, which is what the
+// break-even figure should be based on rather than a typed-in guess.
+
+import { api_base } from '@/external/bot-skeleton';
+
+const STALE_MS = 15000; // a proposal id older than this is not trusted
+
+const fresh = p => p && Date.now() - p.at <= STALE_MS;
+
+// Average payout multiplier across whatever prices we currently hold.
+const multiplierOf = latest => {
+    const priced = Object.values(latest).filter(p => fresh(p) && p.ask > 0);
+    if (!priced.length) return null;
+    const total = priced.reduce((sum, p) => sum + p.payout / p.ask, 0);
+    return total / priced.length;
+};
+
+export const startProposals = ({ symbol, currency, amount, contract_type = 'DIGITMATCH', onUpdate, onError }) => {
+    const latest = {}; // digit -> { id, ask, payout, at }
+    let stream = null;
+    let stopped = false;
+
+    try {
+        stream = api_base.api.onMessage().subscribe(({ data }) => {
+            if (stopped) return;
+            if (data?.msg_type !== 'proposal' || !data.proposal) return;
+
+            const echo = data.echo_req || {};
+            // Only accept proposals matching the stream we asked for - the
+            // account may have other proposal traffic from other surfaces.
+            if (echo.underlying_symbol !== symbol) return;
+            if (echo.contract_type !== contract_type) return;
+            if (Number(echo.amount) !== Number(amount)) return;
+            if (echo.barrier === undefined || echo.barrier === null) return;
+
+            const digit = Number(echo.barrier);
+            if (!Number.isInteger(digit) || digit < 0 || digit > 9) return;
+
+            latest[digit] = {
+                id: data.proposal.id,
+                ask: Number(data.proposal.ask_price),
+                payout: Number(data.proposal.payout),
+                at: Date.now(),
+            };
+            // Pass the derived multiplier straight through. The caller must
+            // never have to reach back into the handle from in here: this can
+            // fire during subscribe(), before the handle has been returned.
+            onUpdate?.({ multiplier: multiplierOf(latest), latest, digit });
+        });
+    } catch (e) {
+        onError?.(e);
+    }
+
+    for (let digit = 0; digit < 10; digit += 1) {
+        try {
+            api_base.api
+                .send({
+                    proposal: 1,
+                    subscribe: 1,
+                    amount: Number(amount),
+                    basis: 'stake',
+                    contract_type,
+                    currency,
+                    duration: 1,
+                    duration_unit: 't',
+                    underlying_symbol: symbol,
+                    barrier: String(digit),
+                })
+                .catch(e => onError?.(e));
+        } catch (e) {
+            onError?.(e);
+        }
+    }
+
+    return {
+        // A priced, unexpired proposal for this digit, or null.
+        get: digit => (fresh(latest[digit]) ? latest[digit] : null),
+        all: () => latest,
+        multiplier: () => multiplierOf(latest),
+        stop: () => {
+            stopped = true;
+            try {
+                api_base.api.send({ forget_all: 'proposal' });
+            } catch {
+                /* noop */
+            }
+            try {
+                stream?.unsubscribe();
+            } catch {
+                /* noop */
+            }
+        },
+    };
+};
+'@
+
+$pageSrc = @'
 // @ts-nocheck -- Matches Pro (Phase 3: demo-only DIGITMATCH execution).
 //
 // Trading is off by default. Two hard locks sit in risk-guard.evaluate(), not
@@ -967,3 +1111,33 @@ const MatchesPro = () => {
 };
 
 export default MatchesPro;
+'@
+
+Info ''
+Info '[1/3] Writing files'
+Write-File 'src/components/shared/nlb/proposal-stream.ts' $streamSrc
+Write-File 'src/pages/matches-pro/matches-pro.tsx'        $pageSrc
+
+$ErrorActionPreference = 'Continue'
+
+Info ''
+if ($SkipBuild) { Info '[2/3] Build skipped' } else {
+    Info '[2/3] Running npm run build (a few minutes)'
+    npm run build
+    if ($LASTEXITCODE -ne 0) { Write-Host ''; Fail 'Build failed. Nothing committed.' }
+    Ok 'build succeeded'
+}
+
+Info ''
+Info '[3/3] Commit and push'
+git pull --rebase origin main
+git add -A
+git commit -m "Fix Matches Pro crash: proposal stream callback no longer touches its own handle"
+if ($LASTEXITCODE -ne 0) { Info 'Nothing new to commit.' }
+if ($NoPush) { Info 'Push skipped.' } else {
+    git push
+    if ($LASTEXITCODE -ne 0) { Fail 'Push failed.' }
+    Ok 'pushed - Vercel will start the deployment now'
+}
+Write-Host ''
+Write-Host 'Done. Hard refresh once Vercel is green.' -ForegroundColor Yellow

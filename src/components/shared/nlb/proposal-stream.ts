@@ -16,6 +16,16 @@ import { api_base } from '@/external/bot-skeleton';
 
 const STALE_MS = 15000; // a proposal id older than this is not trusted
 
+const fresh = p => p && Date.now() - p.at <= STALE_MS;
+
+// Average payout multiplier across whatever prices we currently hold.
+const multiplierOf = latest => {
+    const priced = Object.values(latest).filter(p => fresh(p) && p.ask > 0);
+    if (!priced.length) return null;
+    const total = priced.reduce((sum, p) => sum + p.payout / p.ask, 0);
+    return total / priced.length;
+};
+
 export const startProposals = ({ symbol, currency, amount, contract_type = 'DIGITMATCH', onUpdate, onError }) => {
     const latest = {}; // digit -> { id, ask, payout, at }
     let stream = null;
@@ -43,7 +53,10 @@ export const startProposals = ({ symbol, currency, amount, contract_type = 'DIGI
                 payout: Number(data.proposal.payout),
                 at: Date.now(),
             };
-            onUpdate?.(latest, digit);
+            // Pass the derived multiplier straight through. The caller must
+            // never have to reach back into the handle from in here: this can
+            // fire during subscribe(), before the handle has been returned.
+            onUpdate?.({ multiplier: multiplierOf(latest), latest, digit });
         });
     } catch (e) {
         onError?.(e);
@@ -72,20 +85,9 @@ export const startProposals = ({ symbol, currency, amount, contract_type = 'DIGI
 
     return {
         // A priced, unexpired proposal for this digit, or null.
-        get: digit => {
-            const p = latest[digit];
-            if (!p) return null;
-            if (Date.now() - p.at > STALE_MS) return null;
-            return p;
-        },
+        get: digit => (fresh(latest[digit]) ? latest[digit] : null),
         all: () => latest,
-        // Payout multiplier implied by whatever we currently hold.
-        multiplier: () => {
-            const priced = Object.values(latest).filter(p => p.ask > 0 && Date.now() - p.at <= STALE_MS);
-            if (!priced.length) return null;
-            const ratios = priced.map(p => p.payout / p.ask);
-            return ratios.reduce((a, b) => a + b, 0) / ratios.length;
-        },
+        multiplier: () => multiplierOf(latest),
         stop: () => {
             stopped = true;
             try {
