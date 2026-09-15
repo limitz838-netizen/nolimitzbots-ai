@@ -1,3 +1,147 @@
+# ==========================================================================
+#  NolimitzBots - HOTFIX 2: Matches Pro crash
+#
+#  Real cause, found by rendering the page headlessly:
+#      ReferenceError: plainRead is not defined
+#  The plain-language read was added to the JSX but its definition never
+#  landed, because the anchor I patched against did not exist in the file.
+#
+#  Also adds a page error boundary, so any future fault in one tab shows a
+#  message in that tab instead of taking the whole app down.
+#
+#      powershell -ExecutionPolicy Bypass -File .\fix-matches-crash-2.ps1
+#
+#  Flags:  -SkipBuild   -NoPush
+# ==========================================================================
+param([switch]$SkipBuild, [switch]$NoPush)
+
+$ErrorActionPreference = 'Stop'
+
+function Fail($msg) { Write-Host "  FAILED: $msg" -ForegroundColor Red; exit 1 }
+function Ok($msg)   { Write-Host "  OK: $msg" -ForegroundColor Green }
+function Info($msg) { Write-Host $msg -ForegroundColor Cyan }
+
+try { $root = (git rev-parse --show-toplevel).Trim() } catch { Fail 'Not inside a git repository.' }
+Set-Location $root
+if (-not (Test-Path 'src/pages/matches-pro/matches-pro.tsx')) { Fail 'Matches Pro not installed.' }
+Info "Repo: $root"
+
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+function Write-File($relPath, $text) {
+    $full = Join-Path $root $relPath
+    $dir  = Split-Path -Parent $full
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [System.IO.File]::WriteAllText($full, $text.Replace("`r`n", "`n"), $utf8NoBom)
+    Ok "wrote $relPath"
+}
+
+$boundarySrc = @'
+// @ts-nocheck -- Page-level error boundary.
+//
+// Without this, a single thrown error inside one tab unmounts the whole
+// application and the user sees "Sorry for the interruption" with no way back
+// except a reload. With it, the broken tab shows what went wrong and every
+// other tab keeps working.
+import React from 'react';
+
+class PageBoundary extends React.Component {
+    constructor(props) {
+        super(props);
+        this.state = { error: null };
+    }
+
+    static getDerivedStateFromError(error) {
+        return { error };
+    }
+
+    componentDidCatch(error, info) {
+        // Keep it in the console for anyone debugging a live report.
+        // eslint-disable-next-line no-console
+        console.error(`[${this.props.name || 'page'}] crashed`, error, info);
+    }
+
+    render() {
+        const { error } = this.state;
+        if (!error) return this.props.children;
+
+        return (
+            <div className='page-boundary'>
+                <div className='page-boundary__card'>
+                    <div className='page-boundary__title'>{this.props.name || 'This page'} hit an error</div>
+                    <div className='page-boundary__msg'>{error?.message || String(error)}</div>
+                    <button
+                        type='button'
+                        className='page-boundary__btn'
+                        onClick={() => this.setState({ error: null })}
+                    >
+                        Try again
+                    </button>
+                    <div className='page-boundary__hint'>
+                        The rest of the app is unaffected - the other tabs still work.
+                    </div>
+                </div>
+            </div>
+        );
+    }
+}
+
+export default PageBoundary;
+'@
+
+$boundaryCss = @'
+.page-boundary {
+    height: var(--tab-content-height);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+    background: linear-gradient(180deg, #0a0e17 0%, #0c1120 55%, #0a0e17 100%);
+
+    &__card {
+        max-width: 46rem;
+        padding: 2rem;
+        border-radius: 1.4rem;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(248, 113, 113, 0.4);
+        text-align: center;
+    }
+
+    &__title {
+        color: #f87171;
+        font-size: 1.8rem;
+        font-weight: 800;
+        margin-bottom: 1rem;
+    }
+
+    &__msg {
+        color: #cbd5e1;
+        font-family: monospace;
+        font-size: 1.2rem;
+        line-height: 1.55;
+        word-break: break-word;
+        margin-bottom: 1.6rem;
+    }
+
+    &__btn {
+        padding: 0.9rem 2rem;
+        border-radius: 1rem;
+        border: 1px solid rgba(212, 175, 55, 0.5);
+        background: rgba(212, 175, 55, 0.15);
+        color: #e8cf7a;
+        font-size: 1.3rem;
+        font-weight: 700;
+        cursor: pointer;
+    }
+
+    &__hint {
+        margin-top: 1.2rem;
+        color: #7c8698;
+        font-size: 1.1rem;
+    }
+}
+'@
+
+$pageSrc = @'
 // @ts-nocheck -- Matches Pro (Phase 3: demo-only DIGITMATCH execution).
 //
 // Trading is off by default. Two hard locks sit in risk-guard.evaluate(), not
@@ -995,3 +1139,34 @@ const MatchesProPage = () => (
 );
 
 export default MatchesProPage;
+'@
+
+Info ''
+Info '[1/3] Writing files'
+Write-File 'src/components/shared/nlb/page-boundary.tsx'  $boundarySrc
+Write-File 'src/components/shared/nlb/page-boundary.scss' $boundaryCss
+Write-File 'src/pages/matches-pro/matches-pro.tsx'        $pageSrc
+
+$ErrorActionPreference = 'Continue'
+
+Info ''
+if ($SkipBuild) { Info '[2/3] Build skipped' } else {
+    Info '[2/3] Running npm run build (a few minutes)'
+    npm run build
+    if ($LASTEXITCODE -ne 0) { Write-Host ''; Fail 'Build failed. Nothing committed.' }
+    Ok 'build succeeded'
+}
+
+Info ''
+Info '[3/3] Commit and push'
+git pull --rebase origin main
+git add -A
+git commit -m "Fix Matches Pro crash (missing plainRead definition) and add page error boundary"
+if ($LASTEXITCODE -ne 0) { Info 'Nothing new to commit.' }
+if ($NoPush) { Info 'Push skipped.' } else {
+    git push
+    if ($LASTEXITCODE -ne 0) { Fail 'Push failed.' }
+    Ok 'pushed - Vercel will start the deployment now'
+}
+Write-Host ''
+Write-Host 'Done. Hard refresh once Vercel is green.' -ForegroundColor Yellow

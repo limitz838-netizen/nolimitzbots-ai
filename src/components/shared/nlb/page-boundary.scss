@@ -1,0 +1,50 @@
+.page-boundary {
+    height: var(--tab-content-height);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+    background: linear-gradient(180deg, #0a0e17 0%, #0c1120 55%, #0a0e17 100%);
+
+    &__card {
+        max-width: 46rem;
+        padding: 2rem;
+        border-radius: 1.4rem;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(248, 113, 113, 0.4);
+        text-align: center;
+    }
+
+    &__title {
+        color: #f87171;
+        font-size: 1.8rem;
+        font-weight: 800;
+        margin-bottom: 1rem;
+    }
+
+    &__msg {
+        color: #cbd5e1;
+        font-family: monospace;
+        font-size: 1.2rem;
+        line-height: 1.55;
+        word-break: break-word;
+        margin-bottom: 1.6rem;
+    }
+
+    &__btn {
+        padding: 0.9rem 2rem;
+        border-radius: 1rem;
+        border: 1px solid rgba(212, 175, 55, 0.5);
+        background: rgba(212, 175, 55, 0.15);
+        color: #e8cf7a;
+        font-size: 1.3rem;
+        font-weight: 700;
+        cursor: pointer;
+    }
+
+    &__hint {
+        margin-top: 1.2rem;
+        color: #7c8698;
+        font-size: 1.1rem;
+    }
+}
