@@ -1,3 +1,144 @@
+# ==========================================================================
+#  NolimitzBots - Matches Pro: live proposal stream
+#   * subscribed proposals for all ten digits, so a buy skips the
+#     proposal round-trip and lands on the intended tick far more often
+#   * payout multiplier now comes live from Deriv instead of being typed in,
+#     so break-even is always correct
+#   * plain-language read of what the analysis currently says
+#
+#      powershell -ExecutionPolicy Bypass -File .\install-matches-fast.ps1
+#
+#  Flags:  -SkipBuild   -NoPush
+# ==========================================================================
+param([switch]$SkipBuild, [switch]$NoPush)
+
+$ErrorActionPreference = 'Stop'
+
+function Fail($msg) { Write-Host "  FAILED: $msg" -ForegroundColor Red; exit 1 }
+function Ok($msg)   { Write-Host "  OK: $msg" -ForegroundColor Green }
+function Info($msg) { Write-Host $msg -ForegroundColor Cyan }
+
+try { $root = (git rev-parse --show-toplevel).Trim() } catch { Fail 'Not inside a git repository.' }
+Set-Location $root
+if (-not (Test-Path 'src/components/shared/nlb/risk-guard.ts')) { Fail 'Matches Pro Phase 3 not installed.' }
+Info "Repo: $root"
+
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+function Write-File($relPath, $text) {
+    $full = Join-Path $root $relPath
+    $dir  = Split-Path -Parent $full
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [System.IO.File]::WriteAllText($full, $text.Replace("`r`n", "`n"), $utf8NoBom)
+    Ok "wrote $relPath"
+}
+
+$streamSrc = @'
+// @ts-nocheck -- Live DIGITMATCH proposal stream.
+//
+// Without this, buying takes two round-trips to Deriv: request a proposal,
+// wait, then buy against the id it returns. On a one-tick contract that delay
+// can push the order onto a later tick than the one the engine was reasoning
+// about.
+//
+// Here we keep a subscribed proposal open for all ten barriers at once. Deriv
+// pushes a fresh id and price on every tick, so a buy is a single message with
+// an id we already hold.
+//
+// It also gives the real payout multiplier continuously, which is what the
+// break-even figure should be based on rather than a typed-in guess.
+
+import { api_base } from '@/external/bot-skeleton';
+
+const STALE_MS = 15000; // a proposal id older than this is not trusted
+
+export const startProposals = ({ symbol, currency, amount, contract_type = 'DIGITMATCH', onUpdate, onError }) => {
+    const latest = {}; // digit -> { id, ask, payout, at }
+    let stream = null;
+    let stopped = false;
+
+    try {
+        stream = api_base.api.onMessage().subscribe(({ data }) => {
+            if (stopped) return;
+            if (data?.msg_type !== 'proposal' || !data.proposal) return;
+
+            const echo = data.echo_req || {};
+            // Only accept proposals matching the stream we asked for - the
+            // account may have other proposal traffic from other surfaces.
+            if (echo.underlying_symbol !== symbol) return;
+            if (echo.contract_type !== contract_type) return;
+            if (Number(echo.amount) !== Number(amount)) return;
+            if (echo.barrier === undefined || echo.barrier === null) return;
+
+            const digit = Number(echo.barrier);
+            if (!Number.isInteger(digit) || digit < 0 || digit > 9) return;
+
+            latest[digit] = {
+                id: data.proposal.id,
+                ask: Number(data.proposal.ask_price),
+                payout: Number(data.proposal.payout),
+                at: Date.now(),
+            };
+            onUpdate?.(latest, digit);
+        });
+    } catch (e) {
+        onError?.(e);
+    }
+
+    for (let digit = 0; digit < 10; digit += 1) {
+        try {
+            api_base.api
+                .send({
+                    proposal: 1,
+                    subscribe: 1,
+                    amount: Number(amount),
+                    basis: 'stake',
+                    contract_type,
+                    currency,
+                    duration: 1,
+                    duration_unit: 't',
+                    underlying_symbol: symbol,
+                    barrier: String(digit),
+                })
+                .catch(e => onError?.(e));
+        } catch (e) {
+            onError?.(e);
+        }
+    }
+
+    return {
+        // A priced, unexpired proposal for this digit, or null.
+        get: digit => {
+            const p = latest[digit];
+            if (!p) return null;
+            if (Date.now() - p.at > STALE_MS) return null;
+            return p;
+        },
+        all: () => latest,
+        // Payout multiplier implied by whatever we currently hold.
+        multiplier: () => {
+            const priced = Object.values(latest).filter(p => p.ask > 0 && Date.now() - p.at <= STALE_MS);
+            if (!priced.length) return null;
+            const ratios = priced.map(p => p.payout / p.ask);
+            return ratios.reduce((a, b) => a + b, 0) / ratios.length;
+        },
+        stop: () => {
+            stopped = true;
+            try {
+                api_base.api.send({ forget_all: 'proposal' });
+            } catch {
+                /* noop */
+            }
+            try {
+                stream?.unsubscribe();
+            } catch {
+                /* noop */
+            }
+        },
+    };
+};
+'@
+
+$pageSrc = @'
 // @ts-nocheck -- Matches Pro (Phase 3: demo-only DIGITMATCH execution).
 //
 // Trading is off by default. Two hard locks sit in risk-guard.evaluate(), not
@@ -953,3 +1094,694 @@ const MatchesPro = () => {
 };
 
 export default MatchesPro;
+'@
+
+$stylesSrc = @'
+.matches-pro {
+    height: var(--tab-content-height);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 1.6rem 1.6rem 14rem;
+    background: radial-gradient(1200px 500px at 85% -10%, rgba(212, 175, 55, 0.12), transparent 60%),
+        linear-gradient(180deg, #0a0e17 0%, #0c1120 55%, #0a0e17 100%);
+
+    &__panel {
+        max-width: 640px;
+        margin: 0 auto;
+        padding: 1.8rem;
+        border-radius: 1.6rem;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(212, 175, 55, 0.28);
+    }
+
+    &__head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 1rem;
+    }
+
+    &__title {
+        color: #e8cf7a;
+        font-size: 2rem;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+    }
+
+    &__subtitle {
+        color: #9aa1b0;
+        font-size: 1.2rem;
+        margin: 0.4rem 0 1.4rem;
+    }
+
+    &__status {
+        flex-shrink: 0;
+        font-size: 1.1rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        padding: 0.5rem 0.9rem;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        color: #cbd5e1;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+
+        &--live {
+            color: #34d399;
+            border-color: rgba(52, 211, 153, 0.4);
+        }
+
+        &--reconnecting,
+        &--connecting {
+            color: #fbbf24;
+            border-color: rgba(245, 158, 11, 0.4);
+        }
+
+        &--disconnected {
+            color: #f87171;
+            border-color: rgba(248, 113, 113, 0.4);
+        }
+    }
+
+    &__dot {
+        width: 0.8rem;
+        height: 0.8rem;
+        border-radius: 50%;
+        background: currentColor;
+    }
+
+    &__warn {
+        background: rgba(245, 158, 11, 0.12);
+        border: 1px solid rgba(245, 158, 11, 0.4);
+        color: #fbbf24;
+        border-radius: 1rem;
+        padding: 1rem;
+        font-size: 1.2rem;
+        margin-bottom: 1.2rem;
+    }
+
+    &__controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1rem;
+        margin-bottom: 1.4rem;
+    }
+
+    &__field {
+        flex: 1 1 200px;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+
+        span {
+            color: #9aa1b0;
+            font-size: 1.1rem;
+        }
+
+        select,
+        input {
+            background: rgba(10, 14, 23, 0.9);
+            border: 1px solid rgba(212, 175, 55, 0.3);
+            color: #e8eaf0;
+            border-radius: 0.8rem;
+            padding: 0.9rem 1rem;
+            font-size: 1.3rem;
+        }
+    }
+
+    &__readout {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 0.8rem;
+        margin-bottom: 1.6rem;
+
+        @media (max-width: 600px) {
+            grid-template-columns: repeat(2, 1fr);
+        }
+    }
+
+    &__stat {
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 1rem;
+        padding: 0.9rem;
+        text-align: center;
+
+        span {
+            display: block;
+            color: #9aa1b0;
+            font-size: 1rem;
+            margin-bottom: 0.3rem;
+        }
+
+        strong {
+            color: #e8eaf0;
+            font-size: 1.6rem;
+            font-weight: 700;
+        }
+    }
+
+    &__digit {
+        color: #e8cf7a !important;
+        font-size: 2.4rem !important;
+    }
+
+    &__section-title {
+        color: #e8cf7a;
+        font-size: 1.2rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        margin: 1.6rem 0 0.8rem;
+    }
+
+    &__dist {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+    }
+
+    &__row {
+        display: flex;
+        align-items: center;
+        gap: 0.8rem;
+    }
+
+    &__row-digit {
+        width: 1.6rem;
+        color: #e8eaf0;
+        font-size: 1.3rem;
+        font-weight: 700;
+        text-align: center;
+    }
+
+    &__bar {
+        flex: 1;
+        height: 1.2rem;
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 999px;
+        overflow: hidden;
+
+        span {
+            display: block;
+            height: 100%;
+            border-radius: 999px;
+            background: linear-gradient(90deg, rgba(212, 175, 55, 0.5), #e8cf7a);
+            transition: width 0.25s ease;
+        }
+    }
+
+    &__row-pct {
+        width: 4.6rem;
+        text-align: right;
+        color: #cbd5e1;
+        font-size: 1.2rem;
+        font-variant-numeric: tabular-nums;
+    }
+
+    &__recent {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+    }
+
+    &__chip {
+        min-width: 2.4rem;
+        text-align: center;
+        padding: 0.4rem 0.5rem;
+        border-radius: 0.6rem;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        color: #e8eaf0;
+        font-size: 1.2rem;
+        font-variant-numeric: tabular-nums;
+    }
+
+    &__muted {
+        color: #6b7280;
+        font-size: 1.2rem;
+    }
+
+    &__diag {
+        margin-top: 1.6rem;
+        padding: 0.8rem 1rem;
+        border-radius: 0.8rem;
+        background: rgba(0, 0, 0, 0.35);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        color: #7c8698;
+        font-family: monospace;
+        font-size: 1rem;
+        line-height: 1.5;
+        word-break: break-word;
+    }
+
+    &__signal {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1.2rem;
+        padding: 1.4rem;
+        border-radius: 1.2rem;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+
+        &--strong { border-color: rgba(52, 211, 153, 0.55); }
+        &--medium { border-color: rgba(212, 175, 55, 0.55); }
+        &--weak { border-color: rgba(245, 158, 11, 0.45); }
+        &--no-signal { border-color: rgba(148, 163, 184, 0.3); }
+    }
+
+    &__signal-main {
+        display: flex;
+        align-items: center;
+        gap: 1.2rem;
+    }
+
+    &__signal-digit {
+        width: 6rem;
+        height: 6rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 1.2rem;
+        background: rgba(212, 175, 55, 0.12);
+        border: 1px solid rgba(212, 175, 55, 0.35);
+        color: #e8cf7a;
+        font-size: 3.2rem;
+        font-weight: 800;
+    }
+
+    &__signal-quality {
+        color: #e8eaf0;
+        font-size: 1.6rem;
+        font-weight: 800;
+        letter-spacing: 0.05em;
+    }
+
+    &__signal-sub {
+        color: #9aa1b0;
+        font-size: 1.1rem;
+        margin-top: 0.3rem;
+    }
+
+    &__signal-nums {
+        display: flex;
+        gap: 1.6rem;
+
+        span {
+            display: block;
+            color: #9aa1b0;
+            font-size: 1rem;
+        }
+
+        strong {
+            color: #e8eaf0;
+            font-size: 1.5rem;
+        }
+    }
+
+    &__link {
+        margin-top: 0.8rem;
+        background: none;
+        border: none;
+        color: #e8cf7a;
+        font-size: 1.2rem;
+        text-decoration: underline;
+        cursor: pointer;
+        padding: 0;
+    }
+
+    &__why {
+        margin-top: 0.8rem;
+        padding: 1.2rem;
+        border-radius: 1rem;
+        background: rgba(0, 0, 0, 0.3);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        color: #cbd5e1;
+        font-size: 1.2rem;
+        line-height: 1.55;
+
+        table { width: 100%; margin: 1rem 0; border-collapse: collapse; }
+        td { padding: 0.35rem 0; font-size: 1.15rem; }
+        td.pos { color: #34d399; text-align: right; font-variant-numeric: tabular-nums; }
+        td.neg { color: #f87171; text-align: right; font-variant-numeric: tabular-nums; }
+        td.note { color: #6b7280; text-align: right; font-size: 1rem; padding-left: 1rem; }
+    }
+
+    &__why-foot {
+        color: #7c8698;
+        font-size: 1.05rem;
+    }
+
+    &__reset {
+        float: right;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        color: #cbd5e1;
+        border-radius: 0.6rem;
+        padding: 0.3rem 0.9rem;
+        font-size: 1rem;
+        cursor: pointer;
+        text-transform: none;
+        letter-spacing: 0;
+    }
+
+    &__verdict {
+        padding: 0.9rem 1.1rem;
+        border-radius: 0.9rem;
+        background: rgba(148, 163, 184, 0.1);
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        color: #cbd5e1;
+        font-size: 1.2rem;
+        line-height: 1.5;
+    }
+
+    &__mini {
+        margin-top: 0.7rem;
+        color: #9aa1b0;
+        font-size: 1.1rem;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+    }
+
+    &__tag {
+        padding: 0.2rem 0.7rem;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    &__feed {
+        display: flex;
+        flex-direction: column;
+        gap: 0.3rem;
+        font-family: monospace;
+        font-size: 1.1rem;
+    }
+
+    &__feed-row {
+        display: grid;
+        grid-template-columns: auto auto auto 1fr auto;
+        gap: 0.8rem;
+        padding: 0.45rem 0.8rem;
+        border-radius: 0.6rem;
+        background: rgba(255, 255, 255, 0.03);
+        color: #9aa1b0;
+
+        &.hit { color: #34d399; background: rgba(52, 211, 153, 0.08); }
+        &.miss { color: #8b93a3; }
+    }
+
+    &__row-digit.is-predicted {
+        color: #e8cf7a;
+    }
+
+    &__locks {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+        margin-bottom: 1.2rem;
+    }
+
+    &__lock {
+        padding: 0.4rem 0.9rem;
+        border-radius: 999px;
+        font-size: 1.1rem;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.04);
+
+        &.ok { color: #34d399; border-color: rgba(52, 211, 153, 0.4); }
+        &.bad { color: #f87171; border-color: rgba(248, 113, 113, 0.4); }
+    }
+
+    &__limits {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 0.9rem;
+        margin-bottom: 1.4rem;
+
+        @media (max-width: 600px) {
+            grid-template-columns: repeat(2, 1fr);
+        }
+    }
+
+    &__field--wide {
+        margin-bottom: 1.2rem;
+        max-width: 34rem;
+    }
+
+    &__trade-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 1rem;
+        margin-bottom: 1.4rem;
+    }
+
+    &__auto {
+        flex: 0 0 auto;
+        padding: 1rem 1.8rem;
+        border-radius: 1rem;
+        border: 1px solid rgba(212, 175, 55, 0.5);
+        background: linear-gradient(180deg, rgba(212, 175, 55, 0.25), rgba(212, 175, 55, 0.12));
+        color: #e8cf7a;
+        font-size: 1.3rem;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        cursor: pointer;
+
+        &.on {
+            border-color: rgba(248, 113, 113, 0.6);
+            background: linear-gradient(180deg, rgba(248, 113, 113, 0.25), rgba(248, 113, 113, 0.12));
+            color: #fca5a5;
+        }
+
+        &:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+    }
+
+    &__gate {
+        flex: 1 1 200px;
+        color: #9aa1b0;
+        font-size: 1.15rem;
+        line-height: 1.45;
+
+        &.ok { color: #34d399; }
+    }
+
+    &__trades {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+        font-family: monospace;
+        font-size: 1.1rem;
+        margin-top: 1rem;
+    }
+
+    &__trade-row {
+        display: grid;
+        grid-template-columns: 1.4fr 0.6fr 1fr 1fr 1fr;
+        gap: 0.6rem;
+        padding: 0.45rem 0.8rem;
+        border-radius: 0.6rem;
+        background: rgba(255, 255, 255, 0.03);
+        color: #9aa1b0;
+
+        &.head { color: #6b7280; background: none; }
+        &.win { color: #34d399; background: rgba(52, 211, 153, 0.08); }
+        &.loss { color: #8b93a3; }
+
+        span:not(:first-child) { text-align: right; }
+    }
+
+    &__stat strong.pos { color: #34d399; }
+    &__stat strong.neg { color: #f87171; }
+
+    &__analyse {
+        margin-bottom: 1.6rem;
+    }
+
+    &__analyse-controls {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        gap: 1rem;
+        margin-bottom: 1.2rem;
+    }
+
+    &__analyse-btn {
+        padding: 1.1rem 2.4rem;
+        border-radius: 1rem;
+        border: 1px solid rgba(212, 175, 55, 0.55);
+        background: linear-gradient(180deg, rgba(212, 175, 55, 0.3), rgba(212, 175, 55, 0.14));
+        color: #e8cf7a;
+        font-size: 1.4rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+
+        &:disabled { opacity: 0.4; cursor: not-allowed; }
+    }
+
+    &__analyse-card {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 1.4rem;
+        padding: 1.4rem;
+        border-radius: 1.2rem;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.03);
+
+        &.live { border-color: rgba(212, 175, 55, 0.55); }
+        &.done { border-color: rgba(148, 163, 184, 0.35); }
+
+        @media (max-width: 600px) {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    &__analyse-digit {
+        width: 9rem;
+        height: 9rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 1.4rem;
+        background: rgba(212, 175, 55, 0.14);
+        border: 1px solid rgba(212, 175, 55, 0.4);
+        color: #e8cf7a;
+        font-size: 5rem;
+        font-weight: 800;
+        line-height: 1;
+    }
+
+    &__analyse-body {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 0.6rem;
+    }
+
+    &__analyse-count {
+        color: #e8eaf0;
+        font-size: 2.4rem;
+        font-weight: 800;
+        font-variant-numeric: tabular-nums;
+    }
+
+    &__analyse-bar {
+        height: 0.6rem;
+        background: rgba(255, 255, 255, 0.07);
+        border-radius: 999px;
+        overflow: hidden;
+
+        span {
+            display: block;
+            height: 100%;
+            background: linear-gradient(90deg, rgba(212, 175, 55, 0.6), #e8cf7a);
+            transition: width 0.25s linear;
+        }
+    }
+
+    &__analyse-sub {
+        color: #9aa1b0;
+        font-size: 1.2rem;
+        line-height: 1.5;
+    }
+
+    &__analyse-nums {
+        color: #7c8698;
+        font-size: 1.1rem;
+    }
+
+    &__analyse-ticks {
+        grid-column: 1 / -1;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+
+        span {
+            min-width: 2.4rem;
+            text-align: center;
+            padding: 0.35rem 0.5rem;
+            border-radius: 0.6rem;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            color: #9aa1b0;
+            font-family: monospace;
+            font-size: 1.2rem;
+
+            &.hit {
+                color: #34d399;
+                border-color: rgba(52, 211, 153, 0.5);
+                background: rgba(52, 211, 153, 0.12);
+            }
+        }
+    }
+
+    &__read {
+        margin-top: 1rem;
+        padding: 1rem 1.2rem;
+        border-radius: 1rem;
+        background: rgba(148, 163, 184, 0.09);
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        color: #cbd5e1;
+        font-size: 1.3rem;
+        line-height: 1.55;
+    }
+
+    &__note-inline {
+        margin-top: 1rem;
+        color: #7c8698;
+        font-size: 1.15rem;
+        line-height: 1.55;
+    }
+
+    &__note {
+        margin-top: 1.8rem;
+        padding: 1rem;
+        border-radius: 1rem;
+        background: rgba(148, 163, 184, 0.08);
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        color: #9aa1b0;
+        font-size: 1.1rem;
+        line-height: 1.5;
+    }
+}
+'@
+
+Info ''
+Info '[1/3] Writing files'
+Write-File 'src/components/shared/nlb/proposal-stream.ts' $streamSrc
+Write-File 'src/pages/matches-pro/matches-pro.tsx'        $pageSrc
+Write-File 'src/pages/matches-pro/matches-pro.scss'       $stylesSrc
+
+$ErrorActionPreference = 'Continue'
+
+Info ''
+if ($SkipBuild) { Info '[2/3] Build skipped' } else {
+    Info '[2/3] Running npm run build (a few minutes)'
+    npm run build
+    if ($LASTEXITCODE -ne 0) { Write-Host ''; Fail 'Build failed. Nothing committed.' }
+    Ok 'build succeeded'
+}
+
+Info ''
+Info '[3/3] Commit and push'
+git pull --rebase origin main
+git add -A
+git commit -m "Matches Pro: live proposal stream for instant buys and real payout"
+if ($LASTEXITCODE -ne 0) { Info 'Nothing new to commit.' }
+if ($NoPush) { Info 'Push skipped.' } else {
+    git push
+    if ($LASTEXITCODE -ne 0) { Fail 'Push failed.' }
+    Ok 'pushed - Vercel will start the deployment now'
+}
+Write-Host ''
+Write-Host 'Done. Hard refresh once Vercel is green.' -ForegroundColor Yellow

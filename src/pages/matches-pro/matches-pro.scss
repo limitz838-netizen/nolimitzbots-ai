@@ -626,6 +626,17 @@
         }
     }
 
+    &__read {
+        margin-top: 1rem;
+        padding: 1rem 1.2rem;
+        border-radius: 1rem;
+        background: rgba(148, 163, 184, 0.09);
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        color: #cbd5e1;
+        font-size: 1.3rem;
+        line-height: 1.55;
+    }
+
     &__note-inline {
         margin-top: 1rem;
         color: #7c8698;
