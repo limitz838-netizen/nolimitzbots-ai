@@ -4,7 +4,7 @@
 // Every historical score is walk-forward: only ticks that existed before the
 // scored tick may influence a prediction. The engine is allowed to abstain.
 
-export const ENGINE_VERSION = 'v3-consensus';
+export const ENGINE_VERSION = 'v4-fingerprint';
 export const WINDOWS = [50, 100, 250, 500, 1000];
 
 const NULL_P = 0.1;
@@ -75,6 +75,26 @@ const MODELS = [
     { id: 'momentum', run: momentumModel },
     { id: 'reversion', run: reversionModel },
 ];
+
+const strengthBucket = value => {
+    const v = Number(value) || 0;
+    if (v >= 0.05) return 'high';
+    if (v >= 0.02) return 'mid';
+    return 'low';
+};
+
+const makeFingerprint = (consensus, digits) => {
+    if (!consensus) return null;
+    const models = [...consensus.models].sort();
+    const lastDigit = digits?.length ? digits[digits.length - 1] : null;
+    return [
+        `d${consensus.digit}`,
+        `v${consensus.votes}`,
+        models.join('+'),
+        `s${strengthBucket(consensus.strength)}`,
+        `prev${lastDigit ?? 'x'}`,
+    ].join('|');
+};
 
 const consensusFromPicks = picks => {
     const groups = new Map();
@@ -158,6 +178,9 @@ export const predict = (digits, options = {}) => {
             engineVersion: ENGINE_VERSION,
             predictedDigit: null,
             candidateDigit: null,
+            fingerprint: null,
+            agreementTier: 0,
+            agreementModels: [],
             score: 0,
             probabilityEstimate: NULL_P,
             sampleSize: digits?.length || 0,
@@ -176,6 +199,7 @@ export const predict = (digits, options = {}) => {
     const { modelResults, consensus } = evaluateAll(digits);
 
     const candidate = liveConsensus?.digit ?? null;
+    const fingerprint = makeFingerprint(liveConsensus, digits);
     const exactLive = candidate !== null ? options.payoutByDigit?.[candidate] : null;
     const payout = Number(exactLive) > 0 ? Number(exactLive) : fallbackPayout;
     const breakeven = 1 / payout;
@@ -205,6 +229,9 @@ export const predict = (digits, options = {}) => {
         engineVersion: ENGINE_VERSION,
         predictedDigit: shouldPredict ? candidate : null,
         candidateDigit: candidate,
+        fingerprint,
+        agreementTier: liveConsensus?.votes ?? 0,
+        agreementModels: liveConsensus ? [...liveConsensus.models].sort() : [],
         score,
         probabilityEstimate: consensus.validated,
         observedRate: consensus.accuracy,
