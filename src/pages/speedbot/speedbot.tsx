@@ -72,7 +72,7 @@ const NolimitzAI = observer(() => {
     const loginid = client?.loginid || 'NOT CONNECTED';
     const currency = client?.currency || 'USD';
     const balance = Number(client?.balance ?? 0);
-    const is_demo = loginid.startsWith('VRT') || loginid.startsWith('VRTC');
+    const is_demo = !!client?.is_virtual || loginid.startsWith('VRT') || loginid.startsWith('VRTC');
     const account_mode = !is_logged_in ? 'offline' : is_demo ? 'demo' : 'real';
 
     const [symbol, setSymbol] = React.useState('1HZ100V');
