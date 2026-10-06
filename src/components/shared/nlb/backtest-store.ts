@@ -7,7 +7,7 @@
 //
 // Persisted per symbol so a run survives a refresh.
 
-const KEY = symbol => `nlb_matches_backtest_v3_${symbol}`;
+const KEY = symbol => `nlb_matches_backtest_v4_${symbol}`;
 const MAX_RECENT = 300;
 
 const NULL_P = 0.1;
@@ -18,6 +18,8 @@ const empty = () => ({
     by_digit: Array.from({ length: 10 }, () => ({ n: 0, correct: 0 })),
     by_quality: {},
     by_model: {},
+    by_setup: {},
+    by_tier: {},
     longest_win: 0,
     longest_loss: 0,
     current_win: 0,
@@ -59,9 +61,30 @@ export const record = (symbol, entry) => {
 
     const q = entry.quality || 'NO SIGNAL';
     const model = entry.model || 'unknown';
+    const fingerprint = entry.fingerprint || 'unknown';
+    const tier = Number(entry.agreementTier) || 0;
     if (!state.by_model[model]) state.by_model[model] = { n: 0, correct: 0 };
     state.by_model[model].n += 1;
     if (hit) state.by_model[model].correct += 1;
+
+    if (!state.by_setup[fingerprint]) {
+        state.by_setup[fingerprint] = {
+            n: 0,
+            correct: 0,
+            digit: entry.predicted,
+            tier,
+            models: entry.agreementModels || [],
+            last_t: 0,
+        };
+    }
+    state.by_setup[fingerprint].n += 1;
+    state.by_setup[fingerprint].last_t = entry.t;
+    if (hit) state.by_setup[fingerprint].correct += 1;
+
+    const tierKey = String(tier || 0);
+    if (!state.by_tier[tierKey]) state.by_tier[tierKey] = { n: 0, correct: 0 };
+    state.by_tier[tierKey].n += 1;
+    if (hit) state.by_tier[tierKey].correct += 1;
     if (!state.by_quality[q]) state.by_quality[q] = { n: 0, correct: 0 };
     state.by_quality[q].n += 1;
     if (hit) state.by_quality[q].correct += 1;
@@ -86,6 +109,9 @@ export const record = (symbol, entry) => {
         model,
         engineVersion: entry.engineVersion || 'unknown',
         tradable: Boolean(entry.tradable),
+        fingerprint,
+        agreementTier: tier,
+        agreementModels: entry.agreementModels || [],
     });
     if (state.recent.length > MAX_RECENT) state.recent = state.recent.slice(-MAX_RECENT);
 
@@ -100,6 +126,45 @@ export const reset = symbol => {
     save(symbol, state);
     return state;
 };
+
+export const wilsonLower = (hits, trials, z = 1.645) => {
+    if (!trials) return 0;
+    const p = hits / trials;
+    const z2 = z * z;
+    const den = 1 + z2 / trials;
+    const centre = p + z2 / (2 * trials);
+    const spread = z * Math.sqrt((p * (1 - p) + z2 / (4 * trials)) / trials);
+    return Math.max(0, (centre - spread) / den);
+};
+
+export const setupStats = (state, fingerprint) => {
+    const row = state?.by_setup?.[fingerprint] || null;
+    if (!row) return { n: 0, correct: 0, accuracy: 0, lowerBound: 0, row: null };
+    const n = row.n || 0;
+    const correct = row.correct || 0;
+    return {
+        n,
+        correct,
+        accuracy: n ? correct / n : 0,
+        lowerBound: wilsonLower(correct, n),
+        row,
+    };
+};
+
+export const topSetups = (state, limit = 8) =>
+    Object.entries(state?.by_setup || {})
+        .map(([fingerprint, row]) => {
+            const n = row.n || 0;
+            const correct = row.correct || 0;
+            return {
+                fingerprint,
+                ...row,
+                accuracy: n ? correct / n : 0,
+                lowerBound: wilsonLower(correct, n),
+            };
+        })
+        .sort((a, b) => b.n - a.n || b.accuracy - a.accuracy)
+        .slice(0, limit);
 
 // Normal approximation to the binomial, two-sided. Tells us whether the hit
 // rate is distinguishable from 10% at all.
