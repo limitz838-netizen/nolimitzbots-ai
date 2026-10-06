@@ -874,3 +874,290 @@
         font-weight: 400 !important;
     }
 }
+
+
+/* Matches Pro V2: focused analyzer + auto trader */
+.matches-pro--v2 {
+    width: 100%;
+    max-width: none;
+    padding: 1.6rem clamp(1rem, 3vw, 3.5rem) 5rem;
+}
+
+.matches-pro__panel--v2 {
+    width: min(1180px, 100%);
+    max-width: 1180px;
+    margin: 0 auto;
+}
+
+.matches-pro__v2-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1rem;
+    margin-bottom: 1.25rem;
+}
+
+.matches-pro__eyebrow {
+    margin-bottom: .35rem;
+    color: #e8cf7a;
+    font-size: .9rem;
+    font-weight: 800;
+    letter-spacing: .16em;
+}
+
+.matches-pro__v2-card {
+    margin-bottom: 1.25rem;
+    padding: clamp(1.1rem, 2.4vw, 2rem);
+    border: 1px solid rgba(212, 175, 55, .22);
+    border-radius: 1.35rem;
+    background: linear-gradient(180deg, rgba(18, 24, 38, .98), rgba(9, 14, 25, .98));
+    box-shadow: 0 20px 55px rgba(0, 0, 0, .18);
+}
+
+.matches-pro__v2-card--analyser {
+    border-color: rgba(232, 207, 122, .34);
+}
+
+.matches-pro__v2-section-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 1rem;
+    margin-bottom: 1.3rem;
+
+    h2 {
+        margin: .15rem 0 .35rem;
+        color: #f8fafc;
+        font-size: clamp(1.45rem, 2.5vw, 2rem);
+    }
+
+    p {
+        max-width: 720px;
+        margin: 0;
+        color: #9aa3b5;
+        line-height: 1.5;
+    }
+}
+
+.matches-pro__v2-step {
+    color: #e8cf7a;
+    font-size: .9rem;
+    font-weight: 800;
+    letter-spacing: .12em;
+}
+
+.matches-pro__v2-controls {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr;
+    gap: .8rem;
+    margin-bottom: 1rem;
+}
+
+.matches-pro__v2-controls--trade {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.matches-pro__v2-live {
+    padding: .85rem 1rem;
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: .9rem;
+    background: rgba(255,255,255,.035);
+
+    span, small {
+        display: block;
+        color: #8e98aa;
+    }
+
+    strong {
+        display: block;
+        margin: .25rem 0;
+        color: #f8fafc;
+        font-size: 1.35rem;
+        font-variant-numeric: tabular-nums;
+    }
+}
+
+.matches-pro__analyse-btn--primary {
+    width: 100%;
+    min-height: 3.6rem;
+    margin: .2rem 0 1rem;
+    font-size: 1.05rem;
+    font-weight: 900;
+    letter-spacing: .04em;
+}
+
+.matches-pro__prediction-result {
+    padding: 1.35rem;
+    text-align: center;
+    border: 1px solid rgba(232,207,122,.28);
+    border-radius: 1.15rem;
+    background: radial-gradient(circle at 50% 10%, rgba(232,207,122,.12), transparent 58%);
+
+    > strong {
+        display: block;
+        margin: .35rem 0;
+        color: #e8cf7a;
+        font-size: clamp(4rem, 10vw, 7rem);
+        line-height: 1;
+    }
+
+    p {
+        max-width: 650px;
+        margin: .55rem auto 0;
+        color: #9aa3b5;
+        line-height: 1.45;
+    }
+}
+
+.matches-pro__prediction-label {
+    color: #b8c0ce;
+    font-size: .9rem;
+    font-weight: 800;
+    letter-spacing: .13em;
+}
+
+.matches-pro__truth-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0,1fr));
+    gap: .7rem;
+    margin-top: 1rem;
+
+    > div {
+        padding: .9rem;
+        border: 1px solid rgba(255,255,255,.07);
+        border-radius: .85rem;
+        background: rgba(255,255,255,.025);
+    }
+
+    span {
+        display: block;
+        color: #8993a5;
+        font-size: .9rem;
+    }
+
+    strong {
+        display: block;
+        margin-top: .25rem;
+        color: #f8fafc;
+        font-size: 1.25rem;
+    }
+}
+
+.matches-pro__verification {
+    margin-top: 1rem;
+}
+
+.matches-pro__v2-subtitle {
+    margin-bottom: .55rem;
+    color: #cbd5e1;
+    font-weight: 700;
+}
+
+.matches-pro__verify-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: .75rem;
+    align-items: center;
+    padding: .65rem .8rem;
+    border-top: 1px solid rgba(255,255,255,.06);
+    color: #aab3c2;
+
+    b { color: #f8fafc; }
+
+    &.hit > strong { color: #34d399; }
+    &.miss > strong { color: #f87171; }
+}
+
+.matches-pro__account-pill {
+    flex: 0 0 auto;
+    padding: .45rem .75rem;
+    border-radius: 999px;
+    font-size: .8rem;
+    font-weight: 800;
+
+    &.demo {
+        color: #34d399;
+        border: 1px solid rgba(52,211,153,.3);
+        background: rgba(52,211,153,.08);
+    }
+
+    &.blocked {
+        color: #fbbf24;
+        border: 1px solid rgba(251,191,36,.3);
+        background: rgba(251,191,36,.08);
+    }
+}
+
+.matches-pro__auto-pick {
+    margin: .2rem 0 1rem;
+    padding: 1rem;
+    text-align: center;
+    border-radius: 1rem;
+    border: 1px solid rgba(255,255,255,.08);
+    background: rgba(255,255,255,.025);
+
+    span, small { display: block; color: #8f99aa; }
+    strong {
+        display: block;
+        margin: .25rem 0;
+        color: #e8cf7a;
+        font-size: 2.5rem;
+    }
+}
+
+.matches-pro__auto--v2 {
+    width: 100%;
+    min-height: 3.6rem;
+    margin-top: .85rem;
+}
+
+.matches-pro__v2-safety {
+    margin-top: 1rem;
+    padding: .85rem 1rem;
+    border-radius: .8rem;
+    background: rgba(251,191,36,.06);
+    border: 1px solid rgba(251,191,36,.16);
+    color: #b8a979;
+    line-height: 1.45;
+}
+
+@media (max-width: 760px) {
+    .matches-pro--v2 {
+        padding: .85rem .75rem 5rem;
+    }
+
+    .matches-pro__v2-head,
+    .matches-pro__v2-section-head {
+        flex-direction: column;
+    }
+
+    .matches-pro__v2-controls,
+    .matches-pro__v2-controls--trade,
+    .matches-pro__truth-grid {
+        grid-template-columns: repeat(2, minmax(0,1fr));
+    }
+}
+
+@media (max-width: 430px) {
+    .matches-pro__v2-controls,
+    .matches-pro__v2-controls--trade {
+        grid-template-columns: 1fr;
+    }
+
+    .matches-pro__truth-grid {
+        grid-template-columns: repeat(2, minmax(0,1fr));
+    }
+
+    .matches-pro__verify-row {
+        grid-template-columns: 1fr auto;
+
+        span:nth-child(2) {
+            grid-column: 1 / 2;
+        }
+
+        > strong {
+            grid-row: 1 / span 2;
+            grid-column: 2;
+        }
+    }
+}
