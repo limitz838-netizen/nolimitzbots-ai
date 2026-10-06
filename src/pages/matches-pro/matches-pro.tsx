@@ -177,11 +177,12 @@ const MatchesPro = () => {
             setPrediction(seeded);
             pending_ref.current = {
                 symbol,
-                predicted: seeded.predictedDigit,
+                predicted: seeded.candidateDigit,
                 quality: seeded.signalQuality,
                 score: seeded.score,
                 model: seeded.selectedModel,
                 engineVersion: seeded.engineVersion,
+                tradable: seeded.predictedDigit !== null,
             };
         }
 
@@ -390,9 +391,12 @@ const MatchesPro = () => {
                 setPrediction(seeded);
                 pending_ref.current = {
                     symbol,
-                    predicted: seeded.predictedDigit,
+                    predicted: seeded.candidateDigit,
                     quality: seeded.signalQuality,
                     score: seeded.score,
+                    model: seeded.selectedModel,
+                    engineVersion: seeded.engineVersion,
+                    tradable: seeded.predictedDigit !== null,
                 };
             },
             onTick: ({ digit, quote: q, decimals: dec }) => {
