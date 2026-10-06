@@ -7,7 +7,7 @@
 //
 // Persisted per symbol so a run survives a refresh.
 
-const KEY = symbol => `nlb_matches_backtest_v2_${symbol}`;
+const KEY = symbol => `nlb_matches_backtest_v3_${symbol}`;
 const MAX_RECENT = 300;
 
 const NULL_P = 0.1;
@@ -17,6 +17,7 @@ const empty = () => ({
     correct: 0,
     by_digit: Array.from({ length: 10 }, () => ({ n: 0, correct: 0 })),
     by_quality: {},
+    by_model: {},
     longest_win: 0,
     longest_loss: 0,
     current_win: 0,
@@ -57,6 +58,10 @@ export const record = (symbol, entry) => {
     }
 
     const q = entry.quality || 'NO SIGNAL';
+    const model = entry.model || 'unknown';
+    if (!state.by_model[model]) state.by_model[model] = { n: 0, correct: 0 };
+    state.by_model[model].n += 1;
+    if (hit) state.by_model[model].correct += 1;
     if (!state.by_quality[q]) state.by_quality[q] = { n: 0, correct: 0 };
     state.by_quality[q].n += 1;
     if (hit) state.by_quality[q].correct += 1;
@@ -78,6 +83,8 @@ export const record = (symbol, entry) => {
         hit,
         quality: q,
         score: entry.score,
+        model,
+        engineVersion: entry.engineVersion || 'unknown',
     });
     if (state.recent.length > MAX_RECENT) state.recent = state.recent.slice(-MAX_RECENT);
 
