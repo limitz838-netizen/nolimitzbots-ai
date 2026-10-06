@@ -257,6 +257,8 @@ const RunPanel = observer(() => {
         is_drawer_open,
         is_statistics_info_modal_open,
         is_clear_stat_disabled,
+        is_running,
+        has_open_contract,
         onClearStatClick,
         onMount,
         onRunButtonClick, // eslint-disable-line @typescript-eslint/no-unused-vars
