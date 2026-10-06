@@ -44,7 +44,7 @@ import { Localize, localize } from '@deriv-com/translations';
 import { useDevice } from '@deriv-com/ui';
 import RunPanel from '../../components/run-panel';
 import BulkTrader from '../bulk-trader/bulk-trader';
-import Speedbot from '../speedbot/speedbot';
+import NolimitzAI from '../speedbot/speedbot';
 import AiSoftware from '../ai-software/ai-software';
 import FreeBots from '../dashboard/free-bots';
 import RiskDisclaimer from '../../components/risk-disclaimer/risk-disclaimer';
@@ -458,12 +458,12 @@ const AppWrapper = observer(() => {
                                             width='24px'
                                             fill='var(--text-general)'
                                         />
-                                        <Localize i18n_default_text='Speedbot' />
+                                        <Localize i18n_default_text='Nolimitz AI' />
                                     </>
                                 }
                                 id='id-speedbot'
                             >
-                                <Speedbot />
+                                <NolimitzAI />
                             </div>
                             <div
                                 label={
