@@ -406,13 +406,80 @@ const NolimitzAI = observer(() => {
         return contractId;
     };
 
+
+    const reportGate = next => {
+        setGateInfo(next);
+        if (next?.reason && next.reason !== last_gate_reason_ref.current) {
+            last_gate_reason_ref.current = next.reason;
+            log(next.reason);
+        }
+    };
+
+    const applyTradeResult = (r, profit, baseStake, multiplier, maxSteps) => {
+        const won = profit > 0;
+        r.trades += 1;
+        r.pnl += profit;
+
+        if (won) {
+            r.wins += 1;
+            r.steps = 0;
+            r.curStake = baseStake;
+        } else {
+            r.losses += 1;
+            if (martingale && maxSteps > 0) {
+                r.steps += 1;
+                if (r.steps > maxSteps) {
+                    r.steps = 0;
+                    r.curStake = baseStake;
+                } else {
+                    r.curStake = Math.min(r.curStake * multiplier, baseStake * 10);
+                }
+            } else {
+                r.curStake = baseStake;
+            }
+        }
+
+        setStats(prev => ({
+            ...prev,
+            pnl: r.pnl,
+            trades: r.trades,
+            wins: r.wins,
+            losses: r.losses,
+            cur_stake: r.curStake,
+        }));
+
+        const resultLine =
+            (won ? 'WIN ' : 'LOSS ') +
+            (profit >= 0 ? '+' : '') +
+            profit.toFixed(2) +
+            ' · P/L ' +
+            r.pnl.toFixed(2);
+
+        log(resultLine);
+        journalLog(
+            'Nolimitz AI · ' +
+                (won ? 'WIN' : 'LOSS') +
+                ' · ' +
+                (profit >= 0 ? '+' : '') +
+                profit.toFixed(2) +
+                ' ' +
+                currency,
+            MessageTypes.SUCCESS
+        );
+        return won;
+    };
+
     const stopRun = (reason, r) => {
         if (!r) return;
         r.active = false;
         run_ref.current = null;
         setRunning(false);
+
         try {
             run_panel?.setIsRunning?.(false);
+            if (!run_panel?.has_open_contract) {
+                run_panel?.setContractStage?.(contract_stages.NOT_RUNNING);
+            }
         } catch {
             /* noop */
         }
@@ -422,11 +489,40 @@ const NolimitzAI = observer(() => {
             if (won) playWin();
             else playLoss();
             setResult({ reason, pnl: r.pnl, trades: r.trades, wins: r.wins, losses: r.losses });
+            journalLog(
+                'Nolimitz AI stopped · ' +
+                    reason +
+                    ' · session P/L ' +
+                    r.pnl.toFixed(2) +
+                    ' ' +
+                    currency
+            );
         }
     };
 
     const start = async () => {
-        if (running || !is_logged_in || !api_base?.api || !contractSpec) return;
+        if (running || !is_logged_in || !api_base?.api) return;
+
+        if (!is_demo) {
+            reportGate({
+                status: 'BLOCKED',
+                reason: 'Demo validation only — switch to a Deriv demo account before running Nolimitz AI.',
+                breakeven: null,
+                required: null,
+            });
+            journalLog('Nolimitz AI blocked: demo account required.', MessageTypes.ERROR);
+            return;
+        }
+
+        if (strategy !== 'alpha' && !selectedFamily) {
+            reportGate({
+                status: 'BLOCKED',
+                reason: 'Quantum/Apex currently validate Even/Odd and Over/Under only. Use Alpha for a Rise/Fall execution test.',
+                breakeven: null,
+                required: null,
+            });
+            return;
+        }
 
         const baseStake = Math.max(0.35, parseFloat(stake) || 0.5);
         const tpValue = Math.max(0, parseFloat(tp) || 0);
@@ -437,6 +533,8 @@ const NolimitzAI = observer(() => {
         unlockAudio();
         setResult(null);
         setLogs([]);
+        last_traded_fingerprint_ref.current = null;
+        last_gate_reason_ref.current = '';
 
         const r = {
             active: true,
@@ -450,101 +548,262 @@ const NolimitzAI = observer(() => {
 
         run_ref.current = r;
         setRunning(true);
+
         try {
-            run_panel.run_id = `nolimitz-ai-${Date.now()}`;
+            run_panel.run_id = 'nolimitz-ai-' + Date.now();
+            summary_card?.clear?.();
+            run_panel?.setContractStage?.(contract_stages.STARTING);
             run_panel?.setIsRunning?.(true);
             run_panel?.toggleDrawer?.(true);
         } catch {
             /* noop */
         }
 
-        log(`Nolimitz AI started · ${STRATEGIES.find(x => x.id === strategy)?.label} · ${symbol}`);
+        log(
+            'Nolimitz AI started · ' +
+                STRATEGIES.find(x => x.id === strategy)?.label +
+                ' · ' +
+                symbol
+        );
+        journalLog(
+            'Nolimitz AI started · ' +
+                STRATEGIES.find(x => x.id === strategy)?.label +
+                ' · ' +
+                symbol +
+                ' · DEMO'
+        );
+
+        if (strategy === 'alpha') {
+            if (!manualContractSpec) {
+                stopRun('No supported Alpha contract selected', r);
+                return;
+            }
+
+            try {
+                reportGate({
+                    status: 'TEST',
+                    reason: 'Alpha demo execution test: preparing one real Deriv proposal.',
+                    breakeven: null,
+                    required: null,
+                });
+
+                const prepared = await prepareProposal(manualContractSpec, baseStake, duration);
+                setGateInfo({
+                    status: 'TEST',
+                    reason:
+                        'Live proposal ready · break-even ' +
+                        (prepared.breakeven * 100).toFixed(2) +
+                        '%',
+                    breakeven: prepared.breakeven,
+                    required: prepared.breakeven,
+                });
+
+                const cid = await buyPrepared(prepared);
+                journalLog(
+                    'Alpha demo test bought ' +
+                        manualContractSpec.label +
+                        ' · contract ' +
+                        cid
+                );
+
+                const profit = await settleContract(cid, duration);
+                if (profit === null) {
+                    stopRun('Alpha demo execution test settlement timeout', r);
+                    return;
+                }
+
+                applyTradeResult(r, profit, baseStake, multiplier, maxSteps);
+                stopRun('Alpha demo execution test complete', r);
+            } catch (e) {
+                const message = describeError(e);
+                journalLog('Nolimitz AI Alpha error · ' + message, MessageTypes.ERROR);
+                stopRun('Alpha test failed: ' + message, r);
+            }
+            return;
+        }
+
+        const rules = AI_RULES[strategy];
 
         while (r.active) {
             if (tpValue > 0 && r.pnl >= tpValue) {
-                log(`Profit target reached: +${r.pnl.toFixed(2)}`);
                 stopRun('Profit target reached', r);
                 return;
             }
+
             if (slValue > 0 && r.pnl <= -slValue) {
-                log(`Maximum loss reached: ${r.pnl.toFixed(2)}`);
                 stopRun('Maximum loss reached', r);
                 return;
             }
 
-            const gate = strategyGate();
-            if (!gate.ok) {
-                log(gate.reason);
-                // eslint-disable-next-line no-await-in-loop
-                await new Promise(res => setTimeout(res, 1200));
+            const analysis = engine_ref.current;
+
+            if (!analysis?.candidate || !analysis?.fingerprint) {
+                reportGate({
+                    status: 'SHADOW',
+                    reason: analysis?.reason || 'Waiting for measured model consensus.',
+                    breakeven: null,
+                    required: null,
+                });
+                await new Promise(res => setTimeout(res, 800));
                 continue;
             }
 
-            const liveSpec = contractSpec;
-            try {
-                setStats(prev => ({ ...prev, cur_stake: r.curStake }));
-                // eslint-disable-next-line no-await-in-loop
-                const cid = await buyOnce(liveSpec, Number(r.curStake.toFixed(2)));
-                if (!cid) throw new Error('No contract id returned');
-                log(`Trade · ${liveSpec.label} · ${currency} ${r.curStake.toFixed(2)}`);
+            if (analysis.agreementTier < rules.minTier) {
+                reportGate({
+                    status: 'SHADOW',
+                    reason:
+                        strategy.toUpperCase() +
+                        ' needs ' +
+                        rules.minTier +
+                        ' agreeing models; current setup has ' +
+                        analysis.agreementTier +
+                        '.',
+                    breakeven: null,
+                    required: null,
+                });
+                await new Promise(res => setTimeout(res, 800));
+                continue;
+            }
 
-                // eslint-disable-next-line no-await-in-loop
-                const profit = await settleContract(cid);
-                if (profit === null) {
-                    log('Settlement timeout — no result counted.');
+            const latestEvidence = readAiEvidence(symbol, selectedFamily);
+            setEvidenceState(latestEvidence);
+            const exact = setupEvidence(latestEvidence, analysis.fingerprint);
+
+            if (exact.n < rules.minEvidence) {
+                reportGate({
+                    status: 'SHADOW',
+                    reason:
+                        'Shadow validating exact setup: ' +
+                        exact.n +
+                        '/' +
+                        rules.minEvidence +
+                        ' independent forward results.',
+                    breakeven: null,
+                    required: null,
+                });
+                await new Promise(res => setTimeout(res, 800));
+                continue;
+            }
+
+            if (last_traded_fingerprint_ref.current === analysis.fingerprint) {
+                reportGate({
+                    status: 'COOLDOWN',
+                    reason: 'This fingerprint has already been traded. Waiting for the market state to change.',
+                    breakeven: null,
+                    required: null,
+                });
+                await new Promise(res => setTimeout(res, 800));
+                continue;
+            }
+
+            const liveSpec = candidateToContract(selectedFamily, analysis.candidate);
+
+            try {
+                const prepared = await prepareProposal(liveSpec, Number(r.curStake.toFixed(2)), 1);
+                const required = prepared.breakeven + rules.margin;
+
+                if (!(exact.lowerBound > required)) {
+                    reportGate({
+                        status: 'SHADOW',
+                        reason:
+                            'No trade · exact setup lower bound ' +
+                            (exact.lowerBound * 100).toFixed(2) +
+                            '% must beat live break-even + margin ' +
+                            (required * 100).toFixed(2) +
+                            '%.',
+                        breakeven: prepared.breakeven,
+                        required,
+                    });
+                    await new Promise(res => setTimeout(res, 1000));
                     continue;
                 }
 
-                const won = profit > 0;
-                r.trades += 1;
-                r.pnl += profit;
+                setGateInfo({
+                    status: 'TRADE READY',
+                    reason:
+                        analysis.agreementTier +
+                        '-model consensus · ' +
+                        exact.correct +
+                        '/' +
+                        exact.n +
+                        ' fresh correct · LB ' +
+                        (exact.lowerBound * 100).toFixed(2) +
+                        '% > ' +
+                        (required * 100).toFixed(2) +
+                        '% required.',
+                    breakeven: prepared.breakeven,
+                    required,
+                });
 
-                if (won) {
-                    r.wins += 1;
-                    r.steps = 0;
-                    r.curStake = baseStake;
-                } else {
-                    r.losses += 1;
-                    if (martingale && maxSteps > 0) {
-                        r.steps += 1;
-                        if (r.steps > maxSteps) {
-                            r.steps = 0;
-                            r.curStake = baseStake;
-                        } else {
-                            r.curStake = Math.min(r.curStake * multiplier, baseStake * 10);
-                        }
-                    } else {
-                        r.curStake = baseStake;
-                    }
+                last_traded_fingerprint_ref.current = analysis.fingerprint;
+                setStats(prev => ({ ...prev, cur_stake: r.curStake }));
+
+                const cid = await buyPrepared(prepared);
+
+                log(
+                    'AI TRADE · ' +
+                        liveSpec.label +
+                        ' · ' +
+                        currency +
+                        ' ' +
+                        r.curStake.toFixed(2) +
+                        ' · LB ' +
+                        (exact.lowerBound * 100).toFixed(2) +
+                        '%'
+                );
+
+                journalLog(
+                    'Nolimitz AI trade · ' +
+                        liveSpec.label +
+                        ' · ' +
+                        currency +
+                        ' ' +
+                        r.curStake.toFixed(2) +
+                        ' · contract ' +
+                        cid
+                );
+
+                const profit = await settleContract(cid, 1);
+                if (profit === null) {
+                    journalLog('Nolimitz AI settlement timeout.', MessageTypes.ERROR);
+                    continue;
                 }
 
-                setStats(prev => ({
-                    ...prev,
-                    pnl: r.pnl,
-                    trades: r.trades,
-                    wins: r.wins,
-                    losses: r.losses,
-                    cur_stake: r.curStake,
-                }));
-
-                log(`${won ? 'WIN' : 'LOSS'} ${profit >= 0 ? '+' : ''}${profit.toFixed(2)} · P/L ${r.pnl.toFixed(2)}`);
+                applyTradeResult(r, profit, baseStake, multiplier, maxSteps);
             } catch (e) {
-                log(`Trade error · ${describeError(e)}`);
-                // eslint-disable-next-line no-await-in-loop
+                const message = describeError(e);
+                log('Trade error · ' + message);
+                journalLog('Nolimitz AI trade error · ' + message, MessageTypes.ERROR);
                 await new Promise(res => setTimeout(res, 1500));
             }
 
-            // eslint-disable-next-line no-await-in-loop
-            await new Promise(res => setTimeout(res, risk === 'high' ? 350 : risk === 'medium' ? 700 : 1100));
+            await new Promise(
+                res =>
+                    setTimeout(
+                        res,
+                        risk === 'high' ? 450 : risk === 'medium' ? 800 : 1200
+                    )
+            );
         }
     };
 
     const stop = () => {
         log('Stopped by user');
-        settle_handles_ref.current.forEach(h => h.cancel());
-        settle_handles_ref.current.clear();
-        if (run_ref.current) stopRun(null, run_ref.current);
+        const r = run_ref.current;
+        if (r) r.active = false;
+        run_ref.current = null;
         setRunning(false);
+
+        try {
+            run_panel?.setIsRunning?.(false);
+            if (!run_panel?.has_open_contract) {
+                run_panel?.setContractStage?.(contract_stages.NOT_RUNNING);
+            }
+        } catch {
+            /* noop */
+        }
+
+        journalLog('Nolimitz AI stopped by user.');
     };
 
     const currentStrategy = STRATEGIES.find(x => x.id === strategy);
