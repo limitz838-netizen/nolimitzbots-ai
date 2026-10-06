@@ -359,9 +359,12 @@ const MatchesPro = () => {
             onTick: ({ digit, quote: q, decimals: dec }) => {
                 setDecimals(dec);
                 setQuote(q);
+                // First settle the prediction that was made BEFORE this tick.
+                // step() then creates the next prediction from the history that
+                // existed before this tick, preventing current-tick leakage.
+                step(symbol, digit, Date.now());
                 digits_ref.current = [...digits_ref.current, digit].slice(-HISTORY);
                 setDigits(digits_ref.current);
-                step(symbol, digit, Date.now());
             },
         });
 
