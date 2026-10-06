@@ -326,11 +326,11 @@ const MatchesPro = () => {
 
     // ------------------------------------------------------------- per tick
     const step = React.useCallback(
-        (sym, actual_digit, ts) => {
+        (sym, actual_digit, ts, already_graded = false) => {
             if (cooldown_ref.current > 0) cooldown_ref.current -= 1;
 
             const pending = pending_ref.current;
-            if (pending && pending.predicted !== null && pending.symbol === sym) {
+            if (!already_graded && pending && pending.predicted !== null && pending.symbol === sym) {
                 record(sym, {
                     t: ts,
                     predicted: pending.predicted,
@@ -478,12 +478,32 @@ const MatchesPro = () => {
             onTick: ({ digit, quote: q, decimals: dec }) => {
                 setDecimals(dec);
                 setQuote(q);
-                // First settle the prediction that was made BEFORE this tick.
-                // step() then creates the next prediction from the history that
-                // existed before this tick, preventing current-tick leakage.
-                step(symbol, digit, Date.now());
+
+                // The pending prediction was created before this tick, so it is
+                // safe to grade it against the arriving digit. Then include the
+                // now-known tick in history before creating the prediction for
+                // the NEXT tick. That is the correct boundary for a 1-tick contract.
+                const pendingBeforeTick = pending_ref.current;
+                if (pendingBeforeTick && pendingBeforeTick.predicted !== null && pendingBeforeTick.symbol === symbol) {
+                    record(symbol, {
+                        t: Date.now(),
+                        predicted: pendingBeforeTick.predicted,
+                        actual: digit,
+                        quality: pendingBeforeTick.quality,
+                        score: pendingBeforeTick.score,
+                        model: pendingBeforeTick.model,
+                        engineVersion: pendingBeforeTick.engineVersion,
+                        tradable: pendingBeforeTick.tradable,
+                        fingerprint: pendingBeforeTick.fingerprint,
+                        agreementTier: pendingBeforeTick.agreementTier,
+                        agreementModels: pendingBeforeTick.agreementModels,
+                    });
+                }
+                pending_ref.current = null;
+
                 digits_ref.current = [...digits_ref.current, digit].slice(-HISTORY);
                 setDigits(digits_ref.current);
+                step(symbol, digit, Date.now(), true);
             },
         });
 
