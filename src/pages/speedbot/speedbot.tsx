@@ -504,17 +504,6 @@ const NolimitzAI = observer(() => {
     const start = async () => {
         if (running || !is_logged_in || !api_base?.api) return;
 
-        if (!is_demo) {
-            reportGate({
-                status: 'BLOCKED',
-                reason: 'Demo validation only — switch to a Deriv demo account before running Nolimitz AI.',
-                breakeven: null,
-                required: null,
-            });
-            journalLog('Nolimitz AI blocked: demo account required.', MessageTypes.ERROR);
-            return;
-        }
-
         if (strategy !== 'alpha' && !selectedFamily) {
             reportGate({
                 status: 'BLOCKED',
@@ -525,6 +514,7 @@ const NolimitzAI = observer(() => {
             return;
         }
 
+        const executionAllowed = is_demo;
         const baseStake = Math.max(0.35, parseFloat(stake) || 0.5);
         const tpValue = Math.max(0, parseFloat(tp) || 0);
         const slValue = Math.max(0, parseFloat(sl) || 0);
@@ -571,10 +561,22 @@ const NolimitzAI = observer(() => {
                 STRATEGIES.find(x => x.id === strategy)?.label +
                 ' · ' +
                 symbol +
-                ' · DEMO'
+                ' · ' +
+                (executionAllowed ? 'DEMO EXECUTION' : 'REAL SHADOW')
         );
 
         if (strategy === 'alpha') {
+            if (!executionAllowed) {
+                reportGate({
+                    status: 'REAL SHADOW',
+                    reason: 'Alpha is the execution-verification mode. Analysis is available on this real account, but Alpha contract execution remains demo-only while validation is active.',
+                    breakeven: null,
+                    required: null,
+                });
+                stopRun(null, r);
+                return;
+            }
+
             if (!manualContractSpec) {
                 stopRun('No supported Alpha contract selected', r);
                 return;
@@ -719,6 +721,34 @@ const NolimitzAI = observer(() => {
                     continue;
                 }
 
+                if (!executionAllowed) {
+                    last_traded_fingerprint_ref.current = analysis.fingerprint;
+                    reportGate({
+                        status: 'REAL SHADOW',
+                        reason:
+                            'VALIDATED SETUP · ' +
+                            analysis.agreementTier +
+                            '-model consensus · ' +
+                            exact.correct +
+                            '/' +
+                            exact.n +
+                            ' fresh correct · LB ' +
+                            (exact.lowerBound * 100).toFixed(2) +
+                            '% > ' +
+                            (required * 100).toFixed(2) +
+                            '% required. Real execution remains locked during validation.',
+                        breakeven: prepared.breakeven,
+                        required,
+                    });
+                    journalLog(
+                        'Nolimitz AI real-shadow setup qualified · ' +
+                        liveSpec.label +
+                        ' · no real contract executed.'
+                    );
+                    await new Promise(res => setTimeout(res, 1200));
+                    continue;
+                }
+
                 setGateInfo({
                     status: 'TRADE READY',
                     reason:
@@ -847,8 +877,8 @@ const NolimitzAI = observer(() => {
                     <div className='nolimitz-ai__warning'>Connect your Deriv account before starting Nolimitz AI.</div>
                 )}
                 {is_logged_in && !is_demo && (
-                    <div className='nolimitz-ai__warning'>
-                        DEMO VALIDATION PHASE — switch to a Deriv demo account to run or test Nolimitz AI.
+                    <div className='nolimitz-ai__warning nolimitz-ai__warning--real'>
+                        REAL ACCOUNT ACTIVE — Nolimitz AI analysis and shadow validation are available automatically. Contract execution remains demo-only during validation.
                     </div>
                 )}
 
@@ -1059,7 +1089,7 @@ const NolimitzAI = observer(() => {
 
                     <button
                         className={`nolimitz-ai__run ${running ? 'stop' : ''}`}
-                        disabled={!is_logged_in || !is_demo}
+                        disabled={!is_logged_in}
                         onClick={running ? stop : start}
                     >
                         {running ? '■ STOP NOLIMITZ AI' : '⚡ RUN NOLIMITZ AI'}
@@ -1090,7 +1120,7 @@ const NolimitzAI = observer(() => {
                     <strong>{contractSpec ? contractSpec.label : 'WAITING'}</strong>
                     <small>
                         {strategy === 'alpha'
-                            ? 'Manual demo execution test — no AI probability claim.'
+                            ? (is_demo ? 'Manual demo execution test — no AI probability claim.' : 'Alpha execution test is demo-only; real account remains analysis/shadow.')
                             : engineAnalysis?.reason || 'Waiting for measured consensus.'}
                     </small>
                 </div>
