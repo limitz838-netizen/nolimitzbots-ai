@@ -13,6 +13,7 @@
 import React from 'react';
 import { isProduction, WS_SERVERS } from '@/components/shared/utils/config/config';
 import { api_base } from '@/external/bot-skeleton';
+import { useStore } from '@/hooks/useStore';
 import { trackContracts, describeError } from '@/components/shared/nlb/settlement';
 import { playLoss, playWin, unlockAudio } from '@/components/shared/nlb/trade-sounds';
 import './ai-scanner.scss';
@@ -56,7 +57,8 @@ const detectTrap = digits => {
     return null;
 };
 
-const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn = false }) => {
+const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn = false, maxExposure = Infinity }) => {
+    const { run_panel, transactions, summary_card } = useStore();
     const [phase, setPhase] = React.useState('idle'); // idle | scanning | firing | settling | done
     const [logs, setLogs] = React.useState([]);
     const [grid, setGrid] = React.useState({});
@@ -72,8 +74,8 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
     const decimals_ref = React.useRef({ ...FALLBACK_DECIMALS });
     const armed_ref = React.useRef(false);
     const rescan_timer_ref = React.useRef(null);
-    const cfg_ref = React.useRef({ stake, count, currency, isLoggedIn });
-    cfg_ref.current = { stake, count, currency, isLoggedIn };
+    const cfg_ref = React.useRef({ stake, count, currency, isLoggedIn, maxExposure });
+    cfg_ref.current = { stake, count, currency, isLoggedIn, maxExposure };
 
     const log = line => setLogs(p => [...p, line].slice(-60));
 
@@ -117,57 +119,141 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
     );
 
     const fireBatch = async (market, trap) => {
-        const { stake: st, count: ct, currency: cur, isLoggedIn: li } = cfg_ref.current;
+        const {
+            stake: st,
+            count: ct,
+            currency: cur,
+            isLoggedIn: li,
+            maxExposure: maxExp,
+        } = cfg_ref.current;
+
         if (!li || !api_base?.api) {
             setPhase('done');
             setStatus(`Matched ${market.label}. Sign in with Deriv to auto-trade.`);
             return;
         }
-        unlockAudio();
-        setPhase('firing');
-        setFireLog([]);
+
         const n = Math.max(1, Math.min(20, parseInt(ct, 10) || 5));
         const amount = Math.max(0.35, parseFloat(st) || 0.5);
-        const ids = [];
-        for (let i = 0; i < n; i++) {
-            try {
-                const proposal_req = {
-                    proposal: 1,
-                    amount,
-                    basis: 'stake',
-                    contract_type: trap.type,
-                    currency: cur,
-                    duration: 1,
-                    duration_unit: 't',
-                    underlying_symbol: market.code,
-                    barrier: String(trap.barrier),
-                };
-                // eslint-disable-next-line no-await-in-loop
-                const prop = await api_base.api.send(proposal_req);
-                const pid = prop?.proposal?.id;
-                if (!pid) throw new Error('No proposal');
-                // eslint-disable-next-line no-await-in-loop
-                const res = await api_base.api.send({ buy: pid, price: Number(prop.proposal.ask_price) });
-                const cid = res?.buy?.contract_id;
-                if (cid) ids.push(cid);
-                setFireLog(p => [...p, `[BUY] #${i + 1} ${trap.label} — ${cur} ${amount.toFixed(2)}`]);
-            } catch (e) {
-                setFireLog(p => [...p, `[FAIL] #${i + 1} — ${describeError(e)}`]);
-            }
-            // eslint-disable-next-line no-await-in-loop
-            await new Promise(r => setTimeout(r, 250));
-        }
-        if (!ids.length) {
+        const exposure = amount * n;
+        const exposureLimit = Number(maxExp);
+
+        if (Number.isFinite(exposureLimit) && exposure > exposureLimit + 1e-9) {
             setPhase('done');
+            setStatus(
+                `Setup found, but batch blocked: ${cur} ${exposure.toFixed(2)} exposure exceeds your ${cur} ${exposureLimit.toFixed(2)} limit.`
+            );
+            log(`[BLOCKED] Exposure ${cur} ${exposure.toFixed(2)} > limit ${cur} ${exposureLimit.toFixed(2)}.`);
             return;
         }
+
+        unlockAudio();
+        try {
+            run_panel.run_id = `bulk-scanner-${Date.now()}`;
+            run_panel?.setIsRunning?.(true);
+            run_panel?.toggleDrawer?.(true);
+        } catch {
+            /* run panel unavailable */
+        }
+
+        setPhase('firing');
+        setFireLog([]);
+
+        const proposalReq = {
+            proposal: 1,
+            amount,
+            basis: 'stake',
+            contract_type: trap.type,
+            currency: cur,
+            duration: 1,
+            duration_unit: 't',
+            underlying_symbol: market.code,
+            barrier: String(trap.barrier),
+        };
+
+        const proposalResults = await Promise.allSettled(
+            Array.from({ length: n }, () => api_base.api.send(proposalReq))
+        );
+
+        const prepared = proposalResults
+            .map((result, index) => {
+                if (result.status !== 'fulfilled') {
+                    return { index, error: describeError(result.reason) };
+                }
+                const proposal = result.value?.proposal;
+                if (!proposal?.id) return { index, error: 'No proposal' };
+                return {
+                    index,
+                    proposal_id: proposal.id,
+                    ask_price: Number(proposal.ask_price ?? amount),
+                };
+            });
+
+        const ready = prepared.filter(x => !x.error);
+        const failures = prepared.filter(x => x.error);
+
+        failures.forEach(x =>
+            setFireLog(p => [...p, `[FAIL] #${x.index + 1} proposal — ${x.error}`])
+        );
+
+        if (!ready.length) {
+            setPhase('done');
+            setStatus('Setup matched, but no contracts could be prepared.');
+            try { run_panel?.setIsRunning?.(false); } catch { /* noop */ }
+            return;
+        }
+
+        const launchedAt = performance.now();
+        const buyResults = await Promise.allSettled(
+            ready.map(item => api_base.api.send({ buy: item.proposal_id, price: item.ask_price }))
+        );
+        const launchMs = performance.now() - launchedAt;
+
+        const ids = [];
+        buyResults.forEach((result, idx) => {
+            const item = ready[idx];
+            if (result.status === 'fulfilled') {
+                const cid = result.value?.buy?.contract_id;
+                if (cid) ids.push(cid);
+                setFireLog(p => [
+                    ...p,
+                    cid
+                        ? `[BUY] #${item.index + 1} ${trap.label} — ${cur} ${Number(result.value?.buy?.buy_price ?? amount).toFixed(2)}`
+                        : `[FAIL] #${item.index + 1} — no contract id`,
+                ]);
+            } else {
+                setFireLog(p => [
+                    ...p,
+                    `[FAIL] #${item.index + 1} buy — ${describeError(result.reason)}`,
+                ]);
+            }
+        });
+
+        log(`[INFO] Parallel batch dispatch window: ${launchMs.toFixed(0)} ms · exposure ${cur} ${exposure.toFixed(2)}.`);
+
+        if (!ids.length) {
+            setPhase('done');
+            setStatus('Setup matched, but all buy requests failed.');
+            try { run_panel?.setIsRunning?.(false); } catch { /* noop */ }
+            return;
+        }
+
         setStatus(`Sent ${ids.length} ${trap.label} contracts on ${market.label}.`);
         setPhase('settling');
         setSettle({ settled: 0, total: ids.length });
         track_ref.current = trackContracts(ids, {
             onUpdate: ({ settled, total }) => setSettle({ settled, total }),
+            onContract: contract => {
+                try {
+                    transactions?.onBotContractEvent?.(contract);
+                    summary_card?.onBotContractEvent?.(contract);
+                } catch {
+                    /* display mirroring must never interrupt settlement */
+                }
+            },
             onDone: ({ total, wins, settled, count: c }) => {
                 setSettle(null);
+                try { run_panel?.setIsRunning?.(false); } catch { /* noop */ }
                 if (total >= 0) playWin();
                 else playLoss();
                 setBatchResult({ total, wins, settled, count: c, market: market.label, side: trap.label });
