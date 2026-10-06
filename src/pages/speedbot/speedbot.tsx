@@ -73,6 +73,7 @@ const NolimitzAI = observer(() => {
     const currency = client?.currency || 'USD';
     const balance = Number(client?.balance ?? 0);
     const is_demo = loginid.startsWith('VRT') || loginid.startsWith('VRTC');
+    const account_mode = !is_logged_in ? 'offline' : is_demo ? 'demo' : 'real';
 
     const [symbol, setSymbol] = React.useState('1HZ100V');
     const [strategy, setStrategy] = React.useState('quantum');
@@ -831,8 +832,8 @@ const NolimitzAI = observer(() => {
                                 <strong>{loginid}</strong>
                             </div>
                         </div>
-                        <span className={`nolimitz-ai__account-type ${is_demo ? 'demo' : 'real'}`}>
-                            <i /> {is_demo ? 'DEMO' : 'REAL'}
+                        <span className={`nolimitz-ai__account-type ${account_mode}`}>
+                            <i /> {!is_logged_in ? 'OFFLINE' : is_demo ? 'DEMO' : 'REAL'}
                         </span>
                     </div>
                     <div className='nolimitz-ai__balance'>
@@ -844,6 +845,11 @@ const NolimitzAI = observer(() => {
 
                 {!is_logged_in && (
                     <div className='nolimitz-ai__warning'>Connect your Deriv account before starting Nolimitz AI.</div>
+                )}
+                {is_logged_in && !is_demo && (
+                    <div className='nolimitz-ai__warning'>
+                        DEMO VALIDATION PHASE — switch to a Deriv demo account to run or test Nolimitz AI.
+                    </div>
                 )}
 
                 <section className='nolimitz-ai__card nolimitz-ai__card--engine'>
@@ -888,15 +894,64 @@ const NolimitzAI = observer(() => {
                         ))}
                     </div>
                     <div className='nolimitz-ai__strategy-note'>
-                        {currentStrategy?.note} · {strategy === 'alpha' ? 'manual contract direction' : 'waits for live history confirmation'}
+                        {currentStrategy?.note}
                     </div>
+
+                    <div className='nolimitz-ai__engine-panel'>
+                        <div>
+                            <span>ENGINE</span>
+                            <strong>{NOLIMITZ_AI_ENGINE_VERSION}</strong>
+                        </div>
+                        <div>
+                            <span>STATUS</span>
+                            <strong>{strategy === 'alpha' ? 'EXECUTION TEST' : gateInfo.status}</strong>
+                        </div>
+                        <div>
+                            <span>CANDIDATE</span>
+                            <strong>{engineAnalysis?.candidate ? engineAnalysis.candidate.toUpperCase() : '—'}</strong>
+                        </div>
+                        <div>
+                            <span>AGREEMENT</span>
+                            <strong>{engineAnalysis?.agreementTier ? `${engineAnalysis.agreementTier} models` : '—'}</strong>
+                        </div>
+                        <div>
+                            <span>FRESH EVIDENCE</span>
+                            <strong>{evidenceState?.correct || 0}/{evidenceState?.total || 0}</strong>
+                        </div>
+                        <div>
+                            <span>EXACT SETUP</span>
+                            <strong>{exactSetupEvidence.correct}/{exactSetupEvidence.n}</strong>
+                        </div>
+                        <div>
+                            <span>SETUP LOWER BOUND</span>
+                            <strong>{exactSetupEvidence.n ? `${(exactSetupEvidence.lowerBound * 100).toFixed(2)}%` : '—'}</strong>
+                        </div>
+                        <div>
+                            <span>LIVE BREAK-EVEN</span>
+                            <strong>{gateInfo.breakeven ? `${(gateInfo.breakeven * 100).toFixed(2)}%` : '—'}</strong>
+                        </div>
+                        <p>{strategy === 'alpha' ? 'Alpha places one user-selected demo contract only, to verify the full execution pipeline.' : gateInfo.reason}</p>
+                    </div>
+
+                    {strategy !== 'alpha' && engineAnalysis?.votes?.length > 0 && (
+                        <div className='nolimitz-ai__votes'>
+                            <span className='nolimitz-ai__votes-title'>LIVE MODEL VOTES</span>
+                            {engineAnalysis.votes.map(vote => (
+                                <div key={vote.model} className={engineAnalysis.agreementModels?.includes(vote.model) ? 'agree' : ''}>
+                                    <b>{vote.model}</b>
+                                    <span>{vote.side.toUpperCase()}</span>
+                                    <small>{(vote.probability * 100).toFixed(2)}% from {vote.samples} samples</small>
+                                </div>
+                            ))}
+                        </div>
+                    )}
 
                     <div className='nolimitz-ai__field-label'>CONTRACT TYPE</div>
                     <div className='nolimitz-ai__contracts'>
                         {CONTRACTS.map(item => (
                             <button
                                 key={item.id}
-                                disabled={running || !item.available}
+                                disabled={running || !item.available || (strategy !== 'alpha' && item.id === 'rise_fall')}
                                 className={`${contract === item.id ? 'active' : ''} ${item.recommended ? 'recommended' : ''}`}
                                 onClick={() => item.available && setContract(item.id)}
                             >
@@ -908,19 +963,19 @@ const NolimitzAI = observer(() => {
                         ))}
                     </div>
 
-                    {contract === 'rise_fall' && (
+                    {strategy === 'alpha' && contract === 'rise_fall' && (
                         <div className='nolimitz-ai__choice-row'>
                             <button className={direction === 'rise' ? 'active' : ''} onClick={() => setDirection('rise')} disabled={running}>RISE</button>
                             <button className={direction === 'fall' ? 'active' : ''} onClick={() => setDirection('fall')} disabled={running}>FALL</button>
                         </div>
                     )}
-                    {contract === 'even_odd' && (
+                    {strategy === 'alpha' && contract === 'even_odd' && (
                         <div className='nolimitz-ai__choice-row'>
                             <button className={direction === 'even' ? 'active' : ''} onClick={() => setDirection('even')} disabled={running}>EVEN</button>
                             <button className={direction === 'odd' ? 'active' : ''} onClick={() => setDirection('odd')} disabled={running}>ODD</button>
                         </div>
                     )}
-                    {contract === 'over_under' && (
+                    {strategy === 'alpha' && contract === 'over_under' && (
                         <div className='nolimitz-ai__choice-row'>
                             <button className={direction === 'over' ? 'active' : ''} onClick={() => setDirection('over')} disabled={running}>OVER 2</button>
                             <button className={direction === 'under' ? 'active' : ''} onClick={() => setDirection('under')} disabled={running}>UNDER 7</button>
@@ -936,10 +991,10 @@ const NolimitzAI = observer(() => {
 
                     <label className='nolimitz-ai__optimization'>
                         <span>
-                            <b>ENABLE OPTIMIZATION</b>
-                            <small>Uses recent tick distribution as an entry filter, not a guarantee.</small>
+                            <b>MEASURED VALIDATION</b>
+                            <small>Real tick models + fresh forward evidence + live payout break-even. This safety gate cannot be bypassed in AI modes.</small>
                         </span>
-                        <input type='checkbox' checked={optimization} disabled={running} onChange={e => setOptimization(e.target.checked)} />
+                        <input type='checkbox' checked disabled />
                         <i />
                     </label>
 
@@ -991,15 +1046,20 @@ const NolimitzAI = observer(() => {
                         )}
                         <div className='nolimitz-ai__duration'>
                             <span>Contract duration</span>
-                            <select value={duration} disabled={running} onChange={e => setDuration(clamp(parseInt(e.target.value || 1, 10), 1, 10))}>
+                            <select
+                                value={strategy === 'alpha' ? duration : 1}
+                                disabled={running || strategy !== 'alpha'}
+                                onChange={e => setDuration(clamp(parseInt(e.target.value || 1, 10), 1, 10))}
+                            >
                                 {[1,2,3,4,5,10].map(v => <option key={v} value={v}>{v} tick{v > 1 ? 's' : ''}</option>)}
                             </select>
+                            <small>{strategy === 'alpha' ? 'Alpha test duration' : 'AI evidence horizon is fixed to 1 tick'}</small>
                         </div>
                     </div>
 
                     <button
                         className={`nolimitz-ai__run ${running ? 'stop' : ''}`}
-                        disabled={!is_logged_in}
+                        disabled={!is_logged_in || !is_demo}
                         onClick={running ? stop : start}
                     >
                         {running ? '■ STOP NOLIMITZ AI' : '⚡ RUN NOLIMITZ AI'}
@@ -1029,11 +1089,24 @@ const NolimitzAI = observer(() => {
                     <span>CURRENT ENGINE PICK</span>
                     <strong>{contractSpec ? contractSpec.label : 'WAITING'}</strong>
                     <small>
-                        {contractSpec?.liveRate !== undefined
-                            ? `Recent history rate: ${contractSpec.liveRate.toFixed(1)}%`
-                            : 'Execution mode ready'}
+                        {strategy === 'alpha'
+                            ? 'Manual demo execution test — no AI probability claim.'
+                            : engineAnalysis?.reason || 'Waiting for measured consensus.'}
                     </small>
                 </div>
+
+                {strategy !== 'alpha' && bestSetups.length > 0 && (
+                    <section className='nolimitz-ai__setups'>
+                        <div className='nolimitz-ai__setups-title'>FRESH EXACT-SETUP CALIBRATION</div>
+                        {bestSetups.map(row => (
+                            <div key={row.fingerprint}>
+                                <span>{row.side.toUpperCase()} · {row.tier}-model</span>
+                                <strong>{row.correct}/{row.n}</strong>
+                                <small>LB {(row.lowerBound * 100).toFixed(2)}%</small>
+                            </div>
+                        ))}
+                    </section>
+                )}
 
                 {logs.length > 0 && (
                     <section className='nolimitz-ai__log'>
