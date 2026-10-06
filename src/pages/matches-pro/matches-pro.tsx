@@ -623,7 +623,7 @@ const MatchesPro = () => {
                         <div><span>Random baseline</span><strong>10.00%</strong></div>
                         <div><span>Selected model</span><strong>{prediction?.selectedModel || '-'}</strong></div>
                         <div><span>Walk-forward rate</span><strong>{prediction?.modelResults?.[0]?.trials ? pct(prediction.modelResults[0].accuracy) : '-'}</strong></div>
-                        <div><span>Break-even</span><strong>{pct(breakeven)}</strong></div>
+                        <div><span>Break-even</span><strong>{prediction?.breakeven ? pct(prediction.breakeven) : '-'}</strong></div>
                         <div><span>Decision</span><strong>{prediction?.predictedDigit === null ? 'NO PREDICTION' : 'PREDICT'}</strong></div>
                     </div>
 
