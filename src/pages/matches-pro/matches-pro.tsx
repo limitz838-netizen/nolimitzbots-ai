@@ -156,6 +156,36 @@ const MatchesPro = () => {
         return d;
     }, []);
 
+    const resetV2Evidence = React.useCallback(() => {
+        // Only reset measured prediction/analyse evidence for the selected
+        // market. Trading limits and account settings are intentionally kept.
+        reset(symbol);
+        resetAnalyse(symbol);
+        pending_ref.current = null;
+        analysis_ref.current = null;
+        setFeed([]);
+        setAnalysis(null);
+        setPrediction(null);
+        const clean = refreshStats(symbol);
+        setAnalyseStats(summariseAnalyse(readAnalyse(symbol)));
+
+        // Seed a fresh next-tick prediction from the currently visible history.
+        // It is not counted until a future real tick arrives.
+        if (digits_ref.current.length) {
+            const seeded = predict(digits_ref.current, { payout: payout_ref.current });
+            setPrediction(seeded);
+            pending_ref.current = {
+                symbol,
+                predicted: seeded.predictedDigit,
+                quality: seeded.signalQuality,
+                score: seeded.score,
+            };
+        }
+
+        setError('');
+        return clean;
+    }, [symbol, refreshStats]);
+
     // ------------------------------------------------------------- execution
     const fireTrade = React.useCallback(
         async (sym, digit) => {
@@ -659,6 +689,17 @@ const MatchesPro = () => {
                                 <strong>{model.trials ? pct(model.accuracy) : '-'}</strong>
                             </div>
                         ))}
+                    </div>
+
+                    <div className='matches-pro__verification'>
+                        <div className='matches-pro__v2-subtitle'>Evidence controls</div>
+                        <div className='matches-pro__verify-row'>
+                            <span>Clear legacy V2 prediction evidence for this market and begin a fresh forward test.</span>
+                            <span>Trading limits are kept.</span>
+                            <button type='button' className='matches-pro__secondary' onClick={resetV2Evidence}>
+                                RESET V2 EVIDENCE
+                            </button>
+                        </div>
                     </div>
 
                     <div className='matches-pro__verification'>
