@@ -528,7 +528,8 @@ const MatchesPro = () => {
         const next = predict(digits_ref.current, { payout: payout_ref.current });
         setPrediction(next);
         if (next?.predictedDigit === null || next?.predictedDigit === undefined) {
-            setError('Not enough live Deriv tick history to make a prediction yet.');
+            setAnalysis(null);
+            setError(next?.reason || 'NO PREDICTION — no validated edge detected.');
             return;
         }
         setError('');
@@ -620,6 +621,21 @@ const MatchesPro = () => {
                             <strong>{stats?.summary?.n ? pct(stats.summary.accuracy) : '-'}</strong>
                         </div>
                         <div><span>Random baseline</span><strong>10.00%</strong></div>
+                        <div><span>Selected model</span><strong>{prediction?.selectedModel || '-'}</strong></div>
+                        <div><span>Walk-forward rate</span><strong>{prediction?.modelResults?.[0]?.trials ? pct(prediction.modelResults[0].accuracy) : '-'}</strong></div>
+                        <div><span>Break-even</span><strong>{pct(breakeven)}</strong></div>
+                        <div><span>Decision</span><strong>{prediction?.predictedDigit === null ? 'NO PREDICTION' : 'PREDICT'}</strong></div>
+                    </div>
+
+                    <div className='matches-pro__verification'>
+                        <div className='matches-pro__v2-subtitle'>Walk-forward model comparison</div>
+                        {prediction?.modelResults?.map(model => (
+                            <div key={model.id} className='matches-pro__verify-row'>
+                                <span><b>{model.id}</b></span>
+                                <span>{model.hits}/{model.trials} correct</span>
+                                <strong>{model.trials ? pct(model.accuracy) : '-'}</strong>
+                            </div>
+                        ))}
                     </div>
 
                     <div className='matches-pro__verification'>
