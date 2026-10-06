@@ -2,11 +2,23 @@
 // the proven Deriv execution / settlement plumbing underneath.
 import React from 'react';
 import { observer } from 'mobx-react-lite';
-import { api_base } from '@/external/bot-skeleton';
+import { api_base, MessageTypes } from '@/external/bot-skeleton';
 import { useStore } from '@/hooks/useStore';
 import { isProduction, WS_SERVERS } from '@/components/shared/utils/config/config';
 import { playLoss, playWin, unlockAudio } from '@/components/shared/nlb/trade-sounds';
 import { trackContracts, describeError } from '@/components/shared/nlb/settlement';
+import { contract_stages } from '@/constants/contract-stage';
+import {
+    analyzeDigitMarket,
+    candidateToContract,
+    NOLIMITZ_AI_ENGINE_VERSION,
+} from '@/components/shared/nlb/nolimitz-ai-engine';
+import {
+    readAiEvidence,
+    recordAiEvidence,
+    setupEvidence,
+    topAiSetups,
+} from '@/components/shared/nlb/nolimitz-ai-evidence';
 import Guide, { GuideButton } from '@/components/shared/nlb/guide';
 import './speedbot.scss';
 
@@ -29,10 +41,18 @@ const FALLBACK_DECIMALS = {
 };
 
 const STRATEGIES = [
-    { id: 'alpha', label: 'Alpha', note: 'Balanced execution' },
-    { id: 'quantum', label: 'Quantum', note: 'Dual confirmation' },
-    { id: 'apex', label: 'Apex', note: 'Strict filtering' },
+    { id: 'alpha', label: 'Alpha', note: 'Demo execution test — one controlled contract' },
+    { id: 'quantum', label: 'Quantum', note: '2-model consensus + fresh forward evidence' },
+    { id: 'apex', label: 'Apex', note: '3-model consensus + stricter evidence gate' },
 ];
+
+const AI_RULES = {
+    quantum: { minTier: 2, minEvidence: 20, margin: 0.005 },
+    apex: { minTier: 3, minEvidence: 35, margin: 0.01 },
+};
+
+const familyForContract = contract =>
+    contract === 'even_odd' ? 'even_odd' : contract === 'over_under' ? 'over_under' : null;
 
 const CONTRACTS = [
     { id: 'rise_fall', label: 'Rise/Fall', symbol: '↕', available: true },
@@ -47,7 +67,7 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const maxMartingaleSteps = risk => (risk === 'high' ? 4 : risk === 'medium' ? 2 : 0);
 
 const NolimitzAI = observer(() => {
-    const { client, run_panel, transactions, summary_card } = useStore();
+    const { client, run_panel, transactions, summary_card, journal } = useStore();
     const is_logged_in = !!client?.is_logged_in;
     const loginid = client?.loginid || 'NOT CONNECTED';
     const currency = client?.currency || 'USD';
@@ -70,6 +90,14 @@ const NolimitzAI = observer(() => {
     const [digits, setDigits] = React.useState([]);
     const [quote, setQuote] = React.useState(null);
     const [running, setRunning] = React.useState(false);
+    const [engineAnalysis, setEngineAnalysis] = React.useState(null);
+    const [evidenceState, setEvidenceState] = React.useState(() => readAiEvidence('1HZ100V', 'over_under'));
+    const [gateInfo, setGateInfo] = React.useState({
+        status: 'SHADOW',
+        reason: 'Collecting measured setup evidence.',
+        breakeven: null,
+        required: null,
+    });
     const [stats, setStats] = React.useState({
         ticks: 0,
         last_digit: null,
@@ -88,10 +116,38 @@ const NolimitzAI = observer(() => {
     const ws_ref = React.useRef(null);
     const decimals_ref = React.useRef({ ...FALLBACK_DECIMALS });
     const sym_ref = React.useRef(symbol);
+    const contract_ref = React.useRef(contract);
+    const digits_ref = React.useRef([]);
+    const engine_ref = React.useRef(null);
+    const pending_shadow_ref = React.useRef(null);
+    const last_shadow_fingerprint_ref = React.useRef(null);
+    const last_traded_fingerprint_ref = React.useRef(null);
+    const last_gate_reason_ref = React.useRef('');
     sym_ref.current = symbol;
+    contract_ref.current = contract;
 
     const log = line =>
         setLogs(prev => [`${new Date().toLocaleTimeString()}  ${line}`, ...prev].slice(0, 50));
+
+    const journalLog = (message, type = MessageTypes.SUCCESS) => {
+        try {
+            journal?.pushMessage?.(message, type, 'journal__text');
+        } catch {
+            /* journal mirroring must not interrupt execution */
+        }
+    };
+
+    const publishAnalysis = (history, family) => {
+        if (!family) {
+            engine_ref.current = null;
+            setEngineAnalysis(null);
+            return null;
+        }
+        const next = analyzeDigitMarket(history, family);
+        engine_ref.current = next;
+        setEngineAnalysis(next);
+        return next;
+    };
 
     React.useEffect(() => {
         let alive = true;
@@ -105,7 +161,7 @@ const NolimitzAI = observer(() => {
             ws.send(
                 JSON.stringify({
                     ticks_history: sym_ref.current,
-                    count: 120,
+                    count: 1000,
                     end: 'latest',
                     style: 'ticks',
                     subscribe: 1,
@@ -141,9 +197,25 @@ const NolimitzAI = observer(() => {
             if (data.msg_type === 'history' && data.echo_req?.ticks_history === sym_ref.current) {
                 const dec = decimals_ref.current[sym_ref.current] ?? 2;
                 const prices = data.history?.prices || [];
-                const ds = prices.map(pr => Number(Number(pr).toFixed(dec).slice(-1)));
-                setDigits(ds.slice(-120));
+                const ds = prices.map(pr => Number(Number(pr).toFixed(dec).slice(-1))).slice(-1000);
+                digits_ref.current = ds;
+                setDigits(ds);
                 if (prices.length) setQuote(Number(prices[prices.length - 1]).toFixed(dec));
+
+                const family = familyForContract(contract_ref.current);
+                const analysis = publishAnalysis(ds, family);
+                if (family && analysis?.candidate && analysis?.fingerprint) {
+                    last_shadow_fingerprint_ref.current = analysis.fingerprint;
+                    pending_shadow_ref.current = {
+                        symbol: sym_ref.current,
+                        family,
+                        fingerprint: analysis.fingerprint,
+                        side: analysis.candidate,
+                        tier: analysis.agreementTier,
+                        models: analysis.agreementModels || [],
+                        estimate: analysis.estimate,
+                    };
+                }
                 return;
             }
 
@@ -152,8 +224,42 @@ const NolimitzAI = observer(() => {
                 const q = Number(data.tick.quote).toFixed(dec);
                 const d = Number(q.slice(-1));
                 setQuote(q);
-                setDigits(prev => [...prev, d].slice(-120));
+
+                const pending = pending_shadow_ref.current;
+                if (pending && pending.symbol === sym_ref.current) {
+                    const updatedEvidence = recordAiEvidence(pending.symbol, pending.family, {
+                        ...pending,
+                        actual: d,
+                        t: Date.now(),
+                    });
+                    setEvidenceState(updatedEvidence);
+                }
+                pending_shadow_ref.current = null;
+
+                const nextDigits = [...digits_ref.current, d].slice(-1000);
+                digits_ref.current = nextDigits;
+                setDigits(nextDigits);
                 setStats(prev => ({ ...prev, ticks: prev.ticks + 1, last_digit: d }));
+
+                const family = familyForContract(contract_ref.current);
+                const analysis = publishAnalysis(nextDigits, family);
+
+                if (analysis?.candidate && analysis?.fingerprint) {
+                    if (analysis.fingerprint !== last_shadow_fingerprint_ref.current) {
+                        last_shadow_fingerprint_ref.current = analysis.fingerprint;
+                        pending_shadow_ref.current = {
+                            symbol: sym_ref.current,
+                            family,
+                            fingerprint: analysis.fingerprint,
+                            side: analysis.candidate,
+                            tier: analysis.agreementTier,
+                            models: analysis.agreementModels || [],
+                            estimate: analysis.estimate,
+                        };
+                    }
+                } else {
+                    last_shadow_fingerprint_ref.current = null;
+                }
             }
         };
 
@@ -174,86 +280,81 @@ const NolimitzAI = observer(() => {
         };
     }, []);
 
+    const selectedFamily = familyForContract(contract);
+
+    React.useEffect(() => {
+        pending_shadow_ref.current = null;
+        last_shadow_fingerprint_ref.current = null;
+        last_traded_fingerprint_ref.current = null;
+        last_gate_reason_ref.current = '';
+        const family = familyForContract(contract);
+        if (family) {
+            setEvidenceState(readAiEvidence(symbol, family));
+            publishAnalysis(digits_ref.current, family);
+        } else {
+            setEvidenceState({ total: 0, correct: 0, by_setup: {}, by_tier: {}, recent: [] });
+            engine_ref.current = null;
+            setEngineAnalysis(null);
+        }
+    }, [symbol, contract]);
+
     const evenCount = digits.filter(d => d % 2 === 0).length;
     const evenPct = digits.length ? (100 * evenCount) / digits.length : 50;
     const over2Pct = digits.length ? (100 * digits.filter(d => d > 2).length) / digits.length : 70;
     const under7Pct = digits.length ? (100 * digits.filter(d => d < 7).length) / digits.length : 70;
 
-    const contractSpec = React.useMemo(() => {
+    const manualContractSpec = React.useMemo(() => {
         if (contract === 'rise_fall') {
-            return direction === 'fall'
-                ? { type: 'PUT', label: 'Fall' }
-                : { type: 'CALL', label: 'Rise' };
+            return direction === 'fall' ? { type: 'PUT', label: 'Fall' } : { type: 'CALL', label: 'Rise' };
         }
-
         if (contract === 'even_odd') {
-            let side = direction;
-            if (optimization && strategy !== 'alpha') {
-                if (evenPct >= 52) side = 'even';
-                else if (evenPct <= 48) side = 'odd';
-            }
-            return side === 'odd'
-                ? { type: 'DIGITODD', label: 'Odd', liveRate: 100 - evenPct }
-                : { type: 'DIGITEVEN', label: 'Even', liveRate: evenPct };
+            return direction === 'odd'
+                ? { type: 'DIGITODD', label: 'Odd' }
+                : { type: 'DIGITEVEN', label: 'Even' };
         }
-
         if (contract === 'over_under') {
-            let side = direction;
-            if (optimization && strategy !== 'alpha') {
-                if (over2Pct > under7Pct) side = 'over';
-                else if (under7Pct > over2Pct) side = 'under';
-            }
-            return side === 'under'
-                ? { type: 'DIGITUNDER', label: 'Under 7', barrier: 7, liveRate: under7Pct }
-                : { type: 'DIGITOVER', label: 'Over 2', barrier: 2, liveRate: over2Pct };
+            return direction === 'under'
+                ? { type: 'DIGITUNDER', label: 'Under 7', barrier: 7 }
+                : { type: 'DIGITOVER', label: 'Over 2', barrier: 2 };
         }
-
         return null;
-    }, [contract, direction, optimization, strategy, evenPct, over2Pct, under7Pct]);
+    }, [contract, direction]);
 
-    const strategyGate = React.useCallback(() => {
-        if (!contractSpec) return { ok: false, reason: 'This contract mode is not enabled yet.' };
-        if (strategy === 'alpha') return { ok: true };
+    const aiContractSpec = React.useMemo(
+        () => (selectedFamily && engineAnalysis?.candidate
+            ? candidateToContract(selectedFamily, engineAnalysis.candidate)
+            : null),
+        [selectedFamily, engineAnalysis]
+    );
 
-        if (contract === 'even_odd') {
-            const edge = Math.abs(evenPct - 50);
-            const need = strategy === 'apex' ? 4 : 2;
-            return edge >= need
-                ? { ok: true }
-                : { ok: false, reason: `Waiting for stronger Even/Odd separation (${edge.toFixed(1)}%, need ${need}%).` };
-        }
+    const contractSpec = strategy === 'alpha' ? manualContractSpec : aiContractSpec;
+    const exactSetupEvidence = React.useMemo(
+        () => setupEvidence(evidenceState, engineAnalysis?.fingerprint),
+        [evidenceState, engineAnalysis?.fingerprint]
+    );
+    const bestSetups = React.useMemo(() => topAiSetups(evidenceState, 5), [evidenceState]);
 
-        if (contract === 'over_under') {
-            const rate = Number(contractSpec.liveRate || 0);
-            const need = strategy === 'apex' ? 73 : 71;
-            return rate >= need
-                ? { ok: true }
-                : { ok: false, reason: `Waiting for ${contractSpec.label} history rate ≥ ${need}% (now ${rate.toFixed(1)}%).` };
-        }
-
-        // Rise/Fall currently uses execution controls only; digit history does not
-        // provide a legitimate directional price signal.
-        if (contract === 'rise_fall' && strategy !== 'alpha') {
-            return { ok: false, reason: 'Rise/Fall confirmation model is not enabled yet. Use Alpha for manual direction.' };
-        }
-
-        return { ok: true };
-    }, [contractSpec, strategy, contract, evenPct]);
-
-    const settleContract = contract_id =>
+    const settleContract = (contract_id, durationTicks = 1) =>
         new Promise(resolve => {
             const handle = trackContracts([contract_id], {
-                timeoutMs: (duration + 30) * 1000,
+                timeoutMs: (durationTicks + 30) * 1000,
                 onContract: contractUpdate => {
                     try {
                         transactions?.onBotContractEvent?.(contractUpdate);
                         summary_card?.onBotContractEvent?.(contractUpdate);
+                        run_panel?.onBotContractEvent?.(contractUpdate);
                     } catch {
-                        /* display mirroring must not interrupt trading */
+                        /* Bot Builder mirroring must never interrupt settlement */
                     }
                 },
                 onDone: ({ profits, settled }) => {
                     settle_handles_ref.current.delete(handle);
+                    try {
+                        run_panel?.setHasOpenContract?.(false);
+                        run_panel?.setContractStage?.(contract_stages.CONTRACT_CLOSED);
+                    } catch {
+                        /* noop */
+                    }
                     const values = Object.values(profits);
                     resolve(settled > 0 ? values[0] : null);
                 },
@@ -261,23 +362,48 @@ const NolimitzAI = observer(() => {
             settle_handles_ref.current.add(handle);
         });
 
-    const buyOnce = async (spec, amount) => {
+    const prepareProposal = async (spec, amount, durationTicks = 1) => {
         const req = {
             proposal: 1,
             amount,
             basis: 'stake',
             contract_type: spec.type,
             currency,
-            duration,
+            duration: durationTicks,
             duration_unit: 't',
             underlying_symbol: symbol,
             ...(spec.barrier !== undefined ? { barrier: String(spec.barrier) } : {}),
         };
-        const prop = await api_base.api.send(req);
-        const id = prop?.proposal?.id;
-        if (!id) throw new Error('No proposal returned');
-        const res = await api_base.api.send({ buy: id, price: Number(prop.proposal.ask_price) });
-        return res?.buy?.contract_id;
+        const response = await api_base.api.send(req);
+        const proposal = response?.proposal;
+        const ask = Number(proposal?.ask_price ?? amount);
+        const payout = Number(proposal?.payout ?? 0);
+        if (!proposal?.id || !(ask > 0) || !(payout > 0)) throw new Error('Invalid live proposal');
+        return {
+            id: proposal.id,
+            ask,
+            payout,
+            breakeven: ask / payout,
+            proposal,
+        };
+    };
+
+    const buyPrepared = async prepared => {
+        try {
+            run_panel?.setContractStage?.(contract_stages.PURCHASE_SENT);
+        } catch {
+            /* noop */
+        }
+        const res = await api_base.api.send({ buy: prepared.id, price: prepared.ask });
+        const contractId = res?.buy?.contract_id;
+        if (!contractId) throw new Error('No contract id returned');
+        try {
+            run_panel?.setHasOpenContract?.(true);
+            run_panel?.setContractStage?.(contract_stages.PURCHASE_RECEIVED);
+        } catch {
+            /* noop */
+        }
+        return contractId;
     };
 
     const stopRun = (reason, r) => {
