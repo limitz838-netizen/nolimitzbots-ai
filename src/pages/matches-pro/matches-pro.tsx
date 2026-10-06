@@ -125,6 +125,7 @@ const MatchesPro = () => {
     const trackers_ref = React.useRef([]);
     const analysis_ref = React.useRef(null);
     const proposals_ref = React.useRef(null);
+    const payout_by_digit_ref = React.useRef({});
 
     payout_ref.current = payout;
     auto_ref.current = auto;
@@ -172,13 +173,15 @@ const MatchesPro = () => {
         // Seed a fresh next-tick prediction from the currently visible history.
         // It is not counted until a future real tick arrives.
         if (digits_ref.current.length) {
-            const seeded = predict(digits_ref.current, { payout: payout_ref.current });
+            const seeded = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
             setPrediction(seeded);
             pending_ref.current = {
                 symbol,
                 predicted: seeded.predictedDigit,
                 quality: seeded.signalQuality,
                 score: seeded.score,
+                model: seeded.selectedModel,
+                engineVersion: seeded.engineVersion,
             };
         }
 
@@ -287,6 +290,8 @@ const MatchesPro = () => {
                     actual: actual_digit,
                     quality: pending.quality,
                     score: pending.score,
+                    model: pending.model,
+                    engineVersion: pending.engineVersion,
                 });
                 setFeed(prev =>
                     [
@@ -311,13 +316,15 @@ const MatchesPro = () => {
                 setAnalysis({ ...open });
             }
 
-            const next = predict(digits_ref.current, { payout: payout_ref.current });
+            const next = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
             setPrediction(next);
             pending_ref.current = {
                 symbol: sym,
                 predicted: next.predictedDigit,
                 quality: next.signalQuality,
                 score: next.score,
+                model: next.selectedModel,
+                engineVersion: next.engineVersion,
             };
 
             const state = refreshStats(sym);
@@ -377,7 +384,7 @@ const MatchesPro = () => {
                 setDigits(d);
                 setQuote(q);
                 setDecimals(dec);
-                const seeded = predict(digits_ref.current, { payout: payout_ref.current });
+                const seeded = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
                 setPrediction(seeded);
                 pending_ref.current = {
                     symbol,
@@ -427,6 +434,7 @@ const MatchesPro = () => {
         proposals_ref.current?.stop?.();
         proposals_ref.current = null;
         setLivePricing(false);
+        payout_by_digit_ref.current = {};
 
         if (!isAuthorized || !activeLoginid) return undefined;
         const stake = Number(limits.stake);
@@ -438,7 +446,16 @@ const MatchesPro = () => {
                 symbol,
                 currency,
                 amount: stake,
-                onUpdate: ({ multiplier }) => {
+                onUpdate: ({ multiplier, latest }) => {
+                    if (latest) {
+                        const exact = {};
+                        Object.entries(latest).forEach(([digit, proposal]) => {
+                            const ask = Number(proposal?.ask);
+                            const winPayout = Number(proposal?.payout);
+                            if (ask > 0 && winPayout > 0) exact[Number(digit)] = winPayout / ask;
+                        });
+                        payout_by_digit_ref.current = exact;
+                    }
                     if (!multiplier || !Number.isFinite(multiplier)) return;
                     setLivePricing(true);
                     setPayout(prev => (Math.abs(prev - multiplier) > 0.005 ? Number(multiplier.toFixed(3)) : prev));
@@ -476,7 +493,7 @@ const MatchesPro = () => {
     }, [symbol, refreshAnalyseStats]);
 
     const startAnalysis = () => {
-        const next = predict(digits_ref.current, { payout: payout_ref.current });
+        const next = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
         if (next.predictedDigit === null) return;
         const open = {
             symbol,
@@ -578,7 +595,7 @@ const MatchesPro = () => {
     );
 
     const runAnalysis = () => {
-        const next = predict(digits_ref.current, { payout: payout_ref.current });
+        const next = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
         setPrediction(next);
         if (next?.predictedDigit === null || next?.predictedDigit === undefined) {
             setAnalysis(null);
@@ -595,6 +612,18 @@ const MatchesPro = () => {
     };
 
     const predictionHistory = stats?.state?.recent?.slice(-10).reverse() || [];
+    const predictionDistribution = React.useMemo(
+        () => (stats?.state?.by_digit || []).map((row, digit) => ({ digit, n: row?.n || 0, correct: row?.correct || 0 })),
+        [stats]
+    );
+    const modelUsage = React.useMemo(
+        () => Object.entries(stats?.state?.by_model || {}).map(([model, row]) => ({
+            model,
+            n: row?.n || 0,
+            correct: row?.correct || 0,
+        })),
+        [stats]
+    );
 
     return (
         <div className='matches-pro matches-pro--v2'>
@@ -674,9 +703,13 @@ const MatchesPro = () => {
                             <strong>{stats?.summary?.n ? pct(stats.summary.accuracy) : '-'}</strong>
                         </div>
                         <div><span>Random baseline</span><strong>10.00%</strong></div>
-                        <div><span>Selected model</span><strong>{prediction?.selectedModel || '-'}</strong></div>
-                        <div><span>Walk-forward rate</span><strong>{prediction?.modelResults?.[0]?.trials ? pct(prediction.modelResults[0].accuracy) : '-'}</strong></div>
-                        <div><span>Break-even</span><strong>{prediction?.breakeven ? pct(prediction.breakeven) : '-'}</strong></div>
+                        <div><span>Engine</span><strong>{prediction?.engineVersion || '-'}</strong></div>
+                        <div><span>Consensus rate</span><strong>{prediction?.consensus?.trials ? pct(prediction.consensus.accuracy) : '-'}</strong></div>
+                        <div><span>Lower bound</span><strong>{prediction?.consensus?.trials ? pct(prediction.consensus.lowerBound) : '-'}</strong></div>
+                        <div><span>Exact digit break-even</span><strong>{prediction?.breakeven ? pct(prediction.breakeven) : '-'}</strong></div>
+                        <div><span>Consensus trials</span><strong>{prediction?.consensus?.trials ?? 0}</strong></div>
+                        <div><span>Consensus coverage</span><strong>{prediction?.consensus ? pct(prediction.consensus.coverage) : '-'}</strong></div>
+                        <div><span>Candidate digit</span><strong>{prediction?.candidateDigit ?? '-'}</strong></div>
                         <div><span>Decision</span><strong>{prediction?.predictedDigit === null ? 'NO PREDICTION' : 'PREDICT'}</strong></div>
                     </div>
 
@@ -694,12 +727,43 @@ const MatchesPro = () => {
                     <div className='matches-pro__verification'>
                         <div className='matches-pro__v2-subtitle'>Evidence controls</div>
                         <div className='matches-pro__verify-row'>
-                            <span>Clear legacy V2 prediction evidence for this market and begin a fresh forward test.</span>
+                            <span>Clear current engine evidence for this market and begin a fresh forward test.</span>
                             <span>Trading limits are kept.</span>
                             <button type='button' className='matches-pro__secondary' onClick={resetV2Evidence}>
-                                RESET V2 EVIDENCE
+                                RESET FRESH EVIDENCE
                             </button>
                         </div>
+                    </div>
+
+                    <div className='matches-pro__verification'>
+                        <div className='matches-pro__v2-subtitle'>Live Matches model votes</div>
+                        {prediction?.liveVotes?.length ? prediction.liveVotes.map(vote => (
+                            <div key={vote.model} className={`matches-pro__verify-row ${vote.agrees ? 'hit' : ''}`}>
+                                <span><b>{vote.model}</b></span>
+                                <span>Next digit <b>{vote.digit ?? '-'}</b></span>
+                                <strong>{vote.agrees ? 'AGREES' : '—'}</strong>
+                            </div>
+                        )) : <div className='matches-pro__muted'>Waiting for model votes...</div>}
+                    </div>
+
+                    <div className='matches-pro__verification'>
+                        <div className='matches-pro__v2-subtitle'>Fresh prediction distribution</div>
+                        <div className='matches-pro__digit-diagnostics'>
+                            {predictionDistribution.map(row => (
+                                <div key={row.digit} className='matches-pro__digit-diagnostic'>
+                                    <strong>{row.digit}</strong>
+                                    <span>{row.n} picks</span>
+                                    <small>{row.n ? `${((row.correct / row.n) * 100).toFixed(1)}% hit` : '—'}</small>
+                                </div>
+                            ))}
+                        </div>
+                        {modelUsage.length > 0 && (
+                            <div className='matches-pro__model-usage'>
+                                {modelUsage.map(row => (
+                                    <span key={row.model}>{row.model}: {row.n} emitted / {row.correct} correct</span>
+                                ))}
+                            </div>
+                        )}
                     </div>
 
                     <div className='matches-pro__verification'>
