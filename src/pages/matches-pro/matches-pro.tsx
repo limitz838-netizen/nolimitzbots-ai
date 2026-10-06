@@ -292,6 +292,7 @@ const MatchesPro = () => {
                     score: pending.score,
                     model: pending.model,
                     engineVersion: pending.engineVersion,
+                    tradable: pending.tradable,
                 });
                 setFeed(prev =>
                     [
@@ -320,11 +321,12 @@ const MatchesPro = () => {
             setPrediction(next);
             pending_ref.current = {
                 symbol: sym,
-                predicted: next.predictedDigit,
+                predicted: next.candidateDigit,
                 quality: next.signalQuality,
                 score: next.score,
                 model: next.selectedModel,
                 engineVersion: next.engineVersion,
+                tradable: next.predictedDigit !== null,
             };
 
             const state = refreshStats(sym);
