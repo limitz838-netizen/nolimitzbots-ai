@@ -549,7 +549,7 @@ const BulkTrader = observer(() => {
                     ))}
                 </div>
 
-                <div className='bulk-trader__row'>
+                <div className='bulk-trader__row bulk-trader__row--trade-config'>
                     <div className='bulk-trader__field'>
                         <span>Ticks</span>
                         <input
