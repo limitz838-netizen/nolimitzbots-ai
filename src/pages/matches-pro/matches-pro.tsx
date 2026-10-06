@@ -84,7 +84,7 @@ const clockOf = ts => new Date(ts).toLocaleTimeString('en-GB');
 
 const MatchesPro = () => {
     const { isAuthorized, accountList, activeLoginid } = useApiBase();
-    const { run_panel } = useStore();
+    const { run_panel, transactions, summary_card } = useStore();
 
     const [symbol, setSymbol] = React.useState('R_100');
     const [symbols, setSymbols] = React.useState(DEFAULT_SYMBOLS);
@@ -206,6 +206,18 @@ const MatchesPro = () => {
                 cooldown_ref.current = Number(limits_ref.current.cooldown_ticks) || 0;
 
                 const tracker = trackContracts([contract_id], {
+                    onContract: contract => {
+                        // Matches Pro lives outside the Bot Builder route. Mirror every
+                        // open-contract update into the same stores used by Bot Builder,
+                        // so Summary and Transactions stay live even if its event
+                        // listeners are not mounted on this route.
+                        try {
+                            transactions?.onBotContractEvent?.(contract);
+                            summary_card?.onBotContractEvent?.(contract);
+                        } catch {
+                            /* display mirroring must never interrupt execution */
+                        }
+                    },
                     onDone: ({ profits }) => {
                         const profit = Number(Object.values(profits)[0] ?? 0);
                         open_ref.current.delete(contract_id);
@@ -229,7 +241,7 @@ const MatchesPro = () => {
                 firing_ref.current = false;
             }
         },
-        [currency, refreshDay]
+        [currency, refreshDay, transactions, summary_card]
     );
 
     // ------------------------------------------------------------- per tick
@@ -474,11 +486,19 @@ const MatchesPro = () => {
         return () => clearInterval(id);
     }, [analysis, refreshAnalyseStats]);
 
-    // Arming auto trade opens the run panel drawer, so Summary, Transactions
-    // and Journal are on screen as contracts settle. Disarming closes it.
+    // Give a Matches Auto Trader session the same run identity/state as Bot Builder.
+    // Contracts themselves are mirrored into its Summary/Transactions stores above.
     React.useEffect(() => {
         try {
-            run_panel?.setIsRunning?.(auto);
+            if (auto) {
+                run_panel.run_id = `matches-pro-${Date.now()}`;
+                run_panel?.setIsRunning?.(true);
+                run_panel?.setHasOpenContract?.(open_ref.current.size > 0);
+                run_panel?.toggleDrawer?.(true);
+            } else {
+                run_panel?.setIsRunning?.(false);
+                if (open_ref.current.size === 0) run_panel?.setHasOpenContract?.(false);
+            }
         } catch {
             /* run panel unavailable - trading still works */
         }
