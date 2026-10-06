@@ -823,7 +823,10 @@ const MatchesPro = () => {
                         <div><span>Consensus trials</span><strong>{prediction?.consensus?.trials ?? 0}</strong></div>
                         <div><span>Consensus coverage</span><strong>{prediction?.consensus ? pct(prediction.consensus.coverage) : '-'}</strong></div>
                         <div><span>Candidate digit</span><strong>{prediction?.candidateDigit ?? '-'}</strong></div>
-                        <div><span>Decision</span><strong>{prediction?.predictedDigit === null ? 'NO PREDICTION' : 'PREDICT'}</strong></div>
+                        <div><span>Agreement tier</span><strong>{prediction?.agreementTier ? `${prediction.agreementTier}-model` : '-'}</strong></div>
+                        <div><span>Exact setup sample</span><strong>{prediction?.liveCalibration?.n ?? 0}/{MIN_SETUP_EVIDENCE}</strong></div>
+                        <div><span>Setup lower bound</span><strong>{prediction?.liveCalibration?.n ? pct(prediction.liveCalibration.lowerBound) : '-'}</strong></div>
+                        <div><span>Decision</span><strong>{prediction?.liveCalibration?.tradeReady ? 'TRADE CANDIDATE' : 'SHADOW ONLY'}</strong></div>
                     </div>
 
                     <div className='matches-pro__verification'>
@@ -857,6 +860,32 @@ const MatchesPro = () => {
                                 <strong>{vote.agrees ? 'AGREES' : '—'}</strong>
                             </div>
                         )) : <div className='matches-pro__muted'>Waiting for model votes...</div>}
+                    </div>
+
+                    <div className='matches-pro__verification'>
+                        <div className='matches-pro__v2-subtitle'>Agreement-tier forward results</div>
+                        {tierStats.length ? tierStats.map(row => (
+                            <div key={row.tier} className='matches-pro__verify-row'>
+                                <span><b>{row.tier}-model agreement</b></span>
+                                <span>{row.correct}/{row.n} correct</span>
+                                <strong>{row.n ? pct(row.accuracy) : '-'}</strong>
+                            </div>
+                        )) : <div className='matches-pro__muted'>Collecting independent agreement-tier evidence...</div>}
+                    </div>
+
+                    <div className='matches-pro__verification'>
+                        <div className='matches-pro__v2-subtitle'>Exact setup calibration</div>
+                        {setupLeaderboard.length ? setupLeaderboard.map(row => (
+                            <div key={row.fingerprint} className='matches-pro__setup-row'>
+                                <div>
+                                    <strong>Digit {row.digit} · {row.tier}-model</strong>
+                                    <small>{(row.models || []).join(' + ') || 'unknown models'}</small>
+                                </div>
+                                <span>{row.correct}/{row.n}</span>
+                                <span>{pct(row.accuracy)}</span>
+                                <span>LB {pct(row.lowerBound)}</span>
+                            </div>
+                        )) : <div className='matches-pro__muted'>No independent setup fingerprints graded yet.</div>}
                     </div>
 
                     <div className='matches-pro__verification'>
