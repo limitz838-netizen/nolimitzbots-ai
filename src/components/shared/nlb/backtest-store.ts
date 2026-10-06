@@ -85,6 +85,7 @@ export const record = (symbol, entry) => {
         score: entry.score,
         model,
         engineVersion: entry.engineVersion || 'unknown',
+        tradable: Boolean(entry.tradable),
     });
     if (state.recent.length > MAX_RECENT) state.recent = state.recent.slice(-MAX_RECENT);
 
