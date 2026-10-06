@@ -31,7 +31,6 @@ import {
     saveLimits,
 } from '@/components/shared/nlb/risk-guard';
 import PageBoundary from '@/components/shared/nlb/page-boundary';
-import MatchesTerminalSummary from './matches-terminal-summary';
 import './matches-pro.scss';
 
 const DEFAULT_SYMBOLS = [
@@ -525,47 +524,34 @@ const MatchesPro = () => {
         [symbols, symbol]
     );
 
-    // Same numbers as the panel above, said in a sentence.
-    const plainRead = React.useMemo(() => {
-        if (!prediction || prediction.predictedDigit === null) return '';
-        const lead = `Digit ${prediction.predictedDigit} is leading on ${marketLabel}`;
-        if (prediction.signalQuality === 'NO SIGNAL') {
-            return `${lead}, but the lead is within normal variation - nothing decisive.`;
+    const runAnalysis = () => {
+        const next = predict(digits_ref.current, { payout: payout_ref.current });
+        setPrediction(next);
+        if (next?.predictedDigit === null || next?.predictedDigit === undefined) {
+            setError('Not enough live Deriv tick history to make a prediction yet.');
+            return;
         }
-        if (prediction.signalQuality === 'WEAK') {
-            return `${lead} and the lead is building, but it has not cleared the significance bar.`;
-        }
-        if (prediction.probabilityEstimate <= prediction.breakeven) {
-            return `${lead} and the lead is statistically real, but at ${pct(prediction.probabilityEstimate)} it is still under the ${pct(prediction.breakeven)} this payout needs.`;
-        }
-        return `${lead}, clears the significance bar, and at ${pct(prediction.probabilityEstimate)} sits above the ${pct(prediction.breakeven)} break-even.`;
-    }, [prediction, marketLabel]);
+        setError('');
+        setAnalysis({
+            symbol,
+            digit: next.predictedDigit,
+            sampleSize: next.sampleSize,
+            createdAt: Date.now(),
+        });
+    };
+
+    const predictionHistory = stats?.state?.recent?.slice(-10).reverse() || [];
 
     return (
-        <div className='matches-pro'>
-            <div className='matches-pro__panel'>
-                <MatchesTerminalSummary
-                    market={marketLabel}
-                    status={status_text}
-                    account_id={activeLoginid}
-                    is_demo={is_demo}
-                    balance={accountBalance}
-                    currency={currency}
-                    quote={quote}
-                    current_digit={current_digit}
-                    predicted_digit={predicted ?? null}
-                    signal_quality={quality}
-                    signal_score={prediction?.score ?? 0}
-                    estimated_probability={prediction?.probabilityEstimate}
-                    session_pl={day.pl}
-                    auto_enabled={auto}
-                    recent_digits={digits}
-                />
-
-                <div className='matches-pro__head'>
+        <div className='matches-pro matches-pro--v2'>
+            <div className='matches-pro__panel matches-pro__panel--v2'>
+                <div className='matches-pro__v2-head'>
                     <div>
-                        <div className='matches-pro__title'>MATCHES PRO</div>
-                        <div className='matches-pro__subtitle'>Phase 3 - demo auto trading with risk limits.</div>
+                        <div className='matches-pro__eyebrow'>NOLIMITZ AI</div>
+                        <div className='matches-pro__title'>MATCHES PRO V2</div>
+                        <div className='matches-pro__subtitle'>
+                            Live last-digit prediction analysis for Deriv Matches contracts.
+                        </div>
                     </div>
                     <div className={`matches-pro__status matches-pro__status--${status}`}>
                         <i className='matches-pro__dot' />
@@ -575,435 +561,179 @@ const MatchesPro = () => {
 
                 {error && <div className='matches-pro__warn'>{error}</div>}
 
-                <div className='matches-pro__controls'>
-                    <label className='matches-pro__field'>
-                        <span>Market</span>
-                        <select value={symbol} onChange={e => setSymbol(e.target.value)}>
-                            {symbols.map(s => (
-                                <option key={s.code} value={s.code}>
-                                    {s.label}
-                                </option>
-                            ))}
-                        </select>
-                    </label>
-                    <label className='matches-pro__field'>
-                        <span>Distribution window</span>
-                        <select value={window_size} onChange={e => setWindowSize(Number(e.target.value))}>
-                            {WINDOW_CHOICES.map(w => (
-                                <option key={w} value={w}>
-                                    {w} ticks
-                                </option>
-                            ))}
-                        </select>
-                    </label>
-                    <label className='matches-pro__field'>
-                        <span>{live_pricing ? 'Payout multiplier (live from Deriv)' : 'Payout multiplier'}</span>
-                        <input
-                            type='number'
-                            step='0.1'
-                            min='1.1'
-                            value={payout}
-                            readOnly={live_pricing}
-                            onChange={e => setPayout(Number(e.target.value) || 9.3)}
-                        />
-                    </label>
-                </div>
-
-                <div className='matches-pro__readout'>
-                    <div className='matches-pro__stat'>
-                        <span>Current tick</span>
-                        <strong>{quote ?? '-'}</strong>
-                    </div>
-                    <div className='matches-pro__stat'>
-                        <span>Current digit</span>
-                        <strong className='matches-pro__digit'>{current_digit ?? '-'}</strong>
-                    </div>
-                    <div className='matches-pro__stat'>
-                        <span>Decimals</span>
-                        <strong>{decimals ?? '-'}</strong>
-                    </div>
-                    <div className='matches-pro__stat'>
-                        <span>History</span>
-                        <strong>{digits.length}</strong>
-                    </div>
-                </div>
-
-                <div className='matches-pro__section-title'>Statistical analysis</div>
-                <div className={`matches-pro__signal matches-pro__signal--${quality.replace(' ', '-').toLowerCase()}`}>
-                    <div className='matches-pro__signal-main'>
-                        <div className='matches-pro__signal-digit'>{predicted ?? '-'}</div>
+                <section className='matches-pro__v2-card matches-pro__v2-card--analyser'>
+                    <div className='matches-pro__v2-section-head'>
                         <div>
-                            <div className='matches-pro__signal-quality'>{quality}</div>
-                            <div className='matches-pro__signal-sub'>
-                                Score {prediction?.score ?? 0}/100, sample {prediction?.sampleSize ?? 0}
-                            </div>
+                            <span className='matches-pro__v2-step'>01</span>
+                            <h2>Prediction Analyzer</h2>
+                            <p>Uses real Deriv tick history. Tap Analyze to generate one last-digit prediction.</p>
                         </div>
                     </div>
-                    <div className='matches-pro__signal-nums'>
-                        <div>
-                            <span>Estimated probability</span>
-                            <strong>{prediction ? pct(prediction.probabilityEstimate) : '-'}</strong>
-                        </div>
-                        <div>
-                            <span>Break-even needed</span>
-                            <strong>{prediction ? pct(prediction.breakeven) : '-'}</strong>
-                        </div>
-                    </div>
-                </div>
 
-                {plainRead && <div className='matches-pro__read'>{plainRead}</div>}
-
-                {prediction && (
-                    <>
-                        <button type='button' className='matches-pro__link' onClick={() => setShowWhy(v => !v)}>
-                            {show_why ? 'Hide reasoning' : 'Why?'}
-                        </button>
-                        {show_why && (
-                            <div className='matches-pro__why'>
-                                <p>{prediction.reason}</p>
-                                <table>
-                                    <tbody>
-                                        {prediction.factors.map(f => (
-                                            <tr key={f.label}>
-                                                <td>{f.label}</td>
-                                                <td className={f.value >= 0 ? 'pos' : 'neg'}>
-                                                    {f.value >= 0 ? '+' : ''}
-                                                    {f.value.toFixed(2)} sigma
-                                                </td>
-                                                <td className='note'>{f.note || ''}</td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                                <p className='matches-pro__why-foot'>
-                                    Significance bar is {Z_CRITICAL} sigma, corrected for testing 10 digits across 5
-                                    windows every tick. Probability is shrunk toward 10% with a 500-observation prior.
-                                </p>
-                            </div>
-                        )}
-                    </>
-                )}
-
-                {/* -------------------------------- analyse -------------------------------- */}
-                <div className='matches-pro__section-title'>Analyse</div>
-                <div className='matches-pro__analyse'>
-                    <div className='matches-pro__analyse-controls'>
-                        <button
-                            type='button'
-                            className='matches-pro__analyse-btn'
-                            disabled={!prediction || prediction.predictedDigit === null}
-                            onClick={startAnalysis}
-                        >
-                            {analysis && !analysis.done ? 'ANALYSING...' : 'ANALYSE'}
-                        </button>
+                    <div className='matches-pro__v2-controls'>
                         <label className='matches-pro__field'>
-                            <span>Window</span>
-                            <select
-                                value={window_seconds}
-                                onChange={e => setWindowSeconds(Number(e.target.value))}
-                                disabled={analysis && !analysis.done}
-                            >
-                                {WINDOW_SECONDS.map(w => (
-                                    <option key={w} value={w}>
-                                        {w} seconds
-                                    </option>
+                            <span>Market</span>
+                            <select value={symbol} onChange={e => setSymbol(e.target.value)}>
+                                {symbols.map(s => (
+                                    <option key={s.code} value={s.code}>{s.label}</option>
                                 ))}
                             </select>
                         </label>
-                    </div>
-
-                    {analysis && (
-                        <div className={`matches-pro__analyse-card ${analysis.done ? 'done' : 'live'}`}>
-                            <div className='matches-pro__analyse-digit'>{analysis.digit}</div>
-                            <div className='matches-pro__analyse-body'>
-                                {!analysis.done ? (
-                                    <>
-                                        <div className='matches-pro__analyse-count'>{remaining}s</div>
-                                        <div className='matches-pro__analyse-bar'>
-                                            <span
-                                                style={{
-                                                    width: `${(remaining / window_seconds) * 100}%`,
-                                                }}
-                                            />
-                                        </div>
-                                        <div className='matches-pro__analyse-sub'>
-                                            {analysis.ticks.length} tick{analysis.ticks.length === 1 ? '' : 's'} so far,{' '}
-                                            {analysis.hits} match{analysis.hits === 1 ? '' : 'es'}
-                                        </div>
-                                    </>
-                                ) : (
-                                    <>
-                                        <div className='matches-pro__analyse-count'>
-                                            {analysis.hits}/{analysis.ticks.length}
-                                        </div>
-                                        <div className='matches-pro__analyse-sub'>
-                                            Digit {analysis.digit} appeared {analysis.hits} time
-                                            {analysis.hits === 1 ? '' : 's'} in {analysis.ticks.length} tick
-                                            {analysis.ticks.length === 1 ? '' : 's'}. Expected about{' '}
-                                            {(analysis.ticks.length * 0.1).toFixed(1)}.
-                                        </div>
-                                    </>
-                                )}
-                                <div className='matches-pro__analyse-nums'>
-                                    {analysis.quality} &middot; estimated {pct(analysis.probability)} &middot; break-even{' '}
-                                    {pct(analysis.breakeven)}
-                                </div>
-                            </div>
-                            {analysis.ticks.length > 0 && (
-                                <div className='matches-pro__analyse-ticks'>
-                                    {analysis.ticks.map((d, i) => (
-                                        <span key={`${i}-${d}`} className={d === analysis.digit ? 'hit' : ''}>
-                                            {d}
-                                        </span>
-                                    ))}
-                                </div>
-                            )}
+                        <div className='matches-pro__v2-live'>
+                            <span>Live tick</span>
+                            <strong>{quote ?? '-'}</strong>
+                            <small>Last digit {current_digit ?? '-'}</small>
                         </div>
-                    )}
-
-                    {analyse_stats && analyse_stats.state.analyses > 0 && (
-                        <div className='matches-pro__verdict'>
-                            {analyse_stats.summary.verdict}
-                            <button
-                                type='button'
-                                className='matches-pro__link'
-                                onClick={() => {
-                                    resetAnalyse(symbol);
-                                    refreshAnalyseStats(symbol);
-                                }}
-                            >
-                                Reset tally
-                            </button>
+                        <div className='matches-pro__v2-live'>
+                            <span>Real tick history</span>
+                            <strong>{digits.length}</strong>
+                            <small>{marketLabel}</small>
                         </div>
-                    )}
-
-                    <div className='matches-pro__note-inline'>
-                        The countdown is a window to act in, not a period during which the digit becomes more likely.
-                        Each digit stays at roughly 10% per tick throughout. The tally above is this button&apos;s own
-                        record - watch it rather than any single result.
                     </div>
-                </div>
 
-                {/* -------------------------------- trading -------------------------------- */}
-                <div className='matches-pro__section-title'>Trading</div>
-
-                <div className='matches-pro__locks'>
-                    <div className={`matches-pro__lock ${isAuthorized ? 'ok' : 'bad'}`}>
-                        {isAuthorized ? 'Signed in' : 'Not signed in'}
-                    </div>
-                    <div className={`matches-pro__lock ${is_demo ? 'ok' : 'bad'}`}>
-                        {activeLoginid ? `${activeLoginid} ${is_demo ? '(demo)' : '(REAL - blocked)'}` : 'No account'}
-                    </div>
-                    <div className={`matches-pro__lock ${unlocked ? 'ok' : 'bad'}`}>
-                        Evidence {evidence}/{MIN_EVIDENCE}
-                    </div>
-                </div>
-
-                <div className='matches-pro__limits'>
-                    {MAIN_FIELDS.map(f => (
-                        <label key={f.key} className='matches-pro__field'>
-                            <span>{f.label}</span>
-                            <input
-                                type='number'
-                                step={f.step}
-                                min={f.min}
-                                value={limits[f.key]}
-                                onChange={e => setLimit(f.key, e.target.value)}
-                            />
-                        </label>
-                    ))}
-                    <label className='matches-pro__field'>
-                        <span>Trade on</span>
-                        <select value={limits.min_quality} onChange={e => setLimit('min_quality', e.target.value)}>
-                            {QUALITY_FLOORS.map(q => (
-                                <option key={q.value} value={q.value}>
-                                    {q.label}
-                                </option>
-                            ))}
-                        </select>
-                    </label>
-                </div>
-
-                <div className='matches-pro__note-inline'>{FLOOR_RATE[limits.min_quality]}</div>
-
-                {limits.min_quality === 'ANY' && (
-                    <div className='matches-pro__warn'>
-                        Validation mode: every tick qualifies, so the engine&apos;s judgement is bypassed. Useful for
-                        checking the trading path end to end, not a strategy.
-                    </div>
-                )}
-
-                <button type='button' className='matches-pro__link' onClick={() => setShowAdvanced(v => !v)}>
-                    {show_advanced ? 'Hide advanced limits' : 'Advanced limits'}
-                </button>
-
-                {show_advanced && (
-                    <div className='matches-pro__limits'>
-                        {ADVANCED_FIELDS.map(f => (
-                            <label key={f.key} className='matches-pro__field'>
-                                <span>{f.label}</span>
-                                <input
-                                    type='number'
-                                    step={f.step}
-                                    min={f.min}
-                                    value={limits[f.key]}
-                                    onChange={e => setLimit(f.key, e.target.value)}
-                                />
-                            </label>
-                        ))}
-                    </div>
-                )}
-
-                <div className='matches-pro__trade-bar'>
                     <button
                         type='button'
-                        className={`matches-pro__auto ${auto ? 'on' : ''}`}
+                        className='matches-pro__analyse-btn matches-pro__analyse-btn--primary'
+                        disabled={status !== TICK_STATUS.LIVE || digits.length < 100}
+                        onClick={runAnalysis}
+                    >
+                        ANALYZE LAST DIGIT
+                    </button>
+
+                    <div className='matches-pro__prediction-result'>
+                        <span className='matches-pro__prediction-label'>PREDICTED LAST DIGIT</span>
+                        <strong>{analysis?.digit ?? '-'}</strong>
+                        <p>
+                            {analysis
+                                ? `Prediction generated from ${analysis.sampleSize} real Deriv ticks. This is a model prediction, not a guaranteed outcome.`
+                                : status === TICK_STATUS.LIVE
+                                  ? 'Ready. Tap Analyze when you want a new prediction.'
+                                  : 'Connecting to the Deriv tick stream...'}
+                        </p>
+                    </div>
+
+                    <div className='matches-pro__truth-grid'>
+                        <div><span>Verified predictions</span><strong>{stats?.summary?.n ?? 0}</strong></div>
+                        <div><span>Correct</span><strong>{stats?.summary?.k ?? 0}</strong></div>
+                        <div>
+                            <span>Measured accuracy</span>
+                            <strong>{stats?.summary?.n ? pct(stats.summary.accuracy) : '-'}</strong>
+                        </div>
+                        <div><span>Random baseline</span><strong>10.00%</strong></div>
+                    </div>
+
+                    <div className='matches-pro__verification'>
+                        <div className='matches-pro__v2-subtitle'>Recent verified predictions</div>
+                        {predictionHistory.length ? predictionHistory.map((item, i) => (
+                            <div key={`${item.t}-${i}`} className={`matches-pro__verify-row ${item.hit ? 'hit' : 'miss'}`}>
+                                <span>Predicted <b>{item.predicted}</b></span>
+                                <span>Actual <b>{item.actual}</b></span>
+                                <strong>{item.hit ? 'CORRECT' : 'MISS'}</strong>
+                            </div>
+                        )) : <div className='matches-pro__muted'>Waiting for verified live predictions...</div>}
+                    </div>
+                </section>
+
+                <section className='matches-pro__v2-card'>
+                    <div className='matches-pro__v2-section-head'>
+                        <div>
+                            <span className='matches-pro__v2-step'>02</span>
+                            <h2>Matches Auto Trader</h2>
+                            <p>Automatically buys a 1-tick DIGITMATCH contract only when the existing risk gate allows it.</p>
+                        </div>
+                        <div className={`matches-pro__account-pill ${is_demo ? 'demo' : 'blocked'}`}>
+                            {activeLoginid ? (is_demo ? 'DEMO ACCOUNT' : 'REAL BLOCKED') : 'NOT SIGNED IN'}
+                        </div>
+                    </div>
+
+                    <div className='matches-pro__v2-controls matches-pro__v2-controls--trade'>
+                        <label className='matches-pro__field'>
+                            <span>Stake ({currency})</span>
+                            <input
+                                type='number'
+                                step='0.05'
+                                min='0.35'
+                                value={limits.stake}
+                                onChange={e => setLimit('stake', e.target.value)}
+                            />
+                        </label>
+                        <label className='matches-pro__field'>
+                            <span>Maximum trades</span>
+                            <input
+                                type='number'
+                                step='1'
+                                min='1'
+                                value={limits.max_trades}
+                                onChange={e => setLimit('max_trades', e.target.value)}
+                            />
+                        </label>
+                        <label className='matches-pro__field'>
+                            <span>Stop after profit</span>
+                            <input
+                                type='number'
+                                step='0.5'
+                                min='0.5'
+                                value={limits.daily_profit_target}
+                                onChange={e => setLimit('daily_profit_target', e.target.value)}
+                            />
+                        </label>
+                        <label className='matches-pro__field'>
+                            <span>Stop after loss</span>
+                            <input
+                                type='number'
+                                step='0.5'
+                                min='0.5'
+                                value={limits.daily_loss_limit}
+                                onChange={e => setLimit('daily_loss_limit', e.target.value)}
+                            />
+                        </label>
+                    </div>
+
+                    <div className='matches-pro__auto-pick'>
+                        <span>Current model pick</span>
+                        <strong>{predicted ?? '-'}</strong>
+                        <small>{quality === 'NO SIGNAL' ? 'NO TRADE - waiting for a valid prediction' : `${quality} signal`}</small>
+                    </div>
+
+                    <div className='matches-pro__locks'>
+                        <div className={`matches-pro__lock ${isAuthorized ? 'ok' : 'bad'}`}>
+                            {isAuthorized ? 'Deriv connected' : 'Connect Deriv'}
+                        </div>
+                        <div className={`matches-pro__lock ${is_demo ? 'ok' : 'bad'}`}>
+                            {is_demo ? 'Demo execution enabled' : 'Demo account required'}
+                        </div>
+                        <div className={`matches-pro__lock ${unlocked ? 'ok' : 'bad'}`}>
+                            Verified evidence {evidence}/{MIN_EVIDENCE}
+                        </div>
+                    </div>
+
+                    <button
+                        type='button'
+                        className={`matches-pro__auto matches-pro__auto--v2 ${auto ? 'on' : ''}`}
                         disabled={!can_arm}
                         onClick={() => setAuto(v => !v)}
                     >
-                        {auto ? 'STOP AUTO TRADING' : 'START AUTO TRADING (DEMO)'}
+                        {auto ? 'STOP AUTO TRADER' : 'START AUTO TRADER'}
                     </button>
                     <div className={`matches-pro__gate ${gate.allowed ? 'ok' : ''}`}>{gate.reason}</div>
-                </div>
 
-                <div className='matches-pro__readout'>
-                    <div className='matches-pro__stat'>
-                        <span>Trades today</span>
-                        <strong>{day.trades.length}</strong>
-                    </div>
-                    <div className='matches-pro__stat'>
-                        <span>Wins / losses</span>
-                        <strong>
-                            {day.wins}/{day.losses}
-                        </strong>
-                    </div>
-                    <div className='matches-pro__stat'>
-                        <span>Hit rate</span>
-                        <strong>
-                            {day.trades.length ? `${((day.wins / day.trades.length) * 100).toFixed(1)}%` : '-'}
-                        </strong>
-                    </div>
-                    <div className='matches-pro__stat'>
-                        <span>Profit / loss</span>
-                        <strong className={day.pl >= 0 ? 'pos' : 'neg'}>
-                            {day.pl >= 0 ? '+' : ''}
-                            {day.pl.toFixed(2)}
-                        </strong>
-                    </div>
-                </div>
-
-                <div className='matches-pro__note-inline'>
-                    Every contract appears in the run panel below under Summary, Transactions and Journal.
-                </div>
-
-                <button
-                    type='button'
-                    className='matches-pro__link'
-                    onClick={() => {
-                        resetDay(symbol);
-                        refreshDay(symbol);
-                    }}
-                >
-                    Reset today&apos;s trading counters
-                </button>
-
-                {/* -------------------------------- backtest -------------------------------- */}
-                <div className='matches-pro__section-title'>
-                    Backtest
-                    <button
-                        type='button'
-                        className='matches-pro__reset'
-                        onClick={() => {
-                            reset(symbol);
-                            setFeed([]);
-                            refreshStats(symbol);
-                        }}
-                    >
-                        Reset
-                    </button>
-                </div>
-                {stats && (
-                    <>
-                        <div className='matches-pro__readout'>
-                            <div className='matches-pro__stat'>
-                                <span>Predictions</span>
-                                <strong>{stats.summary.n}</strong>
-                            </div>
-                            <div className='matches-pro__stat'>
-                                <span>Correct</span>
-                                <strong>{stats.summary.k}</strong>
-                            </div>
-                            <div className='matches-pro__stat'>
-                                <span>Accuracy</span>
-                                <strong>{stats.summary.n ? pct(stats.summary.accuracy) : '-'}</strong>
-                            </div>
-                            <div className='matches-pro__stat'>
-                                <span>Baseline</span>
-                                <strong>10.00%</strong>
-                            </div>
+                    <div className='matches-pro__truth-grid matches-pro__truth-grid--trading'>
+                        <div><span>Trades today</span><strong>{day.trades.length}</strong></div>
+                        <div><span>Wins / losses</span><strong>{day.wins}/{day.losses}</strong></div>
+                        <div>
+                            <span>Trade hit rate</span>
+                            <strong>{day.trades.length ? `${((day.wins / day.trades.length) * 100).toFixed(1)}%` : '-'}</strong>
                         </div>
-                        <div className='matches-pro__verdict'>{stats.summary.verdict}</div>
-                        <div className='matches-pro__mini'>
-                            Last 100: {pct(stats.summary.recent_accuracy)}, longest hit streak{' '}
-                            {stats.state.longest_win}, longest miss streak {stats.state.longest_loss}
+                        <div>
+                            <span>Session P/L</span>
+                            <strong className={day.pl >= 0 ? 'pos' : 'neg'}>{day.pl >= 0 ? '+' : ''}{day.pl.toFixed(2)} {currency}</strong>
                         </div>
-                        {Object.keys(stats.state.by_quality).length > 0 && (
-                            <div className='matches-pro__mini'>
-                                {Object.entries(stats.state.by_quality).map(([q, v]) => (
-                                    <span key={q} className='matches-pro__tag'>
-                                        {q}: {v.correct}/{v.n} ({v.n ? ((v.correct / v.n) * 100).toFixed(1) : '0.0'}%)
-                                    </span>
-                                ))}
-                            </div>
-                        )}
-                    </>
-                )}
-
-                <div className='matches-pro__section-title'>Signal feed</div>
-                <div className='matches-pro__feed'>
-                    {feed.map(f => (
-                        <div key={f.t} className={`matches-pro__feed-row ${f.hit ? 'hit' : 'miss'}`}>
-                            <span>{clockOf(f.t)}</span>
-                            <span>MATCH {f.predicted}</span>
-                            <span>actual {f.actual}</span>
-                            <span>{f.quality}</span>
-                            <span>{f.hit ? 'HIT' : 'miss'}</span>
-                        </div>
-                    ))}
-                    {!feed.length && <span className='matches-pro__muted'>Waiting for the next tick...</span>}
-                </div>
-
-                <div className='matches-pro__section-title'>Digit distribution - last {sample.length} ticks</div>
-                <div className='matches-pro__dist'>
-                    {distribution.map(d => (
-                        <div key={d.digit} className='matches-pro__row'>
-                            <span className={`matches-pro__row-digit ${d.digit === predicted ? 'is-predicted' : ''}`}>
-                                {d.digit}
-                            </span>
-                            <span className='matches-pro__bar'>
-                                <span style={{ width: `${(d.p / max_pct) * 100}%` }} />
-                            </span>
-                            <span className='matches-pro__row-pct'>{d.p.toFixed(1)}%</span>
-                        </div>
-                    ))}
-                </div>
-
-                {diag && (
-                    <div className='matches-pro__diag'>
-                        socket {diag.ready_state} | messages {diag.messages} | last {diag.last_msg_type} | symbols{' '}
-                        {diag.symbols_seen} | precision {diag.pip_source} ({diag.known_decimals} known) | open{' '}
-                        {open_ref.current.size}
-                        {diag.last_error ? ` | ${diag.last_error}` : ''}
                     </div>
-                )}
 
-                <div className='matches-pro__note'>
-                    Demo accounts only in this phase - a real login id is refused by the execution layer, not just
-                    hidden here. Auto trading unlocks per market at {MIN_EVIDENCE} graded predictions. The signal floor is yours to
-                    set, but lowering it does not create an edge - it only trades more often on weaker evidence. Every trade still faces a negative expected value at a{' '}
-                    {payout}x payout unless the estimated probability beats {pct(1 / payout)}, so treat a profitable
-                    demo run as a small sample, not a discovery.
-                </div>
+                    <div className='matches-pro__v2-safety'>
+                        Auto trading remains demo-only while we validate the measured prediction record. The execution layer still blocks real accounts.
+                    </div>
+                </section>
             </div>
         </div>
     );
