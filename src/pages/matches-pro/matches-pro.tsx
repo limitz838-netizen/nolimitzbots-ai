@@ -31,6 +31,7 @@ import {
     saveLimits,
 } from '@/components/shared/nlb/risk-guard';
 import PageBoundary from '@/components/shared/nlb/page-boundary';
+import MatchesTerminalSummary from './matches-terminal-summary';
 import './matches-pro.scss';
 
 const DEFAULT_SYMBOLS = [
@@ -131,10 +132,12 @@ const MatchesPro = () => {
     limits_ref.current = limits;
     symbol_ref.current = symbol;
 
-    const currency = React.useMemo(() => {
-        const acc = (accountList || []).find(a => a.loginid === activeLoginid);
-        return acc?.currency || 'USD';
-    }, [accountList, activeLoginid]);
+    const activeAccount = React.useMemo(
+        () => (accountList || []).find(a => a.loginid === activeLoginid),
+        [accountList, activeLoginid]
+    );
+    const currency = activeAccount?.currency || 'USD';
+    const accountBalance = Number(activeAccount?.balance);
 
     const is_demo = isDemoAccount(activeLoginid || '');
 
@@ -541,6 +544,24 @@ const MatchesPro = () => {
     return (
         <div className='matches-pro'>
             <div className='matches-pro__panel'>
+                <MatchesTerminalSummary
+                    market={marketLabel}
+                    status={status_text}
+                    account_id={activeLoginid}
+                    is_demo={is_demo}
+                    balance={accountBalance}
+                    currency={currency}
+                    quote={quote}
+                    current_digit={current_digit}
+                    predicted_digit={predicted ?? null}
+                    signal_quality={quality}
+                    signal_score={prediction?.score ?? 0}
+                    estimated_probability={prediction?.probabilityEstimate}
+                    session_pl={day.pl}
+                    auto_enabled={auto}
+                    recent_digits={digits}
+                />
+
                 <div className='matches-pro__head'>
                     <div>
                         <div className='matches-pro__title'>MATCHES PRO</div>
