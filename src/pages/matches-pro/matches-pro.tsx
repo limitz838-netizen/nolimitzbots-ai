@@ -10,7 +10,7 @@ import { useStore } from '@/hooks/useStore';
 import { isDemoAccount } from '@/utils/account-helpers';
 import { subscribeTicks, TICK_STATUS, getDiagnostics } from '@/components/shared/nlb/tick-stream';
 import { predict, Z_CRITICAL } from '@/components/shared/nlb/matches-engine';
-import { record, read, reset, summarise } from '@/components/shared/nlb/backtest-store';
+import { record, read, reset, summarise, setupStats, topSetups } from '@/components/shared/nlb/backtest-store';
 import {
     read as readAnalyse,
     record as recordAnalyse,
@@ -48,6 +48,8 @@ const DEFAULT_SYMBOLS = [
 
 const WINDOW_CHOICES = [50, 100, 250, 500, 1000];
 const HISTORY = 1000;
+const MIN_SETUP_EVIDENCE = 30;
+const SETUP_EDGE_MARGIN = 0.005;
 
 const STATUS_TEXT = {
     [TICK_STATUS.LIVE]: 'LIVE',
@@ -126,6 +128,7 @@ const MatchesPro = () => {
     const analysis_ref = React.useRef(null);
     const proposals_ref = React.useRef(null);
     const payout_by_digit_ref = React.useRef({});
+    const last_shadow_fingerprint_ref = React.useRef(null);
 
     payout_ref.current = payout;
     auto_ref.current = auto;
@@ -157,12 +160,47 @@ const MatchesPro = () => {
         return d;
     }, []);
 
+    const calibratePrediction = React.useCallback((raw, state) => {
+        if (!raw) return raw;
+        if (!raw.fingerprint || raw.candidateDigit === null || raw.candidateDigit === undefined) {
+            return {
+                ...raw,
+                predictedDigit: null,
+                signalQuality: 'NO SIGNAL',
+                liveCalibration: { n: 0, correct: 0, accuracy: 0, lowerBound: 0, tradeReady: false },
+            };
+        }
+
+        const setup = setupStats(state, raw.fingerprint);
+        const required = Number(raw.breakeven || 0.1) + SETUP_EDGE_MARGIN;
+        const enough = setup.n >= MIN_SETUP_EVIDENCE;
+        const tradeReady = enough && setup.lowerBound > required;
+
+        let reason = raw.reason;
+        if (!enough) {
+            reason = `Shadow testing setup: ${setup.n}/${MIN_SETUP_EVIDENCE} independent forward results collected for this exact fingerprint.`;
+        } else if (!tradeReady) {
+            reason = `No trade: this exact setup's lower-bound accuracy is ${(setup.lowerBound * 100).toFixed(2)}%; it must exceed ${(required * 100).toFixed(2)}% for this digit's current payout.`;
+        } else {
+            reason = `TRADE CANDIDATE: exact setup has ${setup.correct}/${setup.n} correct, ${(setup.accuracy * 100).toFixed(2)}% raw accuracy and ${(setup.lowerBound * 100).toFixed(2)}% lower-bound accuracy versus ${(required * 100).toFixed(2)}% required.`;
+        }
+
+        return {
+            ...raw,
+            predictedDigit: tradeReady ? raw.candidateDigit : null,
+            signalQuality: tradeReady ? 'STRONG' : 'NO SIGNAL',
+            reason,
+            liveCalibration: { ...setup, required, tradeReady },
+        };
+    }, []);
+
     const resetV2Evidence = React.useCallback(() => {
         // Only reset measured prediction/analyse evidence for the selected
         // market. Trading limits and account settings are intentionally kept.
         reset(symbol);
         resetAnalyse(symbol);
         pending_ref.current = null;
+        last_shadow_fingerprint_ref.current = null;
         analysis_ref.current = null;
         setFeed([]);
         setAnalysis(null);
@@ -173,22 +211,30 @@ const MatchesPro = () => {
         // Seed a fresh next-tick prediction from the currently visible history.
         // It is not counted until a future real tick arrives.
         if (digits_ref.current.length) {
-            const seeded = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
+            const raw = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
+            const seeded = calibratePrediction(raw, clean);
             setPrediction(seeded);
-            pending_ref.current = {
-                symbol,
-                predicted: seeded.candidateDigit,
-                quality: seeded.signalQuality,
-                score: seeded.score,
-                model: seeded.selectedModel,
-                engineVersion: seeded.engineVersion,
-                tradable: seeded.predictedDigit !== null,
-            };
+            if (seeded.fingerprint && seeded.candidateDigit !== null) {
+                last_shadow_fingerprint_ref.current = seeded.fingerprint;
+                pending_ref.current = {
+                    symbol,
+                    predicted: seeded.candidateDigit,
+                    quality: seeded.signalQuality,
+                    score: seeded.score,
+                    model: seeded.selectedModel,
+                    engineVersion: seeded.engineVersion,
+                    tradable: seeded.predictedDigit !== null,
+                    fingerprint: seeded.fingerprint,
+                    agreementTier: seeded.agreementTier,
+                    agreementModels: seeded.agreementModels,
+                };
+            }
+
         }
 
         setError('');
         return clean;
-    }, [symbol, refreshStats]);
+    }, [symbol, refreshStats, calibratePrediction]);
 
     // ------------------------------------------------------------- execution
     const fireTrade = React.useCallback(
@@ -294,6 +340,9 @@ const MatchesPro = () => {
                     model: pending.model,
                     engineVersion: pending.engineVersion,
                     tradable: pending.tradable,
+                    fingerprint: pending.fingerprint,
+                    agreementTier: pending.agreementTier,
+                    agreementModels: pending.agreementModels,
                 });
                 setFeed(prev =>
                     [
@@ -318,19 +367,37 @@ const MatchesPro = () => {
                 setAnalysis({ ...open });
             }
 
-            const next = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
-            setPrediction(next);
-            pending_ref.current = {
-                symbol: sym,
-                predicted: next.candidateDigit,
-                quality: next.signalQuality,
-                score: next.score,
-                model: next.selectedModel,
-                engineVersion: next.engineVersion,
-                tradable: next.predictedDigit !== null,
-            };
-
+            const rawNext = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
             const state = refreshStats(sym);
+            const next = calibratePrediction(rawNext, state);
+            setPrediction(next);
+
+            // Count a fingerprint only once while it remains unchanged.
+            // A materially different setup (digit/models/tier/strength/previous digit)
+            // can create a new independent shadow observation.
+            if (next.fingerprint && next.candidateDigit !== null) {
+                if (next.fingerprint !== last_shadow_fingerprint_ref.current) {
+                    last_shadow_fingerprint_ref.current = next.fingerprint;
+                    pending_ref.current = {
+                        symbol: sym,
+                        predicted: next.candidateDigit,
+                        quality: next.signalQuality,
+                        score: next.score,
+                        model: next.selectedModel,
+                        engineVersion: next.engineVersion,
+                        tradable: next.predictedDigit !== null,
+                        fingerprint: next.fingerprint,
+                        agreementTier: next.agreementTier,
+                        agreementModels: next.agreementModels,
+                    };
+                } else {
+                    pending_ref.current = null;
+                }
+            } else {
+                last_shadow_fingerprint_ref.current = null;
+                pending_ref.current = null;
+            }
+
             const current_day = loadDay(sym);
             setDay(current_day);
 
@@ -351,12 +418,13 @@ const MatchesPro = () => {
                 fireTrade(sym, next.predictedDigit);
             }
         },
-        [refreshStats, isAuthorized, activeLoginid, fireTrade]
+        [refreshStats, isAuthorized, activeLoginid, fireTrade, calibratePrediction]
     );
 
     React.useEffect(() => {
         digits_ref.current = [];
         pending_ref.current = null;
+        last_shadow_fingerprint_ref.current = null;
         open_ref.current = new Set();
         cooldown_ref.current = 0;
         setDigits([]);
@@ -387,17 +455,25 @@ const MatchesPro = () => {
                 setDigits(d);
                 setQuote(q);
                 setDecimals(dec);
-                const seeded = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
+                const rawSeeded = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
+                const currentState = read(symbol);
+                const seeded = calibratePrediction(rawSeeded, currentState);
                 setPrediction(seeded);
-                pending_ref.current = {
-                    symbol,
-                    predicted: seeded.candidateDigit,
-                    quality: seeded.signalQuality,
-                    score: seeded.score,
-                    model: seeded.selectedModel,
-                    engineVersion: seeded.engineVersion,
-                    tradable: seeded.predictedDigit !== null,
-                };
+                if (seeded.fingerprint && seeded.candidateDigit !== null) {
+                    last_shadow_fingerprint_ref.current = seeded.fingerprint;
+                    pending_ref.current = {
+                        symbol,
+                        predicted: seeded.candidateDigit,
+                        quality: seeded.signalQuality,
+                        score: seeded.score,
+                        model: seeded.selectedModel,
+                        engineVersion: seeded.engineVersion,
+                        tradable: seeded.predictedDigit !== null,
+                        fingerprint: seeded.fingerprint,
+                        agreementTier: seeded.agreementTier,
+                        agreementModels: seeded.agreementModels,
+                    };
+                }
             },
             onTick: ({ digit, quote: q, decimals: dec }) => {
                 setDecimals(dec);
@@ -422,7 +498,7 @@ const MatchesPro = () => {
             });
             trackers_ref.current = [];
         };
-    }, [symbol, step, refreshStats, refreshDay]);
+    }, [symbol, step, refreshStats, refreshDay, calibratePrediction]);
 
     // Switching market stops auto trading. Limits are per day, per market.
     React.useEffect(() => {
@@ -601,7 +677,8 @@ const MatchesPro = () => {
     );
 
     const runAnalysis = () => {
-        const next = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
+        const rawNext = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
+        const next = calibratePrediction(rawNext, read(symbol));
         setPrediction(next);
         if (next?.predictedDigit === null || next?.predictedDigit === undefined) {
             setAnalysis(null);
@@ -628,6 +705,16 @@ const MatchesPro = () => {
             n: row?.n || 0,
             correct: row?.correct || 0,
         })),
+        [stats]
+    );
+    const setupLeaderboard = React.useMemo(() => topSetups(stats?.state, 8), [stats]);
+    const tierStats = React.useMemo(
+        () => Object.entries(stats?.state?.by_tier || {}).map(([tier, row]) => ({
+            tier: Number(tier),
+            n: row?.n || 0,
+            correct: row?.correct || 0,
+            accuracy: row?.n ? row.correct / row.n : 0,
+        })).sort((a, b) => b.tier - a.tier),
         [stats]
     );
 
