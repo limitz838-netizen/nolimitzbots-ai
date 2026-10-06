@@ -90,6 +90,7 @@ const NolimitzAI = observer(() => {
 
     const [digits, setDigits] = React.useState([]);
     const [quote, setQuote] = React.useState(null);
+    const [feedStatus, setFeedStatus] = React.useState('CONNECTING');
     const [running, setRunning] = React.useState(false);
     const [engineAnalysis, setEngineAnalysis] = React.useState(null);
     const [evidenceState, setEvidenceState] = React.useState(() => readAiEvidence('1HZ100V', 'over_under'));
@@ -152,14 +153,16 @@ const NolimitzAI = observer(() => {
 
     React.useEffect(() => {
         let alive = true;
-        const ws = new WebSocket(isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING);
-        ws_ref.current = ws;
+        let reconnect_timer = null;
+        let reconnect_attempt = 0;
 
         const subscribe = () => {
-            if (ws.readyState !== WebSocket.OPEN) return;
+            const socket = ws_ref.current;
+            if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
             setDigits([]);
-            ws.send(JSON.stringify({ forget_all: 'ticks' }));
-            ws.send(
+            socket.send(JSON.stringify({ forget_all: 'ticks' }));
+            socket.send(
                 JSON.stringify({
                     ticks_history: sym_ref.current,
                     count: 1000,
@@ -170,14 +173,20 @@ const NolimitzAI = observer(() => {
             );
         };
 
-        ws.onopen = () => {
-            if (!alive) return;
-            ws.send(JSON.stringify({ active_symbols: 'brief' }));
-            subscribe();
+        const scheduleReconnect = () => {
+            if (!alive || reconnect_timer) return;
+            setFeedStatus('RECONNECTING');
+            const delay = Math.min(10000, 1200 * Math.max(1, reconnect_attempt + 1));
+            reconnect_timer = window.setTimeout(() => {
+                reconnect_timer = null;
+                reconnect_attempt += 1;
+                connect();
+            }, delay);
         };
 
-        ws.onmessage = msg => {
+        const handleMessage = msg => {
             if (!alive) return;
+
             let data;
             try {
                 data = JSON.parse(msg.data);
@@ -221,6 +230,7 @@ const NolimitzAI = observer(() => {
             }
 
             if (data.msg_type === 'tick' && data.tick?.symbol === sym_ref.current) {
+                setFeedStatus('LIVE');
                 const dec = decimals_ref.current[sym_ref.current] ?? 2;
                 const q = Number(data.tick.quote).toFixed(dec);
                 const d = Number(q.slice(-1));
@@ -264,17 +274,80 @@ const NolimitzAI = observer(() => {
             }
         };
 
-        const resub = () => subscribe();
+        const connect = () => {
+            if (!alive) return;
+
+            const current = ws_ref.current;
+            if (current && (current.readyState === WebSocket.OPEN || current.readyState === WebSocket.CONNECTING)) {
+                return;
+            }
+
+            setFeedStatus(reconnect_attempt ? 'RECONNECTING' : 'CONNECTING');
+            const socket = new WebSocket(isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING);
+            ws_ref.current = socket;
+
+            socket.onopen = () => {
+                if (!alive || ws_ref.current !== socket) return;
+                reconnect_attempt = 0;
+                setFeedStatus('LIVE');
+                socket.send(JSON.stringify({ active_symbols: 'brief' }));
+                subscribe();
+            };
+
+            socket.onmessage = handleMessage;
+
+            socket.onerror = () => {
+                if (!alive || ws_ref.current !== socket) return;
+                setFeedStatus('RECONNECTING');
+                try {
+                    socket.close();
+                } catch {
+                    scheduleReconnect();
+                }
+            };
+
+            socket.onclose = () => {
+                if (!alive || ws_ref.current !== socket) return;
+                ws_ref.current = null;
+                scheduleReconnect();
+            };
+        };
+
+        const resub = () => {
+            const socket = ws_ref.current;
+            if (socket?.readyState === WebSocket.OPEN) subscribe();
+            else connect();
+        };
+
+        const onVisibility = () => {
+            if (document.visibilityState !== 'visible') return;
+            const socket = ws_ref.current;
+            if (socket?.readyState === WebSocket.OPEN) subscribe();
+            else connect();
+        };
+
         window.addEventListener('nlb-ai-symbol', resub);
+        document.addEventListener('visibilitychange', onVisibility);
+        connect();
 
         return () => {
             alive = false;
             window.removeEventListener('nlb-ai-symbol', resub);
+            document.removeEventListener('visibilitychange', onVisibility);
+
+            if (reconnect_timer) {
+                window.clearTimeout(reconnect_timer);
+                reconnect_timer = null;
+            }
+
             if (run_ref.current) run_ref.current.active = false;
             settle_handles_ref.current.forEach(h => h.cancel());
             settle_handles_ref.current.clear();
+
+            const socket = ws_ref.current;
+            ws_ref.current = null;
             try {
-                ws.close();
+                socket?.close();
             } catch {
                 /* noop */
             }
@@ -869,7 +942,7 @@ const NolimitzAI = observer(() => {
                     <div className='nolimitz-ai__balance'>
                         <small>LIVE BALANCE</small>
                         <strong>{balance.toFixed(2)} <span>{currency}</span></strong>
-                        <div className='nolimitz-ai__live-dot'>● <span>LIVE</span></div>
+                        <div className={`nolimitz-ai__live-dot ${feedStatus.toLowerCase()}`}>● <span>{feedStatus}</span></div>
                     </div>
                 </section>
 
@@ -931,6 +1004,10 @@ const NolimitzAI = observer(() => {
                         <div>
                             <span>ENGINE</span>
                             <strong>{NOLIMITZ_AI_ENGINE_VERSION}</strong>
+                        </div>
+                        <div>
+                            <span>TICK FEED</span>
+                            <strong>{feedStatus}</strong>
                         </div>
                         <div>
                             <span>STATUS</span>
