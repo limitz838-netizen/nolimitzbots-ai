@@ -39,6 +39,7 @@ export const trackContracts = (contract_ids, { onUpdate, onDone, onContract, tim
     let finalized = false;
     let sub = null;
     let poll = null;
+    let initialPoll = null;
     let timeout = null;
 
     const cleanup = () => {
@@ -53,6 +54,10 @@ export const trackContracts = (contract_ids, { onUpdate, onDone, onContract, tim
         if (poll) {
             clearInterval(poll);
             poll = null;
+        }
+        if (initialPoll) {
+            clearTimeout(initialPoll);
+            initialPoll = null;
         }
         if (timeout) {
             clearTimeout(timeout);
@@ -113,7 +118,7 @@ export const trackContracts = (contract_ids, { onUpdate, onDone, onContract, tim
 
     // Do one near-immediate read, then continue at a moderate cadence so Bot
     // Builder/Summary mirrors fast contracts without hammering the API.
-    setTimeout(pollPending, 250);
+    initialPoll = setTimeout(pollPending, 250);
     poll = setInterval(pollPending, 1500);
 
     // Safety net: never hang forever. Unsettled contracts are reported as-is.
