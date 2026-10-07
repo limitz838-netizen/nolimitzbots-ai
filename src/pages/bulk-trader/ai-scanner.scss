@@ -679,3 +679,375 @@
         }
     }
 }
+
+
+/* ===== Reference-video scanner flow ===== */
+.ai-scanner--reference {
+    width: min(520px, calc(100vw - 24px));
+    max-height: 88vh;
+    overflow-y: auto;
+    padding: 0;
+    border: 1px solid rgba(34, 197, 94, .28);
+    border-radius: 14px;
+    background:
+        radial-gradient(circle at 50% 0%, rgba(0, 255, 170, .055), transparent 35%),
+        #04110b;
+    box-shadow: 0 24px 80px rgba(0,0,0,.62);
+    color: #d7fbea;
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.ai-scanner__reference-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1.25rem 1.15rem 1rem;
+    border-bottom: 1px solid rgba(34,197,94,.12);
+
+    span {
+        display: block;
+        margin-bottom: .25rem;
+        color: #45eab0;
+        font-size: .72rem;
+        font-weight: 800;
+        letter-spacing: .13em;
+    }
+
+    h2 {
+        margin: 0;
+        color: #eefcf6;
+        font-family: inherit;
+        font-size: 1.18rem;
+        line-height: 1.25;
+    }
+
+    button {
+        flex: 0 0 auto;
+        width: 2.1rem;
+        height: 2.1rem;
+        border: 0;
+        background: transparent;
+        color: #c5d5cd;
+        font-size: 1.8rem;
+        line-height: 1;
+        cursor: pointer;
+    }
+}
+
+.ai-scanner__reference-fields {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: .95rem;
+    padding: 1rem 1.15rem .8rem;
+
+    label span {
+        display: block;
+        margin-bottom: .42rem;
+        color: #4cd9a9;
+        font-size: .72rem;
+        font-weight: 800;
+        letter-spacing: .12em;
+    }
+
+    input {
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid rgba(34,197,94,.16);
+        border-radius: 8px;
+        outline: 0;
+        background: rgba(1, 11, 7, .78);
+        color: #d9f7ea;
+        padding: .78rem .85rem;
+        font: 700 .95rem 'JetBrains Mono', ui-monospace, monospace;
+    }
+
+    input:disabled {
+        opacity: .72;
+    }
+}
+
+.ai-scanner__reference-label {
+    padding: .15rem 1.15rem .55rem;
+    color: #5ce1b3;
+    font-size: .78rem;
+    font-weight: 800;
+}
+
+.ai-scanner__reference-markets {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: .38rem;
+    padding: 0 1.15rem .9rem;
+}
+
+.ai-scanner__reference-market {
+    min-width: 0;
+    padding: .42rem .5rem;
+    border: 1px solid rgba(59, 201, 139, .28);
+    border-radius: 6px;
+    background: rgba(2, 18, 11, .66);
+    color: #76b99f;
+    font-size: .68rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+
+    b {
+        color: #7de4bd;
+        font-weight: 700;
+    }
+
+    span {
+        color: #6aa78f;
+    }
+
+    em {
+        color: #86d6b6;
+        font-style: normal;
+    }
+}
+
+.ai-scanner__reference-terminal {
+    margin: 0 1.15rem .85rem;
+    min-height: 7.4rem;
+    max-height: 12rem;
+    overflow-y: auto;
+    padding: .8rem .9rem;
+    border: 1px solid rgba(34,197,94,.15);
+    border-radius: 7px;
+    background: rgba(0, 8, 4, .9);
+    color: #55b78f;
+    font-size: .72rem;
+    line-height: 1.55;
+
+    > div {
+        margin-bottom: .16rem;
+    }
+
+    .ok {
+        color: #38f2a5;
+        font-weight: 800;
+    }
+
+    .info {
+        color: #65caa0;
+    }
+
+    .warn {
+        color: #f4c65d;
+    }
+
+    .muted {
+        color: #49705f;
+    }
+}
+
+.ai-scanner__reference-status {
+    margin: 0 1.15rem .9rem;
+    padding: .8rem .9rem;
+    border: 1px solid rgba(34,197,94,.17);
+    border-radius: 7px;
+    background: rgba(2, 16, 10, .72);
+
+    strong {
+        display: block;
+        margin-bottom: .26rem;
+        color: #e5c856;
+        font-size: .73rem;
+        letter-spacing: .12em;
+    }
+
+    span {
+        display: block;
+        color: #a8c5b8;
+        font-size: .76rem;
+        line-height: 1.4;
+    }
+}
+
+.ai-scanner__reference-start,
+.ai-scanner__reference-stop,
+.ai-scanner__reference-trading {
+    width: calc(100% - 2.3rem);
+    margin: 0 1.15rem 1rem;
+    border: 0;
+    border-radius: 6px;
+    padding: .9rem .75rem;
+    font: 900 .88rem 'JetBrains Mono', ui-monospace, monospace;
+    letter-spacing: .06em;
+    cursor: pointer;
+}
+
+.ai-scanner__reference-start {
+    background: linear-gradient(90deg, #1fe895, #35edaa);
+    color: #032017;
+}
+
+.ai-scanner__reference-stop {
+    background: linear-gradient(90deg, #fb4051, #f73145);
+    color: #210305;
+}
+
+.ai-scanner__reference-trading {
+    background: linear-gradient(90deg, rgba(20,110,66,.78), rgba(28,149,88,.78));
+    color: #d5f7e7;
+    cursor: default;
+}
+
+.ai-scanner__reference-note {
+    padding: 0 1.15rem 1rem;
+    color: #49695b;
+    font-size: .63rem;
+    line-height: 1.45;
+}
+
+.ai-scanner__reference-result {
+    position: relative;
+    width: min(430px, calc(100vw - 42px));
+    padding: 1.25rem 1rem 1.1rem;
+    border: 1px solid rgba(45, 211, 145, .35);
+    border-radius: 11px;
+    background: #03100a;
+    box-shadow: 0 28px 80px rgba(0,0,0,.68);
+    text-align: center;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+
+    .close {
+        position: absolute;
+        top: .72rem;
+        right: .72rem;
+        width: 2rem;
+        height: 2rem;
+        border: 1px solid rgba(255,255,255,.1);
+        border-radius: 7px;
+        background: rgba(255,255,255,.025);
+        color: #b8cbc2;
+        font-size: 1.25rem;
+    }
+
+    .eyebrow {
+        display: block;
+        margin-top: .25rem;
+        color: #73b99f;
+        font-size: .69rem;
+        font-weight: 800;
+        letter-spacing: .15em;
+    }
+
+    h3 {
+        margin: .45rem 0 .5rem;
+        color: #dff7eb;
+        font-family: inherit;
+        font-size: 1rem;
+    }
+
+    .amount {
+        margin-bottom: 1.1rem;
+        font-size: 2.45rem;
+        font-weight: 900;
+        font-variant-numeric: tabular-nums;
+    }
+
+    &.win .amount {
+        color: #38eaa5;
+    }
+
+    &.loss .amount {
+        color: #ff666f;
+    }
+
+    .result-box {
+        margin-top: .48rem;
+        padding: .75rem .65rem;
+        border: 1px solid rgba(55, 186, 130, .22);
+        border-radius: 7px;
+        background: rgba(3, 21, 13, .62);
+
+        span {
+            display: block;
+            margin-bottom: .2rem;
+            color: #5d8372;
+            font-size: .66rem;
+            letter-spacing: .11em;
+        }
+
+        b {
+            color: #edf9f3;
+            font-size: .92rem;
+        }
+
+        small {
+            display: block;
+            margin-top: .2rem;
+            color: #c99452;
+            font-size: .62rem;
+        }
+    }
+
+    .scan-again {
+        margin-top: .8rem;
+        border: 0;
+        border-radius: 6px;
+        background: #39e5a5;
+        color: #062017;
+        padding: .72rem 1.2rem;
+        font: 900 .8rem 'JetBrains Mono', ui-monospace, monospace;
+        cursor: pointer;
+    }
+}
+
+@media (max-width: 560px) {
+    .ai-scanner--reference {
+        width: calc(100vw - 20px);
+        max-height: 90vh;
+    }
+
+    .ai-scanner__reference-head {
+        padding: 1rem .95rem .85rem;
+
+        h2 {
+            font-size: 1.02rem;
+        }
+    }
+
+    .ai-scanner__reference-fields {
+        padding-left: .95rem;
+        padding-right: .95rem;
+    }
+
+    .ai-scanner__reference-label {
+        padding-left: .95rem;
+        padding-right: .95rem;
+    }
+
+    .ai-scanner__reference-markets {
+        padding-left: .95rem;
+        padding-right: .95rem;
+        gap: .32rem;
+    }
+
+    .ai-scanner__reference-market {
+        font-size: .62rem;
+        padding: .4rem .42rem;
+    }
+
+    .ai-scanner__reference-terminal,
+    .ai-scanner__reference-status {
+        margin-left: .95rem;
+        margin-right: .95rem;
+    }
+
+    .ai-scanner__reference-start,
+    .ai-scanner__reference-stop,
+    .ai-scanner__reference-trading {
+        width: calc(100% - 1.9rem);
+        margin-left: .95rem;
+        margin-right: .95rem;
+    }
+
+    .ai-scanner__reference-note {
+        padding-left: .95rem;
+        padding-right: .95rem;
+    }
+}
