@@ -307,141 +307,137 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
             barrier: String(candidate.barrier),
         };
 
-        const prepared = [];
-        setFireLog(prev => [...prev, `[PREP] Preparing ${n} live Deriv proposals…`]);
-
-        // Prepare proposals individually. Sending many identical proposal requests
-        // in the exact same event-loop turn can leave one unresolved on some
-        // mobile/WebSocket sessions. A tiny stagger plus a hard timeout makes the
-        // batch deterministic while the eventual buys still launch together.
-        for (let index = 0; index < n; index += 1) {
-            try {
-                setStatus(
-                    `BEST MARKET FOUND · ${candidate.market.label} · ${candidate.label} · preparing ${index + 1}/${n}…`
-                );
-
-                const response = await withTimeout(
-                    api_base.api.send({
-                        ...proposalReq,
-                        passthrough: {
-                            nolimitz_batch: run_panel?.run_id || 'bulk-scanner',
-                            slot: index + 1,
-                        },
-                    }),
-                    5000,
-                    `Proposal #${index + 1}`
-                );
-
-                if (response?.error) {
-                    throw new Error(response.error.message || response.error.code || 'Proposal rejected');
-                }
-
-                const proposal = response?.proposal;
-                if (!proposal?.id) {
-                    throw new Error('No proposal returned');
-                }
-
-                prepared.push({
-                    index,
-                    proposal_id: proposal.id,
-                    ask_price: Number(proposal.ask_price ?? amount),
-                });
-
-                setFireLog(prev => [
-                    ...prev,
-                    `[READY] #${index + 1} proposal · payout ${cur} ${Number(proposal.payout ?? 0).toFixed(2)}`,
-                ]);
-            } catch (error) {
-                setFireLog(prev => [
-                    ...prev,
-                    `[FAIL] #${index + 1} proposal — ${describeError(error)}`,
-                ]);
-            }
-
-            if (index < n - 1) {
-                await sleep(80);
-            }
-        }
-
-        const ready = prepared;
-
-        if (!ready.length) {
-            setPhase('done');
-            setStatus('Best setup found, but no contracts could be prepared.');
-            try {
-                run_panel?.setIsRunning?.(false);
-            } catch {
-                /* noop */
-            }
-            return;
-        }
-
-        setStatus(
-            `BEST MARKET FOUND · ${candidate.market.label} · ${candidate.label} · buying ${ready.length} contracts now…`
-        );
-        setFireLog(prev => [...prev, `[EXEC] Dispatching ${ready.length} buys together…`]);
-
-        const launchedAt = performance.now();
-        const buyResults = await Promise.allSettled(
-            ready.map(item =>
-                withTimeout(
-                    api_base.api.send({
-                        buy: item.proposal_id,
-                        price: item.ask_price,
-                        passthrough: {
-                            nolimitz_batch: run_panel?.run_id || 'bulk-scanner',
-                            slot: item.index + 1,
-                        },
-                    }),
-                    5000,
-                    `Buy #${item.index + 1}`
-                )
-            )
-        );
-        const launchMs = performance.now() - launchedAt;
-
         const ids = [];
-        buyResults.forEach((result, idx) => {
-            const item = ready[idx];
-            if (result.status === 'fulfilled') {
-                if (result.value?.error) {
+        const buyMeta = [];
+        const maxAttemptsPerSlot = 3;
+
+        setFireLog(prev => [...prev, `[EXEC] Opening exactly ${n} contracts…`]);
+
+        // For fast 1-tick digit contracts, proposal -> immediate buy is much more
+        // reliable than preparing several proposals first and buying them later.
+        // Each requested bulk slot gets its own fresh proposal and immediate buy.
+        for (let slot = 1; slot <= n; slot += 1) {
+            let opened = false;
+
+            for (let attempt = 1; attempt <= maxAttemptsPerSlot && !opened; attempt += 1) {
+                try {
+                    setStatus(
+                        `BEST MARKET FOUND · ${candidate.market.label} · ${candidate.label} · opening ${slot}/${n}${
+                            attempt > 1 ? ` · retry ${attempt}/${maxAttemptsPerSlot}` : ''
+                        }…`
+                    );
+
+                    const proposalResponse = await withTimeout(
+                        api_base.api.send({
+                            ...proposalReq,
+                            passthrough: {
+                                nolimitz_batch: run_panel?.run_id || 'bulk-scanner',
+                                slot,
+                                attempt,
+                                stage: 'proposal',
+                            },
+                        }),
+                        5000,
+                        `Proposal #${slot}`
+                    );
+
+                    if (proposalResponse?.error) {
+                        throw new Error(
+                            proposalResponse.error.message ||
+                                proposalResponse.error.code ||
+                                'Proposal rejected'
+                        );
+                    }
+
+                    const proposal = proposalResponse?.proposal;
+                    if (!proposal?.id) {
+                        throw new Error('No proposal returned');
+                    }
+
                     setFireLog(prev => [
                         ...prev,
-                        `[FAIL] #${item.index + 1} buy — ${result.value.error.message || result.value.error.code || 'Buy rejected'}`,
+                        `[READY] #${slot} proposal · payout ${cur} ${Number(
+                            proposal.payout ?? 0
+                        ).toFixed(2)}`,
                     ]);
-                    return;
+
+                    const buyResponse = await withTimeout(
+                        api_base.api.send({
+                            buy: proposal.id,
+                            price: Number(proposal.ask_price ?? amount),
+                            passthrough: {
+                                nolimitz_batch: run_panel?.run_id || 'bulk-scanner',
+                                slot,
+                                attempt,
+                                stage: 'buy',
+                            },
+                        }),
+                        5000,
+                        `Buy #${slot}`
+                    );
+
+                    if (buyResponse?.error) {
+                        throw new Error(
+                            buyResponse.error.message || buyResponse.error.code || 'Buy rejected'
+                        );
+                    }
+
+                    const cid = buyResponse?.buy?.contract_id;
+                    if (!cid) {
+                        throw new Error('Buy returned no contract id');
+                    }
+
+                    ids.push(cid);
+                    buyMeta.push({
+                        contract_id: cid,
+                        slot,
+                        buy_price: Number(buyResponse?.buy?.buy_price ?? amount),
+                    });
+                    opened = true;
+
+                    if (ids.length === 1) {
+                        try {
+                            run_panel?.setIsRunning?.(true);
+                        } catch {
+                            /* noop */
+                        }
+                    }
+
+                    setFireLog(prev => [
+                        ...prev,
+                        `[BUY] #${slot}/${n} ${candidate.label} · contract ${cid} · ${cur} ${Number(
+                            buyResponse?.buy?.buy_price ?? amount
+                        ).toFixed(2)}`,
+                    ]);
+
+                    log(`[BUY] Contract ${slot}/${n} opened · id ${cid}.`);
+                } catch (error) {
+                    const message = describeError(error);
+                    setFireLog(prev => [
+                        ...prev,
+                        `[FAIL] #${slot} attempt ${attempt}/${maxAttemptsPerSlot} — ${message}`,
+                    ]);
+
+                    if (attempt < maxAttemptsPerSlot) {
+                        await sleep(140);
+                    }
                 }
-                const cid = result.value?.buy?.contract_id;
-                if (cid) ids.push(cid);
-                setFireLog(prev => [
-                    ...prev,
-                    cid
-                        ? `[BUY] #${item.index + 1} ${candidate.label} — ${cur} ${Number(
-                              result.value?.buy?.buy_price ?? amount
-                          ).toFixed(2)}`
-                        : `[FAIL] #${item.index + 1} — no contract id`,
-                ]);
-            } else {
-                setFireLog(prev => [
-                    ...prev,
-                    `[FAIL] #${item.index + 1} buy — ${describeError(result.reason)}`,
-                ]);
             }
-        });
 
-        log(
-            `[EXEC] ${ids.length}/${ready.length} buys dispatched in ${launchMs.toFixed(
-                0
-            )} ms · exposure ${cur} ${exposure.toFixed(2)}.`
-        );
+            if (!opened) {
+                log(`[WARNING] Contract slot ${slot}/${n} could not be opened after ${maxAttemptsPerSlot} attempts.`);
+            }
 
-        if (ids.length) {
-            try {
-                run_panel?.setIsRunning?.(true);
-            } catch {
-                /* noop */
+            if (slot < n) {
+                await sleep(70);
             }
         }
+
+        log(
+            `[EXEC] Opened ${ids.length}/${n} requested contracts · requested exposure ${cur} ${exposure.toFixed(
+                2
+            )}.`
+        );
 
         if (!ids.length) {
             setPhase('done');
@@ -454,7 +450,11 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
             return;
         }
 
-        setStatus(`Waiting for settlement · ${ids.length} ${candidate.label} contracts on ${candidate.market.label}.`);
+        setStatus(
+            ids.length === n
+                ? `Waiting for settlement · ${ids.length}/${n} ${candidate.label} contracts opened on ${candidate.market.label}.`
+                : `Partial batch · ${ids.length}/${n} contracts opened. Waiting for those contracts to settle.`
+        );
         setPhase('settling');
         setSettle({ settled: 0, total: ids.length });
 
@@ -484,6 +484,8 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                     wins,
                     settled,
                     count: settledCount,
+                    requested: n,
+                    executed: ids.length,
                     market: candidate.market.label,
                     marketCode: candidate.market.code,
                     side: candidate.label,
@@ -1007,8 +1009,12 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                                 {batchResult.side}
                             </div>
                             <div>
+                                <span>Requested / Executed</span>
+                                {batchResult.requested}/{batchResult.executed}
+                            </div>
+                            <div>
                                 <span>Wins</span>
-                                {batchResult.wins}/{batchResult.count}
+                                {batchResult.wins}/{batchResult.executed}
                             </div>
                             <div>
                                 <span>Observed edge</span>
