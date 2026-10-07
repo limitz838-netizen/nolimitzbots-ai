@@ -293,16 +293,31 @@ const BulkTrader = observer(() => {
     const fire = async side => {
         const fire_stake = next_stake ?? stake_num;
         const exposure = fire_stake * count;
-        if (
-            !api_base?.api ||
-            is_busy ||
-            !is_logged_in ||
-            fire_stake < 0.35 ||
-            count < 1 ||
-            count > MAX_BATCH_COUNT ||
-            max_exposure_num < 0.35 ||
-            exposure > max_exposure_num + 1e-9
-        ) {
+
+        const blockedReason =
+            !is_logged_in
+                ? 'Not signed in to Deriv.'
+                : !api_base?.api
+                  ? 'Trading connection is not ready yet. Wait a moment and try again.'
+                  : api_base?.is_authorized === false
+                    ? 'Deriv account is visible, but the trading WebSocket is not authorized yet. Refresh or switch accounts and try again.'
+                    : is_busy
+                      ? 'A batch is already being prepared.'
+                      : !!settling
+                        ? 'The previous batch is still settling.'
+                        : fire_stake < 0.35
+                          ? 'Stake must be at least 0.35.'
+                          : count < 1 || count > MAX_BATCH_COUNT
+                            ? `Trade count must be between 1 and ${MAX_BATCH_COUNT}.`
+                            : max_exposure_num < 0.35
+                              ? 'Maximum batch exposure must be at least 0.35.'
+                              : exposure > max_exposure_num + 1e-9
+                                ? `Batch exposure ${currency} ${exposure.toFixed(2)} exceeds your limit of ${currency} ${max_exposure_num.toFixed(2)}.`
+                                : '';
+
+        if (blockedReason) {
+            setReceipts([{ ok: false, msg: `NOT SENT — ${blockedReason}` }]);
+            try { run_panel?.setIsRunning?.(false); } catch { /* noop */ }
             return;
         }
 
@@ -439,6 +454,11 @@ const BulkTrader = observer(() => {
 
                 {!is_logged_in && (
                     <div className='bulk-trader__warn'>Sign in with your Deriv account to place trades.</div>
+                )}
+                {is_logged_in && (
+                    <div className='bulk-trader__connection'>
+                        Trading API: <b>{api_base?.is_authorized ? 'READY' : 'AUTHORIZING'}</b>
+                    </div>
                 )}
 
                 <div className='bulk-trader__label'>Market</div>
