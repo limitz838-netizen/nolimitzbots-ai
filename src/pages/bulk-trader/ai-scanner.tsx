@@ -1,14 +1,13 @@
-// @ts-nocheck — Nolimitz AI market scanner for Bulk Trader.
+// @ts-nocheck
+// Nolimitz AI Market Matrix — Bulk Trader digit scanner.
 //
-// The scanner does not invent an "AI edge". It:
-//   1. keeps real Deriv digit history for every supported volatility market,
-//   2. evaluates practical 1-tick Over/Under contracts on a fixed evidence window,
-//   3. asks Deriv for the CURRENT proposal/payout on each market's strongest setup,
-//   4. computes observed edge = measured hit-rate - live break-even,
-//   5. auto-fires only when the sample also passes a confidence check.
+// Observable flow intentionally follows the reference scanner:
+// 13 volatility markets -> repeated sweeps -> same setup confirmation ->
+// bulk execution -> settlement -> Scan Again.
 //
-// This is still statistical evidence, not a guarantee. Synthetic ticks may be
-// independent and an observed historical edge can disappear immediately.
+// "Edge" below is a model/pattern score derived from real Deriv digit history.
+// It is NOT a guaranteed trading advantage and is deliberately kept separate
+// from payout/break-even claims.
 import React from 'react';
 import { isProduction, WS_SERVERS } from '@/components/shared/utils/config/config';
 import { api_base } from '@/external/bot-skeleton';
@@ -20,14 +19,17 @@ import './ai-scanner.scss';
 const SCAN_MARKETS = [
     { code: '1HZ100V', label: 'Volatility 100 (1s) Index' },
     { code: '1HZ10V', label: 'Volatility 10 (1s) Index' },
+    { code: '1HZ15V', label: 'Volatility 15 (1s) Index' },
     { code: '1HZ25V', label: 'Volatility 25 (1s) Index' },
+    { code: '1HZ30V', label: 'Volatility 30 (1s) Index' },
     { code: '1HZ50V', label: 'Volatility 50 (1s) Index' },
     { code: '1HZ75V', label: 'Volatility 75 (1s) Index' },
+    { code: '1HZ90V', label: 'Volatility 90 (1s) Index' },
     { code: 'R_10', label: 'Volatility 10 Index' },
+    { code: 'R_100', label: 'Volatility 100 Index' },
     { code: 'R_25', label: 'Volatility 25 Index' },
     { code: 'R_50', label: 'Volatility 50 Index' },
     { code: 'R_75', label: 'Volatility 75 Index' },
-    { code: 'R_100', label: 'Volatility 100 Index' },
 ];
 
 const FALLBACK_DECIMALS = {
@@ -37,81 +39,138 @@ const FALLBACK_DECIMALS = {
     R_75: 4,
     R_100: 2,
     '1HZ10V': 2,
+    '1HZ15V': 2,
     '1HZ25V': 2,
+    '1HZ30V': 2,
     '1HZ50V': 2,
     '1HZ75V': 2,
+    '1HZ90V': 2,
     '1HZ100V': 2,
 };
 
 const CANDIDATES = [
-    { type: 'DIGITOVER', barrier: 2, label: 'OVER 2', theoretical: 0.7 },
-    { type: 'DIGITOVER', barrier: 3, label: 'OVER 3', theoretical: 0.6 },
-    { type: 'DIGITOVER', barrier: 4, label: 'OVER 4', theoretical: 0.5 },
-    { type: 'DIGITUNDER', barrier: 5, label: 'UNDER 5', theoretical: 0.5 },
-    { type: 'DIGITUNDER', barrier: 6, label: 'UNDER 6', theoretical: 0.6 },
-    { type: 'DIGITUNDER', barrier: 7, label: 'UNDER 7', theoretical: 0.7 },
+    { type: 'DIGITOVER', barrier: 1, side: 'OVER', label: 'Over 1', baseline: 0.8 },
+    { type: 'DIGITOVER', barrier: 2, side: 'OVER', label: 'Over 2', baseline: 0.7 },
+    { type: 'DIGITOVER', barrier: 3, side: 'OVER', label: 'Over 3', baseline: 0.6 },
+    { type: 'DIGITOVER', barrier: 4, side: 'OVER', label: 'Over 4', baseline: 0.5 },
+    { type: 'DIGITUNDER', barrier: 5, side: 'UNDER', label: 'Under 5', baseline: 0.5 },
+    { type: 'DIGITUNDER', barrier: 6, side: 'UNDER', label: 'Under 6', baseline: 0.6 },
+    { type: 'DIGITUNDER', barrier: 7, side: 'UNDER', label: 'Under 7', baseline: 0.7 },
+    { type: 'DIGITUNDER', barrier: 8, side: 'UNDER', label: 'Under 8', baseline: 0.8 },
 ];
 
 const HISTORY_COUNT = 1000;
-const EVIDENCE_WINDOW = 600;
-const MIN_SAMPLE = 400;
-const MIN_OBSERVED_EDGE = 0.01; // at least +1.00 percentage point over live break-even
-const EVALUATE_EVERY_MS = 2200;
-const LOG_EVERY_MS = 4200;
-const WILSON_Z = 1.282; // one-sided ~90% lower confidence bound
+const MIN_HISTORY = 700;
+const SWEEP_MS = 3400;
+const CONFIRM_EDGE = 0.04; // +4.0 model-edge points, matching the selective video flow
+const MAX_EDGE_DISPLAY = 0.099;
+const MAX_ATTEMPTS_PER_SLOT = 4;
 
-const lastDigit = (q, d) => Number(Number(q).toFixed(d).slice(-1));
-
-const candidateWins = (candidate, digit) =>
+const lastDigit = (quote, decimals) => Number(Number(quote).toFixed(decimals).slice(-1));
+const winsCandidate = (candidate, digit) =>
     candidate.type === 'DIGITOVER' ? digit > candidate.barrier : digit < candidate.barrier;
 
-const wilsonLower = (hits, trials, z = WILSON_Z) => {
-    if (!trials) return 0;
-    const p = hits / trials;
-    const z2 = z * z;
-    const den = 1 + z2 / trials;
-    const centre = p + z2 / (2 * trials);
-    const spread = z * Math.sqrt((p * (1 - p) + z2 / (4 * trials)) / trials);
-    return Math.max(0, (centre - spread) / den);
+const rate = (digits, candidate, n) => {
+    const sample = digits.slice(-Math.min(n, digits.length));
+    if (!sample.length) return candidate.baseline;
+    let hits = 0;
+    sample.forEach(digit => {
+        if (winsCandidate(candidate, digit)) hits += 1;
+    });
+    return hits / sample.length;
 };
 
-const localStats = (digits, candidate) => {
-    const sample = (digits || []).slice(-EVIDENCE_WINDOW);
-    const n = sample.length;
-    if (!n) {
-        return {
-            ...candidate,
-            n: 0,
-            hits: 0,
-            hitRate: 0,
-            lowerBound: 0,
-            deviation: -1,
-        };
+const shrinkRate = (raw, n, baseline, prior = 28) =>
+    (raw * n + baseline * prior) / (n + prior);
+
+const conditionalNextRate = (digits, candidate, depth = 1) => {
+    if (digits.length < 40) {
+        return { rate: candidate.baseline, n: 0 };
     }
-    const hits = sample.reduce((sum, digit) => sum + (candidateWins(candidate, digit) ? 1 : 0), 0);
-    const hitRate = hits / n;
+
+    const pattern = digits.slice(-depth);
+    let trials = 0;
+    let hits = 0;
+
+    for (let i = depth - 1; i < digits.length - 1; i += 1) {
+        let matches = true;
+        for (let j = 0; j < depth; j += 1) {
+            if (digits[i - depth + 1 + j] !== pattern[j]) {
+                matches = false;
+                break;
+            }
+        }
+        if (!matches) continue;
+
+        trials += 1;
+        if (winsCandidate(candidate, digits[i + 1])) hits += 1;
+    }
+
+    if (!trials) return { rate: candidate.baseline, n: 0 };
     return {
-        ...candidate,
-        n,
-        hits,
-        hitRate,
-        lowerBound: wilsonLower(hits, n),
-        deviation: hitRate - candidate.theoretical,
+        rate: shrinkRate(hits / trials, trials, candidate.baseline, depth === 1 ? 18 : 10),
+        n: trials,
     };
 };
 
-const bestLocalCandidate = digits =>
-    CANDIDATES.map(candidate => localStats(digits, candidate)).sort(
-        (a, b) => b.deviation - a.deviation || b.lowerBound - a.lowerBound
+const scoreCandidate = (digits, candidate) => {
+    if (digits.length < MIN_HISTORY) {
+        return {
+            ...candidate,
+            hitRate: candidate.baseline,
+            modelRate: candidate.baseline,
+            edge: 0,
+        };
+    }
+
+    const r60 = shrinkRate(rate(digits, candidate, 60), 60, candidate.baseline, 24);
+    const r140 = shrinkRate(rate(digits, candidate, 140), 140, candidate.baseline, 40);
+    const r360 = shrinkRate(rate(digits, candidate, 360), 360, candidate.baseline, 80);
+    const rAll = rate(digits, candidate, Math.min(HISTORY_COUNT, digits.length));
+
+    const c1 = conditionalNextRate(digits, candidate, 1);
+    const c2 = conditionalNextRate(digits, candidate, 2);
+
+    // Multi-horizon pattern score. Short/conditional signals drive the scan,
+    // while medium/long history prevents one tiny streak from winning alone.
+    let modelRate =
+        r60 * 0.27 +
+        r140 * 0.23 +
+        r360 * 0.17 +
+        rAll * 0.13 +
+        c1.rate * 0.13 +
+        c2.rate * 0.07;
+
+    // Reward agreement rather than one isolated noisy horizon.
+    const votes = [r60, r140, r360, c1.rate].filter(v => v > candidate.baseline).length;
+    const agreementBoost = Math.max(0, votes - 2) * 0.004;
+    modelRate += agreementBoost;
+
+    const edge = Math.max(-0.099, Math.min(MAX_EDGE_DISPLAY, modelRate - candidate.baseline));
+
+    return {
+        ...candidate,
+        hitRate: rAll,
+        modelRate,
+        edge,
+        votes,
+        recent: digits.slice(-4),
+    };
+};
+
+const bestCandidate = digits =>
+    CANDIDATES.map(candidate => scoreCandidate(digits, candidate)).sort(
+        (a, b) => b.edge - a.edge || b.votes - a.votes || b.hitRate - a.hitRate
     )[0] || null;
 
-const pct = value => (Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : '—');
+const pct1 = value => `${(Number(value || 0) * 100).toFixed(1)}%`;
+const plusPct1 = value => `${Number(value) >= 0 ? '+' : ''}${pct1(value)}`;
 
 const withTimeout = (promise, ms, label) =>
     Promise.race([
         Promise.resolve(promise),
         new Promise((_, reject) =>
-            window.setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms)
+            window.setTimeout(() => reject(new Error(`${label} timed out`)), ms)
         ),
     ]);
 
@@ -121,37 +180,25 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
     const { run_panel, transactions, summary_card } = useStore();
 
     const [phase, setPhase] = React.useState('idle'); // idle | scanning | firing | settling | done
-    const [scannerStake, setScannerStake] = React.useState(String(stake ?? '0.5'));
+    const [scannerStake, setScannerStake] = React.useState(String(stake ?? '5'));
     const [scannerCount, setScannerCount] = React.useState(Math.max(1, Math.min(20, Number(count) || 5)));
+    const [rows, setRows] = React.useState({});
     const [logs, setLogs] = React.useState([]);
-    const [matrix, setMatrix] = React.useState({});
-    const [status, setStatus] = React.useState('Ready to scan all supported volatility markets.');
-    const [match, setMatch] = React.useState(null);
-    const [fireLog, setFireLog] = React.useState([]);
+    const [statusTitle, setStatusTitle] = React.useState('STANDBY');
+    const [statusText, setStatusText] = React.useState('Set your stake and number of bulk trades, then start the scanner.');
+    const [sweep, setSweep] = React.useState(0);
     const [settle, setSettle] = React.useState(null);
     const [batchResult, setBatchResult] = React.useState(null);
-    const [scanSummary, setScanSummary] = React.useState({
-        marketsReady: 0,
-        bestEdge: null,
-        evaluations: 0,
-    });
 
     const ws_ref = React.useRef(null);
     const track_ref = React.useRef(null);
+    const timer_ref = React.useRef(null);
     const digits_ref = React.useRef({});
     const decimals_ref = React.useRef({ ...FALLBACK_DECIMALS });
-    const armed_ref = React.useRef(false);
-    const eval_inflight_ref = React.useRef(false);
-    const eval_timer_ref = React.useRef(null);
-    const last_eval_ref = React.useRef(0);
-    const last_log_ref = React.useRef(0);
-    const evaluations_ref = React.useRef(0);
-    const cfg_ref = React.useRef({
-        stake: scannerStake,
-        count: scannerCount,
-        currency,
-        isLoggedIn,
-    });
+    const active_ref = React.useRef(false);
+    const sweep_ref = React.useRef(0);
+    const confirm_ref = React.useRef(null);
+    const cfg_ref = React.useRef({});
 
     cfg_ref.current = {
         stake: scannerStake,
@@ -160,13 +207,17 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
         isLoggedIn,
     };
 
-    const log = line => setLogs(prev => [...prev, line].slice(-80));
+    const log = line => setLogs(prev => [...prev, line].slice(-70));
+
+    const stopSweepTimer = () => {
+        if (timer_ref.current) {
+            window.clearTimeout(timer_ref.current);
+            timer_ref.current = null;
+        }
+    };
 
     const stopSocket = () => {
-        if (eval_timer_ref.current) {
-            window.clearTimeout(eval_timer_ref.current);
-            eval_timer_ref.current = null;
-        }
+        stopSweepTimer();
         try {
             ws_ref.current?.close();
         } catch {
@@ -175,125 +226,69 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
         ws_ref.current = null;
     };
 
-    const teardown = () => {
-        armed_ref.current = false;
-        eval_inflight_ref.current = false;
+    const resetLive = () => {
+        active_ref.current = false;
         stopSocket();
+        confirm_ref.current = null;
+        sweep_ref.current = 0;
     };
 
     React.useEffect(() => {
         if (open && phase === 'idle') {
-            setScannerStake(String(stake ?? '0.5'));
+            setScannerStake(String(stake ?? '5'));
             setScannerCount(Math.max(1, Math.min(20, Number(count) || 5)));
         }
 
         if (!open) {
-            teardown();
+            resetLive();
             track_ref.current?.cancel();
             track_ref.current = null;
             setPhase('idle');
+            setRows({});
             setLogs([]);
-            setMatrix({});
-            setMatch(null);
-            setFireLog([]);
+            setSweep(0);
             setSettle(null);
             setBatchResult(null);
-            setScanSummary({ marketsReady: 0, bestEdge: null, evaluations: 0 });
-            setStatus('Ready to scan all supported volatility markets.');
+            setStatusTitle('STANDBY');
+            setStatusText('Set your stake and number of bulk trades, then start the scanner.');
             digits_ref.current = {};
         }
     }, [open]);
 
     React.useEffect(
         () => () => {
-            teardown();
+            resetLive();
             track_ref.current?.cancel();
         },
         []
     );
 
-    const requestEconomics = async (market, stats) => {
-        if (!api_base?.api || !stats) return null;
-        const amount = Math.max(0.35, parseFloat(cfg_ref.current.stake) || 0.5);
-        const request = {
-            proposal: 1,
-            amount,
-            basis: 'stake',
-            contract_type: stats.type,
-            currency: cfg_ref.current.currency || 'USD',
-            duration: 1,
-            duration_unit: 't',
-            underlying_symbol: market.code,
-            barrier: String(stats.barrier),
-        };
-
-        try {
-            const response = await api_base.api.send(request);
-            const proposal = response?.proposal;
-            const ask = Number(proposal?.ask_price ?? amount);
-            const payout = Number(proposal?.payout ?? 0);
-            if (!(ask > 0) || !(payout > 0)) return null;
-            const breakEven = ask / payout;
-            return {
-                ...stats,
-                market,
-                proposalId: proposal?.id || null,
-                ask,
-                payout,
-                breakEven,
-                observedEdge: stats.hitRate - breakEven,
-                confidenceEdge: stats.lowerBound - breakEven,
-                qualified:
-                    stats.n >= MIN_SAMPLE &&
-                    stats.hitRate - breakEven >= MIN_OBSERVED_EDGE &&
-                    stats.lowerBound >= stats.theoretical,
-            };
-        } catch (error) {
-            return {
-                ...stats,
-                market,
-                proposalError: describeError(error),
-                qualified: false,
-            };
-        }
-    };
-
     const fireBatch = async candidate => {
-        const {
-            stake: st,
-            count: ct,
-            currency: cur,
-            isLoggedIn: li,
-        } = cfg_ref.current;
+        const { stake: st, count: ct, currency: cur, isLoggedIn: connected } = cfg_ref.current;
 
-        if (!li || !api_base?.api) {
+        if (!connected || !api_base?.api) {
             setPhase('done');
-            setStatus(`Best setup found on ${candidate.market.label}, but Deriv is not connected for trading.`);
+            setStatusTitle('COMPLETE');
+            setStatusText('Best market found, but Deriv is not connected.');
             return;
         }
 
-        const n = Math.max(1, Math.min(20, parseInt(ct, 10) || 5));
-        const amount = Math.max(0.35, parseFloat(st) || 0.5);
-        const exposure = amount * n;
-
-        // Scanner mode intentionally uses the user's selected stake × bulk-trade
-        // count as the batch size. The manual Bulk Trader's separate exposure
-        // ceiling must not silently block scanner execution.
-        log(`[READY] Batch total ${cur} ${exposure.toFixed(2)} · ${n} contracts × ${cur} ${amount.toFixed(2)}.`);
+        const amount = Math.max(0.35, Number(st) || 0.5);
+        const requested = Math.max(1, Math.min(20, parseInt(ct, 10) || 5));
+        const ids = [];
 
         unlockAudio();
+        setPhase('firing');
+        setStatusTitle('TRADING');
+        setStatusText('Opening bulk contracts…');
+        log(`[INFO] Placing ${requested} trade(s) on ${candidate.market.code}...`);
+
         try {
             run_panel.run_id = `bulk-scanner-${Date.now()}`;
             run_panel?.toggleDrawer?.(true);
         } catch {
-            /* run panel unavailable */
+            /* noop */
         }
-
-        setPhase('firing');
-        setFireLog([]);
-        setStatus(
-            `BEST MARKET FOUND · ${candidate.market.label} · ${candidate.label} · placing ${n} contracts…`
-        );
 
         const proposalReq = {
             proposal: 1,
@@ -307,25 +302,11 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
             barrier: String(candidate.barrier),
         };
 
-        const ids = [];
-        const maxAttemptsPerSlot = 3;
-
-        setFireLog(prev => [...prev, `[EXEC] Opening exactly ${n} contracts…`]);
-
-        // For fast 1-tick digit contracts, proposal -> immediate buy is much more
-        // reliable than preparing several proposals first and buying them later.
-        // Each requested bulk slot gets its own fresh proposal and immediate buy.
-        for (let slot = 1; slot <= n; slot += 1) {
+        for (let slot = 1; slot <= requested; slot += 1) {
             let opened = false;
 
-            for (let attempt = 1; attempt <= maxAttemptsPerSlot && !opened; attempt += 1) {
+            for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_SLOT && !opened; attempt += 1) {
                 try {
-                    setStatus(
-                        `BEST MARKET FOUND · ${candidate.market.label} · ${candidate.label} · opening ${slot}/${n}${
-                            attempt > 1 ? ` · retry ${attempt}/${maxAttemptsPerSlot}` : ''
-                        }…`
-                    );
-
                     const proposalResponse = await withTimeout(
                         api_base.api.send({
                             ...proposalReq,
@@ -333,7 +314,6 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                                 nolimitz_batch: run_panel?.run_id || 'bulk-scanner',
                                 slot,
                                 attempt,
-                                stage: 'proposal',
                             },
                         }),
                         5000,
@@ -341,24 +321,11 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                     );
 
                     if (proposalResponse?.error) {
-                        throw new Error(
-                            proposalResponse.error.message ||
-                                proposalResponse.error.code ||
-                                'Proposal rejected'
-                        );
+                        throw new Error(proposalResponse.error.message || 'Proposal rejected');
                     }
 
                     const proposal = proposalResponse?.proposal;
-                    if (!proposal?.id) {
-                        throw new Error('No proposal returned');
-                    }
-
-                    setFireLog(prev => [
-                        ...prev,
-                        `[READY] #${slot} proposal · payout ${cur} ${Number(
-                            proposal.payout ?? 0
-                        ).toFixed(2)}`,
-                    ]);
+                    if (!proposal?.id) throw new Error('No proposal returned');
 
                     const buyResponse = await withTimeout(
                         api_base.api.send({
@@ -368,7 +335,6 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                                 nolimitz_batch: run_panel?.run_id || 'bulk-scanner',
                                 slot,
                                 attempt,
-                                stage: 'buy',
                             },
                         }),
                         5000,
@@ -376,17 +342,13 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                     );
 
                     if (buyResponse?.error) {
-                        throw new Error(
-                            buyResponse.error.message || buyResponse.error.code || 'Buy rejected'
-                        );
+                        throw new Error(buyResponse.error.message || 'Buy rejected');
                     }
 
-                    const cid = buyResponse?.buy?.contract_id;
-                    if (!cid) {
-                        throw new Error('Buy returned no contract id');
-                    }
+                    const contractId = buyResponse?.buy?.contract_id;
+                    if (!contractId) throw new Error('No contract id returned');
 
-                    ids.push(cid);
+                    ids.push(contractId);
                     opened = true;
 
                     if (ids.length === 1) {
@@ -396,60 +358,34 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                             /* noop */
                         }
                     }
-
-                    setFireLog(prev => [
-                        ...prev,
-                        `[BUY] #${slot}/${n} ${candidate.label} · contract ${cid} · ${cur} ${Number(
-                            buyResponse?.buy?.buy_price ?? amount
-                        ).toFixed(2)}`,
-                    ]);
-
-                    log(`[BUY] Contract ${slot}/${n} opened · id ${cid}.`);
                 } catch (error) {
-                    const message = describeError(error);
-                    setFireLog(prev => [
-                        ...prev,
-                        `[FAIL] #${slot} attempt ${attempt}/${maxAttemptsPerSlot} — ${message}`,
-                    ]);
-
-                    if (attempt < maxAttemptsPerSlot) {
-                        await sleep(140);
+                    if (attempt === MAX_ATTEMPTS_PER_SLOT) {
+                        log(`[WARN] Trade ${slot}/${requested} could not open: ${describeError(error)}`);
+                    } else {
+                        await sleep(100);
                     }
                 }
             }
 
-            if (!opened) {
-                log(`[WARNING] Contract slot ${slot}/${n} could not be opened after ${maxAttemptsPerSlot} attempts.`);
-            }
-
-            if (slot < n) {
-                await sleep(70);
-            }
+            if (slot < requested) await sleep(55);
         }
 
-        log(
-            `[EXEC] Opened ${ids.length}/${n} requested contracts · requested exposure ${cur} ${exposure.toFixed(
-                2
-            )}.`
-        );
-
         if (!ids.length) {
-            setPhase('done');
-            setStatus('Best setup found, but all buy requests failed.');
             try {
                 run_panel?.setIsRunning?.(false);
             } catch {
                 /* noop */
             }
+            setPhase('done');
+            setStatusTitle('COMPLETE');
+            setStatusText('No contracts opened. Tap Scan Again to retry.');
             return;
         }
 
-        setStatus(
-            ids.length === n
-                ? `Waiting for settlement · ${ids.length}/${n} ${candidate.label} contracts opened on ${candidate.market.label}.`
-                : `Partial batch · ${ids.length}/${n} contracts opened. Waiting for those contracts to settle.`
-        );
+        log(`[OK] ${ids.length}/${requested} contracts opened.`);
         setPhase('settling');
+        setStatusTitle('TRADING');
+        setStatusText('Waiting for settlement…');
         setSettle({ settled: 0, total: ids.length });
 
         track_ref.current = trackContracts(ids, {
@@ -460,203 +396,150 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                     summary_card?.onBotContractEvent?.(contract);
                     run_panel?.onBotContractEvent?.(contract);
                 } catch {
-                    /* display mirroring must never interrupt settlement */
+                    /* UI mirroring cannot stop settlement */
                 }
             },
-            onDone: ({ total, wins, settled, count: settledCount }) => {
+            onDone: ({ total, wins, count: settledCount }) => {
                 setSettle(null);
                 try {
                     run_panel?.setIsRunning?.(false);
                 } catch {
                     /* noop */
                 }
+
                 if (total >= 0) playWin();
                 else playLoss();
 
                 setBatchResult({
                     total,
                     wins,
-                    settled,
                     count: settledCount,
-                    requested: n,
+                    requested,
                     executed: ids.length,
-                    market: candidate.market.label,
                     marketCode: candidate.market.code,
-                    side: candidate.label,
+                    marketLabel: candidate.market.label,
+                    side: candidate.side,
+                    contractLabel: candidate.label,
+                    edge: candidate.edge,
                     hitRate: candidate.hitRate,
-                    lowerBound: candidate.lowerBound,
-                    breakEven: candidate.breakEven,
-                    observedEdge: candidate.observedEdge,
                 });
                 setPhase('done');
+                setStatusTitle('COMPLETE');
+                setStatusText(total >= 0 ? 'Scanner batch won.' : 'Scanner batch lost.');
                 track_ref.current = null;
             },
         });
     };
 
-    const evaluateMatrix = React.useCallback(async () => {
-        if (!armed_ref.current || eval_inflight_ref.current) return;
+    const runSweep = React.useCallback(async () => {
+        if (!active_ref.current) return;
 
-        const now = Date.now();
-        if (now - last_eval_ref.current < EVALUATE_EVERY_MS) return;
-        last_eval_ref.current = now;
-        eval_inflight_ref.current = true;
+        const nextSweep = sweep_ref.current + 1;
+        sweep_ref.current = nextSweep;
+        setSweep(nextSweep);
 
-        try {
-            const local = SCAN_MARKETS.map(market => {
-                const digits = digits_ref.current[market.code] || [];
-                return {
-                    market,
-                    digits,
-                    stats: bestLocalCandidate(digits),
-                };
-            }).filter(row => row.stats?.n >= MIN_SAMPLE);
+        const scored = [];
 
-            setScanSummary(prev => ({
+        SCAN_MARKETS.forEach(market => {
+            const digits = digits_ref.current[market.code] || [];
+            const candidate = bestCandidate(digits);
+            if (!candidate || digits.length < MIN_HISTORY) return;
+
+            const row = {
+                market,
+                ...candidate,
+                recent: digits.slice(-4),
+            };
+            scored.push(row);
+
+            setRows(prev => ({
                 ...prev,
-                marketsReady: local.length,
+                [market.code]: row,
             }));
 
-            if (!local.length) {
-                setStatus(`Collecting evidence… 0/${SCAN_MARKETS.length} markets have ${MIN_SAMPLE}+ ticks.`);
-                return;
-            }
+            log(
+                `[SCAN] ${market.code}: ${row.recent.join(',')} → ${row.label} edge ${plusPct1(
+                    row.edge
+                )}`
+            );
+        });
 
-            // One proposal per market keeps the scanner responsive and avoids
-            // hammering Deriv with 60 simultaneous proposal requests.
-            const priced = (
-                await Promise.all(local.map(row => requestEconomics(row.market, row.stats)))
-            ).filter(Boolean);
+        if (!scored.length) {
+            setStatusTitle('SCANNING');
+            setStatusText('Collecting live digit history…');
+        } else {
+            scored.sort((a, b) => b.edge - a.edge || b.votes - a.votes || b.hitRate - a.hitRate);
+            const best = scored[0];
 
-            evaluations_ref.current += 1;
-            const byCode = {};
-            priced.forEach(row => {
-                byCode[row.market.code] = row;
-            });
+            if (best.edge >= CONFIRM_EDGE) {
+                const key = `${best.market.code}:${best.type}:${best.barrier}`;
+                const previous = confirm_ref.current;
 
-            setMatrix(prev => {
-                const next = { ...prev };
-                SCAN_MARKETS.forEach(market => {
-                    const digits = digits_ref.current[market.code] || [];
-                    const pricedRow = byCode[market.code];
-                    const localBest = bestLocalCandidate(digits);
-                    next[market.code] = {
-                        ...(next[market.code] || {}),
-                        digits: digits.slice(-5),
-                        sample: localBest?.n || digits.length,
-                        candidate: pricedRow || (localBest ? { ...localBest, market } : null),
-                    };
-                });
-                return next;
-            });
+                if (previous && previous.key === key && previous.sweep === nextSweep - 1) {
+                    active_ref.current = false;
+                    stopSocket();
+                    confirm_ref.current = null;
 
-            const ranked = priced
-                .filter(row => Number.isFinite(row.observedEdge))
-                .sort(
-                    (a, b) =>
-                        b.observedEdge - a.observedEdge ||
-                        b.lowerBound - a.lowerBound ||
-                        b.hitRate - a.hitRate
-                );
-
-            const best = ranked[0] || null;
-            const qualified = ranked.find(row => row.qualified) || null;
-
-            setScanSummary({
-                marketsReady: local.length,
-                bestEdge: best?.observedEdge ?? null,
-                evaluations: evaluations_ref.current,
-            });
-
-            if (qualified && armed_ref.current) {
-                armed_ref.current = false;
-                stopSocket();
-                setMatch(qualified);
-                log(
-                    `[SUCCESS] ${qualified.market.code} · ${qualified.label} · hit ${pct(
-                        qualified.hitRate
-                    )} · break-even ${pct(qualified.breakEven)} · edge +${pct(
-                        qualified.observedEdge
-                    ).replace('+', '')}.`
-                );
-                setStatus(
-                    `BEST MARKET FOUND · ${qualified.market.label} · ${qualified.label} · +${pct(
-                        qualified.observedEdge
-                    ).replace('+', '')} observed edge.`
-                );
-                await fireBatch(qualified);
-                return;
-            }
-
-            const current = Date.now();
-            if (best) {
-                setStatus(
-                    `Scanning · best now: ${best.market.code} ${best.label} · hit ${pct(
-                        best.hitRate
-                    )} vs BE ${pct(best.breakEven)} · edge ${best.observedEdge >= 0 ? '+' : ''}${pct(
-                        best.observedEdge
-                    )}. Waiting for validation.`
-                );
-                if (current - last_log_ref.current >= LOG_EVERY_MS) {
-                    last_log_ref.current = current;
                     log(
-                        `[SCAN] best ${best.market.code} ${best.label} · observed ${pct(
+                        `[OK] Best market found: ${best.market.code} → ${best.label} (hit rate ${pct1(
                             best.hitRate
-                        )} · BE ${pct(best.breakEven)} · edge ${best.observedEdge >= 0 ? '+' : ''}${pct(
-                            best.observedEdge
-                        )} · lower bound ${pct(best.lowerBound)}.`
+                        )}, edge ${plusPct1(best.edge)})`
                     );
+                    await fireBatch(best);
+                    return;
                 }
+
+                confirm_ref.current = { key, sweep: nextSweep };
+                log(
+                    `[INFO] ${best.market.code} ${best.label} cleared the bar — confirming on next sweep...`
+                );
+                setStatusTitle('SCANNING');
+                setStatusText(`Still scanning… sweep ${nextSweep}. Confirming strongest setup.`);
             } else {
-                setStatus('Live history is ready, but proposal economics are still loading.');
+                confirm_ref.current = null;
+                setStatusTitle('SCANNING');
+                setStatusText(
+                    nextSweep === 1
+                        ? 'Scanning live markets…'
+                        : `Still scanning… sweep ${nextSweep}. Tap stop to cancel.`
+                );
             }
-        } finally {
-            eval_inflight_ref.current = false;
+        }
+
+        if (active_ref.current) {
+            timer_ref.current = window.setTimeout(runSweep, SWEEP_MS);
         }
     }, []);
 
-    const scheduleEvaluation = React.useCallback(() => {
-        if (!armed_ref.current || eval_timer_ref.current) return;
-        const wait = Math.max(0, EVALUATE_EVERY_MS - (Date.now() - last_eval_ref.current));
-        eval_timer_ref.current = window.setTimeout(() => {
-            eval_timer_ref.current = null;
-            evaluateMatrix();
-        }, wait);
-    }, [evaluateMatrix]);
-
-    const scan = () => {
-        teardown();
+    const startScan = () => {
+        resetLive();
         track_ref.current?.cancel();
         track_ref.current = null;
 
         setPhase('scanning');
+        setRows({});
         setLogs([]);
-        setMatrix({});
-        setMatch(null);
-        setBatchResult(null);
-        setFireLog([]);
+        setSweep(0);
         setSettle(null);
-        setScanSummary({ marketsReady: 0, bestEdge: null, evaluations: 0 });
-        setStatus(`Collecting up to ${HISTORY_COUNT} real ticks from ${SCAN_MARKETS.length} markets…`);
+        setBatchResult(null);
+        setStatusTitle('SCANNING');
+        setStatusText('Scanning live markets…');
 
         digits_ref.current = {};
-        evaluations_ref.current = 0;
-        last_eval_ref.current = 0;
-        last_log_ref.current = 0;
-        armed_ref.current = true;
+        sweep_ref.current = 0;
+        confirm_ref.current = null;
+        active_ref.current = true;
 
-        log('[INFO] Nolimitz AI market matrix started.');
-        log('[INFO] Reading real Deriv digit history.');
-        log('[INFO] Comparing OVER 2/3/4 and UNDER 5/6/7.');
-        log('[INFO] Edge = observed hit-rate minus current Deriv break-even.');
+        log(`[INFO] Scanning digit patterns on ${SCAN_MARKETS.length} volatility markets...`);
 
-        const url = isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING;
-        const ws = new WebSocket(url);
+        const ws = new WebSocket(isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING);
         ws_ref.current = ws;
 
         ws.onopen = () => {
-            if (!armed_ref.current) return;
+            if (!active_ref.current) return;
+
             ws.send(JSON.stringify({ active_symbols: 'brief' }));
+
             SCAN_MARKETS.forEach(market => {
                 ws.send(
                     JSON.stringify({
@@ -670,12 +553,12 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
             });
         };
 
-        ws.onmessage = message => {
-            if (!armed_ref.current) return;
+        ws.onmessage = event => {
+            if (!active_ref.current) return;
 
             let data;
             try {
-                data = JSON.parse(message.data);
+                data = JSON.parse(event.data);
             } catch {
                 return;
             }
@@ -683,9 +566,8 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
             if (data.msg_type === 'active_symbols' && Array.isArray(data.active_symbols)) {
                 data.active_symbols.forEach(symbol => {
                     const code = symbol.symbol || symbol.underlying_symbol;
-                    if (code && typeof symbol.pip === 'number') {
-                        decimals_ref.current[code] = `${symbol.pip}`.split('.')[1]?.length ?? 0;
-                    }
+                    if (!code || typeof symbol.pip !== 'number') return;
+                    decimals_ref.current[code] = `${symbol.pip}`.split('.')[1]?.length ?? 0;
                 });
                 return;
             }
@@ -693,69 +575,60 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
             if (data.msg_type === 'history' && data.echo_req?.ticks_history) {
                 const code = data.echo_req.ticks_history;
                 if (!SCAN_MARKETS.some(market => market.code === code)) return;
+
                 const decimals = decimals_ref.current[code] ?? 2;
                 const digits = (data.history?.prices || [])
                     .map(price => lastDigit(price, decimals))
                     .slice(-HISTORY_COUNT);
                 digits_ref.current[code] = digits;
 
-                setMatrix(prev => ({
-                    ...prev,
-                    [code]: {
-                        ...(prev[code] || {}),
-                        digits: digits.slice(-5),
-                        sample: digits.length,
-                        candidate: bestLocalCandidate(digits),
-                    },
-                }));
-                scheduleEvaluation();
+                if (
+                    SCAN_MARKETS.every(market => (digits_ref.current[market.code] || []).length >= MIN_HISTORY) &&
+                    sweep_ref.current === 0
+                ) {
+                    stopSweepTimer();
+                    timer_ref.current = window.setTimeout(runSweep, 250);
+                }
                 return;
             }
 
             if (data.msg_type === 'tick' && data.tick?.symbol) {
                 const code = data.tick.symbol;
                 if (!SCAN_MARKETS.some(market => market.code === code)) return;
+
                 const decimals = decimals_ref.current[code] ?? 2;
                 const prev = digits_ref.current[code] || [];
-                const digits = [...prev, lastDigit(data.tick.quote, decimals)].slice(-HISTORY_COUNT);
-                digits_ref.current[code] = digits;
-
-                setMatrix(previous => ({
-                    ...previous,
-                    [code]: {
-                        ...(previous[code] || {}),
-                        digits: digits.slice(-5),
-                        sample: digits.length,
-                        candidate: previous[code]?.candidate || bestLocalCandidate(digits),
-                    },
-                }));
-                scheduleEvaluation();
+                digits_ref.current[code] = [
+                    ...prev,
+                    lastDigit(data.tick.quote, decimals),
+                ].slice(-HISTORY_COUNT);
             }
         };
 
         ws.onerror = () => {
-            if (!armed_ref.current) return;
-            log('[WARNING] Market stream interrupted. Stop and scan again if it does not recover.');
-            setStatus('Market stream interrupted — waiting for socket recovery.');
+            if (!active_ref.current) return;
+            setStatusTitle('SCANNING');
+            setStatusText('Live stream interrupted. Reconnecting may be required.');
+            log('[WARN] Deriv market stream interrupted.');
         };
     };
 
     const stopScan = () => {
-        teardown();
+        resetLive();
         setPhase('idle');
-        setStatus('Scanner stopped. Tap Scan for Best Market to start again.');
+        setStatusTitle('STANDBY');
+        setStatusText('Scanner stopped. Tap Scan for Best Market to start again.');
         log('[INFO] Scanner stopped by user.');
     };
 
     const handleClose = () => {
-        teardown();
+        resetLive();
         track_ref.current?.cancel();
         track_ref.current = null;
         setPhase('idle');
+        setRows({});
         setLogs([]);
-        setMatrix({});
-        setMatch(null);
-        setFireLog([]);
+        setSweep(0);
         setSettle(null);
         setBatchResult(null);
         onClose?.();
@@ -764,274 +637,157 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
     if (!open) return null;
 
     const scanning = phase === 'scanning';
-    const busy = phase === 'firing' || phase === 'settling';
+    const trading = phase === 'firing' || phase === 'settling';
 
     return (
         <div className='ai-scanner__overlay' role='dialog' aria-modal='true' onClick={handleClose}>
-            <div className='ai-scanner' onClick={event => event.stopPropagation()}>
-                <div className='ai-scanner__bar'>
-                    <span className='ai-scanner__dots'>
-                        <i /> <i /> <i />
-                    </span>
-                    <button className='ai-scanner__close' onClick={handleClose}>
-                        ✕
-                    </button>
+            <div className='ai-scanner ai-scanner--reference' onClick={event => event.stopPropagation()}>
+                <div className='ai-scanner__reference-head'>
+                    <div>
+                        <span>NOLIMITZ AI MARKET MATRIX</span>
+                        <h2>Analysis Dashboard - Digit Scanner</h2>
+                    </div>
+                    <button type='button' onClick={handleClose}>×</button>
                 </div>
 
-                <div className='ai-scanner__title'>NOLIMITZ AI MARKET MATRIX</div>
-                <div className='ai-scanner__subtitle'>Live Deriv scanner · measured Over/Under edge</div>
-
-                <div className='ai-scanner__config'>
+                <div className='ai-scanner__reference-fields'>
                     <label>
-                        <span>Stake ({currency})</span>
+                        <span>STAKE</span>
                         <input
                             type='number'
                             min='0.35'
                             step='0.01'
                             value={scannerStake}
-                            disabled={busy}
+                            disabled={scanning || trading}
                             onChange={event => setScannerStake(event.target.value)}
                         />
                     </label>
                     <label>
-                        <span>Bulk trades</span>
+                        <span>NO. OF BULK TRADES</span>
                         <input
                             type='number'
                             min='1'
                             max='20'
                             step='1'
                             value={scannerCount}
-                            disabled={busy}
+                            disabled={scanning || trading}
                             onChange={event =>
                                 setScannerCount(Math.max(1, Math.min(20, Number(event.target.value) || 1)))
                             }
                         />
                     </label>
-                    <div>
-                        <span>Batch total</span>
-                        <strong>
-                            {currency}{' '}
-                            {(
-                                Math.max(0.35, Number(scannerStake) || 0.35) *
-                                Math.max(1, Number(scannerCount) || 1)
-                            ).toFixed(2)}
-                        </strong>
-                    </div>
                 </div>
 
-                {(scanning || busy) && (
-                    <div className='ai-scanner__running'>
-                        <span className='ai-scanner__running-dot' />
-                        {scanning
-                            ? `Scanning ${SCAN_MARKETS.length} markets · ${scanSummary.marketsReady} ready`
-                            : phase === 'firing'
-                              ? 'Best market found — dispatching batch…'
-                              : 'Contracts live — waiting for settlement…'}
-                    </div>
-                )}
-
-                <div className='ai-scanner__metrics'>
-                    <div>
-                        <span>Markets</span>
-                        <strong>{scanSummary.marketsReady}/{SCAN_MARKETS.length}</strong>
-                    </div>
-                    <div>
-                        <span>Evidence</span>
-                        <strong>{EVIDENCE_WINDOW} ticks</strong>
-                    </div>
-                    <div>
-                        <span>Best edge</span>
-                        <strong>
-                            {scanSummary.bestEdge === null
-                                ? '—'
-                                : `${scanSummary.bestEdge >= 0 ? '+' : ''}${pct(scanSummary.bestEdge)}`}
-                        </strong>
-                    </div>
-                    <div>
-                        <span>Checks</span>
-                        <strong>{scanSummary.evaluations}</strong>
-                    </div>
-                </div>
-
-                <div className='ai-scanner__markets ai-scanner__markets--matrix'>
+                <div className='ai-scanner__reference-label'>Markets</div>
+                <div className='ai-scanner__reference-markets'>
                     {SCAN_MARKETS.map(market => {
-                        const row = matrix[market.code];
-                        const candidate = row?.candidate;
-                        const isMatch = match?.market?.code === market.code;
-                        const isQualified = Boolean(candidate?.qualified);
-
+                        const row = rows[market.code];
                         return (
-                            <div
-                                key={market.code}
-                                className={`ai-scanner__mkt ${isQualified ? 'ai-scanner__mkt--hit' : ''} ${
-                                    isMatch ? 'ai-scanner__mkt--match' : ''
-                                }`}
-                            >
-                                <div className='ai-scanner__mkt-top'>
-                                    <span className='ai-scanner__mkt-name'>{market.code}</span>
-                                    <span className='ai-scanner__mkt-sample'>{row?.sample || 0} ticks</span>
-                                </div>
-                                <div className='ai-scanner__mkt-contract'>
-                                    {candidate?.label || 'COLLECTING'}
-                                </div>
-                                <div className='ai-scanner__mkt-stats'>
-                                    <span>
-                                        HIT <b>{candidate?.hitRate ? pct(candidate.hitRate) : '—'}</b>
-                                    </span>
-                                    <span>
-                                        BE <b>{Number.isFinite(candidate?.breakEven) ? pct(candidate.breakEven) : '—'}</b>
-                                    </span>
-                                    <span>
-                                        EDGE{' '}
-                                        <b className={candidate?.observedEdge > 0 ? 'pos' : candidate?.observedEdge < 0 ? 'neg' : ''}>
-                                            {Number.isFinite(candidate?.observedEdge)
-                                                ? `${candidate.observedEdge >= 0 ? '+' : ''}${pct(candidate.observedEdge)}`
-                                                : '—'}
-                                        </b>
-                                    </span>
-                                </div>
-                                <div className='ai-scanner__mkt-digits'>
-                                    {(row?.digits || []).map((digit, index) => (
-                                        <i key={`${market.code}-${index}`}>{digit}</i>
-                                    ))}
-                                </div>
+                            <div key={market.code} className='ai-scanner__reference-market'>
+                                <b>{market.code}</b>{' '}
+                                <span>
+                                    {row?.recent?.length ? row.recent.join(',') : '—,—,—,—'}
+                                </span>{' '}
+                                <em>({row ? plusPct1(row.edge) : '—'})</em>
                             </div>
                         );
                     })}
                 </div>
 
-                {match && (
-                    <div className='ai-scanner__best'>
-                        <span>BEST MARKET FOUND</span>
-                        <h3>{match.market.label}</h3>
-                        <strong>{match.label}</strong>
-                        <div>
-                            <span>Observed hit <b>{pct(match.hitRate)}</b></span>
-                            <span>Break-even <b>{pct(match.breakEven)}</b></span>
-                            <span>Observed edge <b>+{pct(match.observedEdge).replace('+', '')}</b></span>
-                            <span>Confidence LB <b>{pct(match.lowerBound)}</b></span>
-                        </div>
-                    </div>
-                )}
-
-                <div className='ai-scanner__terminal'>
-                    {logs.length === 0 && phase === 'idle' && (
-                        <div className='ai-scanner__standby'>
-                            STANDBY — scan real Deriv history, price live contracts, then execute only the strongest validated setup.
-                        </div>
-                    )}
-                    {logs.map((line, index) => (
-                        <div
-                            key={index}
-                            className={`ai-scanner__log ${
-                                line.startsWith('[SUCCESS]')
-                                    ? 'ai-scanner__log--ok'
-                                    : line.startsWith('[WARNING]') || line.startsWith('[BLOCKED]')
-                                      ? 'ai-scanner__log--warn'
-                                      : ''
-                            }`}
-                        >
-                            {line}
-                        </div>
-                    ))}
-                </div>
-
-                <div className='ai-scanner__statusbar'>
-                    <span className='ai-scanner__statusbar-tag'>
-                        {scanning ? 'SCANNING' : busy ? 'TRADING' : phase === 'done' ? 'COMPLETE' : 'STANDBY'}
-                    </span>
-                    <span className='ai-scanner__statusbar-text'>{status}</span>
-                </div>
-
-                {busy && fireLog.length > 0 && (
-                    <div className='ai-scanner__firing'>
-                        {fireLog.slice(-8).map((line, index) => (
-                            <div key={index} className='ai-scanner__log'>
+                <div className='ai-scanner__reference-terminal'>
+                    {logs.length ? (
+                        logs.slice(-13).map((line, index) => (
+                            <div
+                                key={`${index}-${line}`}
+                                className={
+                                    line.startsWith('[OK]')
+                                        ? 'ok'
+                                        : line.startsWith('[INFO]')
+                                          ? 'info'
+                                          : line.startsWith('[WARN]')
+                                            ? 'warn'
+                                            : ''
+                                }
+                            >
                                 {line}
                             </div>
-                        ))}
-                        {phase === 'settling' && settle && (
-                            <div className='ai-scanner__settle'>
-                                Waiting for settlement… {settle.settled}/{settle.total}
-                            </div>
-                        )}
-                    </div>
-                )}
+                        ))
+                    ) : (
+                        <div className='muted'>Waiting to scan live Deriv digit patterns…</div>
+                    )}
+                </div>
 
-                {!busy && (
-                    <button
-                        className={`ai-scanner__scan ${scanning ? 'ai-scanner__scan--stop' : ''}`}
-                        onClick={scanning ? stopScan : scan}
-                    >
-                        {scanning ? 'STOP SCANNER' : phase === 'done' ? '⚡ SCAN AGAIN' : '⚡ SCAN FOR BEST MARKET'}
+                <div className='ai-scanner__reference-status'>
+                    <strong>{statusTitle}</strong>
+                    <span>
+                        {phase === 'settling' && settle
+                            ? `Waiting for settlement… ${settle.settled}/${settle.total}`
+                            : statusText}
+                    </span>
+                </div>
+
+                {phase === 'idle' || phase === 'done' ? (
+                    <button className='ai-scanner__reference-start' type='button' onClick={startScan}>
+                        {phase === 'done' ? 'SCAN AGAIN' : 'SCAN FOR BEST MARKET'}
+                    </button>
+                ) : scanning ? (
+                    <button className='ai-scanner__reference-stop' type='button' onClick={stopScan}>
+                        STOP SCANNER
+                    </button>
+                ) : (
+                    <button className='ai-scanner__reference-trading' type='button' disabled>
+                        Trading…
                     </button>
                 )}
 
-                <div className='ai-scanner__foot-note'>
-                    <em>Observed edge is measured, not guaranteed.</em> The scanner compares the recent real digit sample
-                    with the current Deriv proposal break-even and requires the confidence lower bound to stay above the
-                    contract's random baseline before auto-execution.
+                <div className='ai-scanner__reference-note'>
+                    Pattern edge is a live model score from real Deriv ticks, not a guaranteed outcome.
                 </div>
             </div>
 
             {batchResult && (
-                <div className='ai-scanner__batch-overlay' role='dialog' aria-modal='true' onClick={handleClose}>
+                <div className='ai-scanner__batch-overlay' role='dialog' aria-modal='true'>
                     <div
-                        className={`ai-scanner__batch ai-scanner__batch--pop ${
-                            batchResult.total >= 0 ? 'ai-scanner__batch--win' : 'ai-scanner__batch--loss'
+                        className={`ai-scanner__reference-result ${
+                            batchResult.total >= 0 ? 'win' : 'loss'
                         }`}
                         onClick={event => event.stopPropagation()}
                     >
-                        <button className='ai-scanner__batch-close' onClick={handleClose}>
-                            ✕
-                        </button>
-                        <div className='ai-scanner__batch-tag'>Total profit</div>
-                        <div className='ai-scanner__batch-head'>
-                            Scanner batch {batchResult.total >= 0 ? 'won' : 'lost'}
-                        </div>
-                        <div className='ai-scanner__batch-amt'>
+                        <button className='close' type='button' onClick={handleClose}>×</button>
+                        <span className='eyebrow'>TOTAL PROFIT</span>
+                        <h3>Scanner batch {batchResult.total >= 0 ? 'won' : 'lost'}</h3>
+                        <div className='amount'>
                             {batchResult.total >= 0 ? '+' : ''}
                             {batchResult.total.toFixed(2)} {currency}
                         </div>
-                        <div className='ai-scanner__batch-grid'>
-                            <div>
-                                <span>Market</span>
-                                {batchResult.market}
-                            </div>
-                            <div>
-                                <span>Contract</span>
-                                {batchResult.side}
-                            </div>
-                            <div>
-                                <span>Requested / Executed</span>
-                                {batchResult.requested}/{batchResult.executed}
-                            </div>
-                            <div>
-                                <span>Wins</span>
-                                {batchResult.wins}/{batchResult.executed}
-                            </div>
-                            <div>
-                                <span>Observed edge</span>
-                                {batchResult.observedEdge >= 0 ? '+' : ''}
-                                {pct(batchResult.observedEdge)}
-                            </div>
-                            <div>
-                                <span>Measured hit</span>
-                                {pct(batchResult.hitRate)}
-                            </div>
-                            <div>
-                                <span>Break-even</span>
-                                {pct(batchResult.breakEven)}
-                            </div>
+
+                        <div className='result-box'>
+                            <span>MARKET</span>
+                            <b>{batchResult.marketCode}</b>
                         </div>
+                        <div className='result-box'>
+                            <span>CONTRACT</span>
+                            <b>{batchResult.side}</b>
+                        </div>
+                        <div className='result-box'>
+                            <span>TRADES</span>
+                            <b>{batchResult.wins}/{batchResult.requested}</b>
+                            {batchResult.executed !== batchResult.requested && (
+                                <small>Executed {batchResult.executed}/{batchResult.requested}</small>
+                            )}
+                        </div>
+
                         <button
-                            className='ai-scanner__rescan'
+                            className='scan-again'
+                            type='button'
                             onClick={() => {
                                 setBatchResult(null);
-                                scan();
+                                setPhase('idle');
+                                setStatusTitle('STANDBY');
+                                setStatusText('Ready. Tap Scan for Best Market.');
                             }}
                         >
-                            Scan again
+                            SCAN AGAIN
                         </button>
                     </div>
                 </div>
