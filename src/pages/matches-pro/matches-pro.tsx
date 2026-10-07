@@ -113,6 +113,8 @@ const MatchesPro = () => {
     const [auto, setAuto] = React.useState(false);
     const [executionTesting, setExecutionTesting] = React.useState(false);
     const [executionTestResult, setExecutionTestResult] = React.useState('');
+    const [sessionResult, setSessionResult] = React.useState(null);
+    const [sessionStats, setSessionStats] = React.useState({ trades: 0, wins: 0, losses: 0, pnl: 0 });
     const [limits, setLimits] = React.useState(DEFAULT_LIMITS);
     const [day, setDay] = React.useState(() => loadDay('R_100'));
     const [gate, setGate] = React.useState({ allowed: false, reason: 'Auto trade is off' });
@@ -131,6 +133,7 @@ const MatchesPro = () => {
     const proposals_ref = React.useRef(null);
     const payout_by_digit_ref = React.useRef({});
     const last_shadow_fingerprint_ref = React.useRef(null);
+    const session_stats_ref = React.useRef({ trades: 0, wins: 0, losses: 0, pnl: 0 });
 
     payout_ref.current = payout;
     auto_ref.current = auto;
@@ -285,7 +288,7 @@ const MatchesPro = () => {
                 if (!contract_id) throw new Error('Buy did not return a contract');
 
                 open_ref.current.add(contract_id);
-                cooldown_ref.current = Number(limits_ref.current.cooldown_ticks) || 0;
+                cooldown_ref.current = 0;
 
                 const tracker = trackContracts([contract_id], {
                     onContract: contract => {
@@ -303,7 +306,8 @@ const MatchesPro = () => {
                     onDone: ({ profits }) => {
                         const profit = Number(Object.values(profits)[0] ?? 0);
                         open_ref.current.delete(contract_id);
-                        recordTrade(sym, {
+
+                        const updatedDay = recordTrade(sym, {
                             t: Date.now(),
                             contract_id,
                             symbol: sym,
@@ -312,7 +316,36 @@ const MatchesPro = () => {
                             payout: win_payout,
                             profit,
                         });
-                        refreshDay(sym);
+                        setDay(updatedDay);
+
+                        const s = session_stats_ref.current;
+                        s.trades += 1;
+                        s.pnl = Number((s.pnl + profit).toFixed(4));
+                        if (profit > 0) s.wins += 1;
+                        else s.losses += 1;
+                        setSessionStats({ ...s });
+
+                        const tp = Math.abs(Number(limits_ref.current.daily_profit_target) || 0);
+                        const sl = Math.abs(Number(limits_ref.current.daily_loss_limit) || 0);
+                        const hitTp = tp > 0 && s.pnl >= tp;
+                        const hitSl = sl > 0 && s.pnl <= -sl;
+
+                        if (auto_ref.current && (hitTp || hitSl)) {
+                            auto_ref.current = false;
+                            setAuto(false);
+                            setGate({
+                                allowed: false,
+                                reason: hitTp ? 'Take profit reached' : 'Stop loss reached',
+                            });
+                            setSessionResult({
+                                type: hitTp ? 'tp' : 'sl',
+                                pnl: s.pnl,
+                                trades: s.trades,
+                                wins: s.wins,
+                                losses: s.losses,
+                                target: hitTp ? tp : sl,
+                            });
+                        }
                     },
                 });
                 trackers_ref.current.push(tracker);
@@ -533,6 +566,8 @@ const MatchesPro = () => {
                 cooldown_remaining: cooldown_ref.current,
                 evidence: state.total,
                 auto_on: auto_ref.current,
+                session_pl: session_stats_ref.current.pnl,
+                stop_mode: 'targets',
             });
             setGate(decision);
 
@@ -813,6 +848,25 @@ const MatchesPro = () => {
         saveLimits(next);
     };
 
+    const toggleAutoSession = () => {
+        if (auto) {
+            auto_ref.current = false;
+            setAuto(false);
+            setGate({ allowed: false, reason: 'Auto trade stopped by user' });
+            return;
+        }
+
+        const fresh = { trades: 0, wins: 0, losses: 0, pnl: 0 };
+        session_stats_ref.current = fresh;
+        setSessionStats(fresh);
+        setSessionResult(null);
+        setExecutionTestResult('');
+        cooldown_ref.current = 0;
+        auto_ref.current = true;
+        setAuto(true);
+        setGate({ allowed: true, reason: 'Running until take profit or stop loss is reached' });
+    };
+
     const marketLabel = React.useMemo(
         () => symbols.find(s => s.code === symbol)?.label || symbol,
         [symbols, symbol]
@@ -1066,16 +1120,6 @@ const MatchesPro = () => {
                             />
                         </label>
                         <label className='matches-pro__field'>
-                            <span>Maximum trades</span>
-                            <input
-                                type='number'
-                                step='1'
-                                min='1'
-                                value={limits.max_trades}
-                                onChange={e => setLimit('max_trades', e.target.value)}
-                            />
-                        </label>
-                        <label className='matches-pro__field'>
                             <span>Stop after profit</span>
                             <input
                                 type='number'
@@ -1131,30 +1175,54 @@ const MatchesPro = () => {
                         type='button'
                         className={`matches-pro__auto matches-pro__auto--v2 ${auto ? 'on' : ''}`}
                         disabled={!can_arm || executionTesting}
-                        onClick={() => setAuto(v => !v)}
+                        onClick={toggleAutoSession}
                     >
                         {auto ? 'STOP AUTO TRADER' : 'START AUTO TRADER'}
                     </button>
                     <div className={`matches-pro__gate ${gate.allowed ? 'ok' : ''}`}>{gate.reason}</div>
 
                     <div className='matches-pro__truth-grid matches-pro__truth-grid--trading'>
-                        <div><span>Trades today</span><strong>{day.trades.length}</strong></div>
-                        <div><span>Wins / losses</span><strong>{day.wins}/{day.losses}</strong></div>
+                        <div><span>Session trades</span><strong>{sessionStats.trades}</strong></div>
+                        <div><span>Wins / losses</span><strong>{sessionStats.wins}/{sessionStats.losses}</strong></div>
                         <div>
                             <span>Trade hit rate</span>
-                            <strong>{day.trades.length ? `${((day.wins / day.trades.length) * 100).toFixed(1)}%` : '-'}</strong>
+                            <strong>{sessionStats.trades ? `${((sessionStats.wins / sessionStats.trades) * 100).toFixed(1)}%` : '-'}</strong>
                         </div>
                         <div>
                             <span>Session P/L</span>
-                            <strong className={day.pl >= 0 ? 'pos' : 'neg'}>{day.pl >= 0 ? '+' : ''}{day.pl.toFixed(2)} {currency}</strong>
+                            <strong className={sessionStats.pnl >= 0 ? 'pos' : 'neg'}>{sessionStats.pnl >= 0 ? '+' : ''}{sessionStats.pnl.toFixed(2)} {currency}</strong>
                         </div>
                     </div>
 
                     <div className='matches-pro__v2-safety'>
-                        Auto trading remains demo-only while we validate the measured prediction record. The execution layer still blocks real accounts.
+                        Auto trading remains demo-only while validation is active. Once started, Matches Pro keeps taking eligible 1-tick contracts until your Take Profit or Stop Loss is reached.
                     </div>
                 </section>
             </div>
+
+            {sessionResult && (
+                <div className='matches-pro__target-overlay' role='dialog' aria-modal='true'>
+                    <div className={`matches-pro__target-popup ${sessionResult.type}`}>
+                        <button type='button' onClick={() => setSessionResult(null)}>×</button>
+                        <div className='matches-pro__target-kicker'>
+                            {sessionResult.type === 'tp' ? 'TAKE PROFIT REACHED' : 'STOP LOSS REACHED'}
+                        </div>
+                        <h3>
+                            {sessionResult.pnl >= 0 ? '+' : ''}{sessionResult.pnl.toFixed(2)} {currency}
+                        </h3>
+                        <p>
+                            {sessionResult.type === 'tp'
+                                ? `Profit target of ${sessionResult.target.toFixed(2)} ${currency} reached. Auto trading stopped.`
+                                : `Stop loss of ${sessionResult.target.toFixed(2)} ${currency} reached. Auto trading stopped.`}
+                        </p>
+                        <div className='matches-pro__target-stats'>
+                            <span>Trades <b>{sessionResult.trades}</b></span>
+                            <span>Wins <b>{sessionResult.wins}</b></span>
+                            <span>Losses <b>{sessionResult.losses}</b></span>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };
