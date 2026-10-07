@@ -685,7 +685,7 @@ const BulkTrader = observer(() => {
                 </div>
             </div>
 
-            <AiScanner open={scanner_open} onClose={() => setScannerOpen(false)} stake={stake} count={count} currency={currency} isLoggedIn={is_logged_in} maxExposure={max_exposure_num} />
+            <AiScanner open={scanner_open} onClose={() => setScannerOpen(false)} stake={stake} count={count} currency={currency} isLoggedIn={is_logged_in} />
 
             {result && (
                 <div className='bulk-trader__overlay' role='dialog' aria-modal='true'>
