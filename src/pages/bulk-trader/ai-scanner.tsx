@@ -308,7 +308,6 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
         };
 
         const ids = [];
-        const buyMeta = [];
         const maxAttemptsPerSlot = 3;
 
         setFireLog(prev => [...prev, `[EXEC] Opening exactly ${n} contracts…`]);
@@ -388,11 +387,6 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                     }
 
                     ids.push(cid);
-                    buyMeta.push({
-                        contract_id: cid,
-                        slot,
-                        buy_price: Number(buyResponse?.buy?.buy_price ?? amount),
-                    });
                     opened = true;
 
                     if (ids.length === 1) {
