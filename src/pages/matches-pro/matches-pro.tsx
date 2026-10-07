@@ -943,8 +943,16 @@ const MatchesPro = () => {
     const max_pct = Math.max(10, ...distribution.map(d => d.p));
     const current_digit = digits.length ? digits[digits.length - 1] : null;
     const status_text = STATUS_TEXT[status] || STATUS_TEXT[TICK_STATUS.DISCONNECTED];
-    const predicted = prediction?.predictedDigit;
-    const quality = prediction?.signalQuality || 'NO SIGNAL';
+    const liveAutoPick = autoTradeDigit(prediction);
+    const predicted =
+        prediction?.predictedDigit ??
+        (Number(prediction?.agreementTier || 0) >= 2 ? prediction?.candidateDigit : null);
+    const quality =
+        prediction?.predictedDigit !== null && prediction?.predictedDigit !== undefined
+            ? prediction?.signalQuality || 'STRONG'
+            : liveAutoPick !== null
+              ? `${prediction?.agreementTier || 2}-MODEL CONSENSUS`
+              : 'NO SIGNAL';
     const evidence = stats?.summary?.n || 0;
     const unlocked = digits.length >= 250;
     const can_arm = isAuthorized && is_demo && unlocked;
@@ -1269,7 +1277,11 @@ const MatchesPro = () => {
                     <div className='matches-pro__auto-pick'>
                         <span>Current model pick</span>
                         <strong>{predicted ?? '-'}</strong>
-                        <small>{quality === 'NO SIGNAL' ? 'NO TRADE - waiting for a valid prediction' : `${quality} signal`}</small>
+                        <small>
+                            {liveAutoPick === null
+                                ? 'Waiting for at least two independent models to agree'
+                                : `MATCH ${liveAutoPick} · ${quality}`}
+                        </small>
                     </div>
 
                     <div className='matches-pro__locks'>
