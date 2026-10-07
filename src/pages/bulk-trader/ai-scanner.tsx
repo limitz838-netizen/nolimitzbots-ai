@@ -107,7 +107,7 @@ const bestLocalCandidate = digits =>
 
 const pct = value => (Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : '—');
 
-const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn = false, maxExposure = Infinity }) => {
+const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn = false }) => {
     const { run_panel, transactions, summary_card } = useStore();
 
     const [phase, setPhase] = React.useState('idle'); // idle | scanning | firing | settling | done
@@ -141,7 +141,6 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
         count: scannerCount,
         currency,
         isLoggedIn,
-        maxExposure,
     });
 
     cfg_ref.current = {
@@ -149,7 +148,6 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
         count: scannerCount,
         currency,
         isLoggedIn,
-        maxExposure,
     };
 
     const log = line => setLogs(prev => [...prev, line].slice(-80));
@@ -256,7 +254,6 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
             count: ct,
             currency: cur,
             isLoggedIn: li,
-            maxExposure: maxExp,
         } = cfg_ref.current;
 
         if (!li || !api_base?.api) {
@@ -268,16 +265,11 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
         const n = Math.max(1, Math.min(20, parseInt(ct, 10) || 5));
         const amount = Math.max(0.35, parseFloat(st) || 0.5);
         const exposure = amount * n;
-        const exposureLimit = Number(maxExp);
 
-        if (Number.isFinite(exposureLimit) && exposure > exposureLimit + 1e-9) {
-            setPhase('done');
-            setStatus(
-                `Best setup found, but batch blocked: ${cur} ${exposure.toFixed(2)} exposure exceeds your ${cur} ${exposureLimit.toFixed(2)} limit.`
-            );
-            log(`[BLOCKED] Exposure ${cur} ${exposure.toFixed(2)} > limit ${cur} ${exposureLimit.toFixed(2)}.`);
-            return;
-        }
+        // Scanner mode intentionally uses the user's selected stake × bulk-trade
+        // count as the batch size. The manual Bulk Trader's separate exposure
+        // ceiling must not silently block scanner execution.
+        log(`[READY] Batch total ${cur} ${exposure.toFixed(2)} · ${n} contracts × ${cur} ${amount.toFixed(2)}.`);
 
         unlockAudio();
         try {
@@ -291,7 +283,7 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
         setPhase('firing');
         setFireLog([]);
         setStatus(
-            `BEST MARKET FOUND · ${candidate.market.label} · ${candidate.label} · edge ${pct(candidate.observedEdge)}`
+            `BEST MARKET FOUND · ${candidate.market.label} · ${candidate.label} · placing ${n} contracts…`
         );
 
         const proposalReq = {
@@ -744,7 +736,7 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                         />
                     </label>
                     <div>
-                        <span>Exposure</span>
+                        <span>Batch total</span>
                         <strong>
                             {currency}{' '}
                             {(
