@@ -654,7 +654,7 @@ const NolimitzAI = observer(() => {
         return won;
     };
 
-    const stopRun = (reason, r) => {
+    const stopRun = (reason, r, stopType = null) => {
         if (!r) return;
         r.active = false;
         run_ref.current = null;
@@ -673,7 +673,7 @@ const NolimitzAI = observer(() => {
             const won = r.pnl >= 0;
             if (won) playWin();
             else playLoss();
-            setResult({ reason, pnl: r.pnl, trades: r.trades, wins: r.wins, losses: r.losses });
+            setResult({ reason, type: stopType, pnl: r.pnl, trades: r.trades, wins: r.wins, losses: r.losses });
             journalLog(
                 'Nolimitz AI stopped · ' +
                     reason +
@@ -813,12 +813,12 @@ const NolimitzAI = observer(() => {
 
         while (r.active) {
             if (tpValue > 0 && r.pnl >= tpValue) {
-                stopRun('Profit target reached', r);
+                stopRun('Take profit reached', r, 'tp');
                 return;
             }
 
             if (slValue > 0 && r.pnl <= -slValue) {
-                stopRun('Maximum loss reached', r);
+                stopRun('Stop loss reached', r, 'sl');
                 return;
             }
 
@@ -831,7 +831,7 @@ const NolimitzAI = observer(() => {
                     breakeven: null,
                     required: null,
                 });
-                await new Promise(res => setTimeout(res, 800));
+                await new Promise(res => setTimeout(res, 250));
                 continue;
             }
 
@@ -848,7 +848,7 @@ const NolimitzAI = observer(() => {
                     breakeven: null,
                     required: null,
                 });
-                await new Promise(res => setTimeout(res, 800));
+                await new Promise(res => setTimeout(res, 250));
                 continue;
             }
 
@@ -868,7 +868,7 @@ const NolimitzAI = observer(() => {
                     breakeven: null,
                     required: null,
                 });
-                await new Promise(res => setTimeout(res, 800));
+                await new Promise(res => setTimeout(res, 250));
                 continue;
             }
 
@@ -879,7 +879,7 @@ const NolimitzAI = observer(() => {
                     breakeven: null,
                     required: null,
                 });
-                await new Promise(res => setTimeout(res, 800));
+                await new Promise(res => setTimeout(res, 250));
                 continue;
             }
 
@@ -901,7 +901,7 @@ const NolimitzAI = observer(() => {
                         breakeven: prepared.breakeven,
                         required,
                     });
-                    await new Promise(res => setTimeout(res, 1000));
+                    await new Promise(res => setTimeout(res, 500));
                     continue;
                 }
 
@@ -929,7 +929,7 @@ const NolimitzAI = observer(() => {
                         liveSpec.label +
                         ' · no real contract executed.'
                     );
-                    await new Promise(res => setTimeout(res, 1200));
+                    await new Promise(res => setTimeout(res, 350));
                     continue;
                 }
 
@@ -985,20 +985,26 @@ const NolimitzAI = observer(() => {
                 }
 
                 applyTradeResult(r, profit, baseStake, multiplier, maxSteps);
+
+                if (tpValue > 0 && r.pnl >= tpValue) {
+                    stopRun('Take profit reached', r, 'tp');
+                    return;
+                }
+                if (slValue > 0 && r.pnl <= -slValue) {
+                    stopRun('Stop loss reached', r, 'sl');
+                    return;
+                }
             } catch (e) {
                 const message = describeError(e);
                 log('Trade error · ' + message);
                 journalLog('Nolimitz AI trade error · ' + message, MessageTypes.ERROR);
-                await new Promise(res => setTimeout(res, 1500));
+                await new Promise(res => setTimeout(res, 600));
             }
 
-            await new Promise(
-                res =>
-                    setTimeout(
-                        res,
-                        risk === 'high' ? 450 : risk === 'medium' ? 800 : 1200
-                    )
-            );
+            // Contract duration is already the minimum 1 tick. Re-check the
+            // next eligible setup almost immediately after settlement instead of
+            // sleeping for up to 1.2s.
+            await new Promise(res => setTimeout(res, risk === 'low' ? 220 : 120));
         }
     };
 
@@ -1288,7 +1294,7 @@ const NolimitzAI = observer(() => {
                         disabled={!is_logged_in || executionTesting}
                         onClick={running ? stop : start}
                     >
-                        {running ? '■ STOP NOLIMITZ AI' : '⚡ RUN NOLIMITZ AI'}
+                        {running ? '■ STOP NOLIMITZ AI' : '⚡ RUN UNTIL TP / SL'}
                     </button>
                 </section>
 
@@ -1349,8 +1355,21 @@ const NolimitzAI = observer(() => {
                 <div className='nolimitz-ai__overlay'>
                     <div className={`nolimitz-ai__result ${result.pnl >= 0 ? 'win' : 'loss'}`}>
                         <button onClick={() => setResult(null)}>×</button>
-                        <small>{result.reason}</small>
+                        <small>
+                            {result.type === 'tp'
+                                ? 'TAKE PROFIT REACHED'
+                                : result.type === 'sl'
+                                  ? 'STOP LOSS REACHED'
+                                  : result.reason}
+                        </small>
                         <h3>{result.pnl >= 0 ? '+' : ''}{result.pnl.toFixed(2)} {currency}</h3>
+                        {(result.type === 'tp' || result.type === 'sl') && (
+                            <p className='nolimitz-ai__target-message'>
+                                {result.type === 'tp'
+                                    ? 'Profit target reached. Nolimitz AI stopped the session automatically.'
+                                    : 'Stop loss reached. Nolimitz AI stopped the session automatically.'}
+                            </p>
+                        )}
                         <div>
                             <span>Trades <b>{result.trades}</b></span>
                             <span>Wins <b>{result.wins}</b></span>
