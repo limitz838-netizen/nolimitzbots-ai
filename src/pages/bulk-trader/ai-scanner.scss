@@ -372,3 +372,244 @@
         em { color: #a7d3bf; font-style: normal; font-weight: 700; }
     }
 }
+
+
+/* ===== Measured live market matrix ===== */
+.ai-scanner {
+    max-width: 720px;
+
+    &__metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: .55rem;
+        margin-bottom: 1rem;
+
+        > div {
+            min-width: 0;
+            padding: .7rem .55rem;
+            border: 1px solid rgba(22, 240, 138, .18);
+            border-radius: .75rem;
+            background: rgba(22, 240, 138, .035);
+            text-align: center;
+
+            span {
+                display: block;
+                color: #638b78;
+                font-size: .72rem;
+                text-transform: uppercase;
+                letter-spacing: .09em;
+            }
+
+            strong {
+                display: block;
+                margin-top: .22rem;
+                color: #d9fff0;
+                font-size: .95rem;
+                font-variant-numeric: tabular-nums;
+            }
+        }
+    }
+
+    &__markets--matrix {
+        grid-template-columns: 1fr 1fr;
+        align-items: stretch;
+    }
+
+    &__mkt {
+        min-width: 0;
+        padding: .75rem;
+    }
+
+    &__mkt-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: .4rem;
+    }
+
+    &__mkt-sample {
+        color: #4e7665;
+        font-size: .7rem;
+        white-space: nowrap;
+    }
+
+    &__mkt-contract {
+        margin: .45rem 0 .5rem;
+        color: #eefdf7;
+        font-size: 1rem;
+        font-weight: 800;
+        letter-spacing: .05em;
+    }
+
+    &__mkt-stats {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: .28rem;
+
+        span {
+            min-width: 0;
+            padding: .38rem .2rem;
+            border-radius: .45rem;
+            background: rgba(255,255,255,.025);
+            color: #527362;
+            font-size: .63rem;
+            text-align: center;
+
+            b {
+                display: block;
+                margin-top: .12rem;
+                overflow: hidden;
+                color: #d8eee4;
+                font-size: .72rem;
+                font-variant-numeric: tabular-nums;
+                text-overflow: ellipsis;
+
+                &.pos { color: #35e9a1; }
+                &.neg { color: #f87171; }
+            }
+        }
+    }
+
+    &__mkt-digits {
+        display: flex;
+        gap: .25rem;
+        margin-top: .55rem;
+
+        i {
+            width: 1.45rem;
+            height: 1.45rem;
+            display: grid;
+            place-items: center;
+            border-radius: .35rem;
+            background: rgba(22, 240, 138, .08);
+            color: #77b99d;
+            font-style: normal;
+            font-size: .7rem;
+        }
+    }
+
+    &__mkt--hit {
+        border-color: rgba(22, 240, 138, .9);
+        background: linear-gradient(145deg, rgba(22,240,138,.13), rgba(4,21,12,.92));
+        box-shadow: 0 0 18px rgba(22, 240, 138, .2);
+
+        .ai-scanner__mkt-contract {
+            color: #16f08a;
+        }
+    }
+
+    &__mkt--match {
+        animation: nlb-best-market 1.2s ease-in-out infinite alternate;
+    }
+
+    &__best {
+        margin: .2rem 0 1rem;
+        padding: 1.15rem;
+        border: 1px solid rgba(22, 240, 138, .65);
+        border-radius: 1rem;
+        background:
+            radial-gradient(circle at 50% 0%, rgba(22,240,138,.14), transparent 70%),
+            #020d07;
+        text-align: center;
+
+        > span {
+            color: #16f08a;
+            font-size: .75rem;
+            font-weight: 900;
+            letter-spacing: .16em;
+        }
+
+        h3 {
+            margin: .35rem 0 .15rem;
+            color: #f0fff8;
+            font-size: 1.3rem;
+        }
+
+        > strong {
+            display: block;
+            color: #16f08a;
+            font-size: 1.55rem;
+        }
+
+        > div {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: .45rem;
+            margin-top: .8rem;
+
+            span {
+                padding: .55rem;
+                border-radius: .6rem;
+                background: rgba(255,255,255,.035);
+                color: #6c8a7b;
+                font-size: .72rem;
+
+                b {
+                    display: block;
+                    margin-top: .18rem;
+                    color: #dff9ec;
+                    font-size: .9rem;
+                }
+
+                &:nth-child(3) b {
+                    color: #16f08a;
+                }
+            }
+        }
+    }
+
+    &__batch-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+
+        div {
+            min-width: 0;
+            word-break: break-word;
+        }
+    }
+}
+
+@media (max-width: 560px) {
+    .ai-scanner {
+        padding: 1rem;
+        max-height: 92vh;
+
+        &__title {
+            padding-right: 3.2rem;
+            font-size: 1.25rem;
+        }
+
+        &__subtitle {
+            font-size: .95rem;
+        }
+
+        &__metrics {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        &__markets--matrix {
+            grid-template-columns: 1fr;
+        }
+
+        &__mkt {
+            display: block;
+        }
+
+        &__mkt-stats {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        &__terminal {
+            min-height: 7rem;
+            max-height: 11rem;
+        }
+
+        &__best > div {
+            grid-template-columns: 1fr 1fr;
+        }
+    }
+}
+
+@keyframes nlb-best-market {
+    from { box-shadow: 0 0 10px rgba(22, 240, 138, .18); }
+    to { box-shadow: 0 0 28px rgba(22, 240, 138, .42); }
+}
