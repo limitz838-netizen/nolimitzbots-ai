@@ -299,9 +299,7 @@ const BulkTrader = observer(() => {
                 ? 'Not signed in to Deriv.'
                 : !api_base?.api
                   ? 'Trading connection is not ready yet. Wait a moment and try again.'
-                  : api_base?.is_authorized === false
-                    ? 'Deriv account is visible, but the trading WebSocket is not authorized yet. Refresh or switch accounts and try again.'
-                    : is_busy
+                  : is_busy
                       ? 'A batch is already being prepared.'
                       : !!settling
                         ? 'The previous batch is still settling.'
@@ -457,7 +455,7 @@ const BulkTrader = observer(() => {
                 )}
                 {is_logged_in && (
                     <div className='bulk-trader__connection'>
-                        Trading API: <b>{api_base?.is_authorized ? 'READY' : 'AUTHORIZING'}</b>
+                        Trading API: <b>{api_base?.api ? (api_base?.is_authorized ? 'READY' : 'CONNECTED') : 'CONNECTING'}</b>
                     </div>
                 )}
 
