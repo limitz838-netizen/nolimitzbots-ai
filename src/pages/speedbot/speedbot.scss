@@ -776,6 +776,14 @@
         backdrop-filter: blur(8px);
     }
 
+    &__target-message {
+        margin: -.25rem auto 1rem;
+        max-width: 320px;
+        color: #9f9892;
+        font-size: .9rem;
+        line-height: 1.45;
+    }
+
     &__result {
         position: relative;
         width: min(420px, 100%);
