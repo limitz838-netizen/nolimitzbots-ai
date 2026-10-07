@@ -95,8 +95,10 @@ export const trackContracts = (contract_ids, { onUpdate, onDone, onContract, tim
         /* stream unavailable — poll will cover it */
     }
 
-    // Fallback: actively poll any still-pending contracts. Covers missed stream messages.
-    poll = setInterval(() => {
+    // Fallback: actively poll any still-pending contracts. Covers missed stream
+    // messages, especially very fast 1-tick contracts that can settle before the
+    // shared proposal_open_contract stream delivers their first update.
+    const pollPending = () => {
         if (pending.size === 0) return;
         pending.forEach(id => {
             try {
@@ -107,7 +109,12 @@ export const trackContracts = (contract_ids, { onUpdate, onDone, onContract, tim
                 /* noop */
             }
         });
-    }, 3000);
+    };
+
+    // Do one near-immediate read, then continue at a moderate cadence so Bot
+    // Builder/Summary mirrors fast contracts without hammering the API.
+    setTimeout(pollPending, 250);
+    poll = setInterval(pollPending, 1500);
 
     // Safety net: never hang forever. Unsettled contracts are reported as-is.
     timeout = setTimeout(finalize, timeoutMs);
