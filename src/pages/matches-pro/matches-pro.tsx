@@ -111,6 +111,8 @@ const MatchesPro = () => {
     const [analyse_stats, setAnalyseStats] = React.useState(null);
 
     const [auto, setAuto] = React.useState(false);
+    const [executionTesting, setExecutionTesting] = React.useState(false);
+    const [executionTestResult, setExecutionTestResult] = React.useState('');
     const [limits, setLimits] = React.useState(DEFAULT_LIMITS);
     const [day, setDay] = React.useState(() => loadDay('R_100'));
     const [gate, setGate] = React.useState({ allowed: false, reason: 'Auto trade is off' });
@@ -323,6 +325,126 @@ const MatchesPro = () => {
         },
         [currency, refreshDay, transactions, summary_card]
     );
+
+
+    const testDemoExecution = React.useCallback(async () => {
+        if (executionTesting) return;
+
+        if (!isAuthorized) {
+            setExecutionTestResult('TEST FAILED — Deriv trading connection is not authorized.');
+            return;
+        }
+        if (!is_demo) {
+            setExecutionTestResult('TEST BLOCKED — switch to a Deriv demo account.');
+            return;
+        }
+        if (!api_base?.api) {
+            setExecutionTestResult('TEST FAILED — trading connection is not ready yet.');
+            return;
+        }
+
+        const testDigit =
+            prediction?.candidateDigit ??
+            (digits_ref.current.length ? digits_ref.current[digits_ref.current.length - 1] : null);
+
+        if (testDigit === null || testDigit === undefined) {
+            setExecutionTestResult('TEST FAILED — waiting for a live digit first.');
+            return;
+        }
+
+        const stake = Math.max(0.35, Number(limits_ref.current.stake) || 0.35);
+        setExecutionTesting(true);
+        setExecutionTestResult('Preparing one live demo DIGITMATCH proposal…');
+        setError('');
+
+        try {
+            run_panel.run_id = 'matches-pro-test-' + Date.now();
+            summary_card?.clear?.();
+            run_panel?.setIsRunning?.(true);
+            run_panel?.toggleDrawer?.(true);
+
+            const response = await api_base.api.send({
+                proposal: 1,
+                amount: stake,
+                basis: 'stake',
+                contract_type: 'DIGITMATCH',
+                currency,
+                duration: 1,
+                duration_unit: 't',
+                underlying_symbol: symbol,
+                barrier: String(testDigit),
+            });
+
+            const proposal = response?.proposal;
+            if (!proposal?.id) throw new Error('No proposal returned');
+
+            setExecutionTestResult('Proposal accepted. Sending one demo buy…');
+
+            const bought = await api_base.api.send({
+                buy: proposal.id,
+                price: Number(proposal.ask_price),
+            });
+
+            const contract_id = bought?.buy?.contract_id;
+            if (!contract_id) throw new Error('Buy did not return a contract');
+
+            setExecutionTestResult('BOUGHT demo contract ' + contract_id + ' · waiting for settlement.');
+
+            const tracker = trackContracts([contract_id], {
+                timeoutMs: 60000,
+                onContract: contract => {
+                    try {
+                        transactions?.onBotContractEvent?.(contract);
+                        summary_card?.onBotContractEvent?.(contract);
+                        run_panel?.onBotContractEvent?.(contract);
+                    } catch {
+                        /* display mirroring must never interrupt execution */
+                    }
+                },
+                onDone: ({ profits, settled }) => {
+                    const profit = Number(Object.values(profits)[0] ?? 0);
+                    setExecutionTestResult(
+                        settled > 0
+                            ? 'TEST PASSED — contract settled ' +
+                              (profit >= 0 ? '+' : '') +
+                              profit.toFixed(2) +
+                              ' ' +
+                              currency +
+                              '. Normal Matches Pro evidence gates remain unchanged.'
+                            : 'TEST FAILED — contract did not settle before timeout.'
+                    );
+                    setExecutionTesting(false);
+                    try {
+                        run_panel?.setIsRunning?.(false);
+                    } catch {
+                        /* noop */
+                    }
+                },
+            });
+
+            trackers_ref.current.push(tracker);
+        } catch (e) {
+            const message = describeError(e);
+            setExecutionTestResult('TEST FAILED — ' + message);
+            setError(message);
+            setExecutionTesting(false);
+            try {
+                run_panel?.setIsRunning?.(false);
+            } catch {
+                /* noop */
+            }
+        }
+    }, [
+        executionTesting,
+        isAuthorized,
+        is_demo,
+        prediction,
+        currency,
+        symbol,
+        run_panel,
+        transactions,
+        summary_card,
+    ]);
 
     // ------------------------------------------------------------- per tick
     const step = React.useCallback(
@@ -992,6 +1114,18 @@ const MatchesPro = () => {
                             Verified evidence {evidence}/{MIN_EVIDENCE}
                         </div>
                     </div>
+
+                    <button
+                        type='button'
+                        className='matches-pro__auto matches-pro__auto--v2 matches-pro__auto--test'
+                        disabled={!isAuthorized || !is_demo || executionTesting || auto}
+                        onClick={testDemoExecution}
+                    >
+                        {executionTesting ? 'TESTING DEMO EXECUTION…' : 'TEST 1 DEMO MATCH CONTRACT'}
+                    </button>
+                    {executionTestResult && (
+                        <div className='matches-pro__gate'>{executionTestResult}</div>
+                    )}
 
                     <button
                         type='button'
