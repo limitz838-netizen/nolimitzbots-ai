@@ -84,6 +84,24 @@ const FLOOR_RATE = {
 const pct = v => `${(v * 100).toFixed(2)}%`;
 const clockOf = ts => new Date(ts).toLocaleTimeString('en-GB');
 
+const autoTradeDigit = prediction => {
+    if (!prediction) return null;
+    if (prediction.predictedDigit !== null && prediction.predictedDigit !== undefined) {
+        return prediction.predictedDigit;
+    }
+    // Demo auto mode may use the live consensus candidate before the slower
+    // long-run fingerprint calibration unlocks. This is still model-derived:
+    // at least two independent Matches models must agree on the same digit.
+    if (
+        prediction.candidateDigit !== null &&
+        prediction.candidateDigit !== undefined &&
+        Number(prediction.agreementTier || 0) >= 2
+    ) {
+        return prediction.candidateDigit;
+    }
+    return null;
+};
+
 const MatchesPro = () => {
     const { isAuthorized, accountList, activeLoginid } = useApiBase();
     const { run_panel, transactions, summary_card } = useStore();
@@ -244,61 +262,125 @@ const MatchesPro = () => {
     // ------------------------------------------------------------- execution
     const fireTrade = React.useCallback(
         async (sym, digit) => {
-            if (firing_ref.current) return;
+            if (firing_ref.current || open_ref.current.size > 0) return;
+            if (!api_base?.api) {
+                setError('Deriv trading connection is not ready yet.');
+                return;
+            }
+
             firing_ref.current = true;
+            setError('');
+
             try {
-                const stake = Number(limits_ref.current.stake);
+                const stake = Math.max(0.35, Number(limits_ref.current.stake) || 0.35);
+                let bought = null;
+                let win_payout = 0;
+                let lastError = null;
 
-                // Fast path: a subscribed proposal for this digit is already
-                // priced, so the buy goes out immediately.
-                let live = null;
-                try {
-                    live = proposals_ref.current?.get?.(digit) || null;
-                } catch {
-                    live = null;
+                // Attempt 1 uses the live subscribed quote for speed.
+                // Attempt 2 always requests a fresh proposal so an expired
+                // stream proposal can never leave the auto trader stuck.
+                for (let attempt = 1; attempt <= 2 && !bought?.buy?.contract_id; attempt += 1) {
+                    try {
+                        let live = null;
+
+                        if (attempt === 1) {
+                            try {
+                                live = proposals_ref.current?.get?.(digit) || null;
+                            } catch {
+                                live = null;
+                            }
+                        }
+
+                        if (!live) {
+                            const proposalResponse = await api_base.api.send({
+                                proposal: 1,
+                                amount: stake,
+                                basis: 'stake',
+                                contract_type: 'DIGITMATCH',
+                                currency,
+                                duration: 1,
+                                duration_unit: 't',
+                                underlying_symbol: sym,
+                                barrier: String(digit),
+                            });
+
+                            if (proposalResponse?.error) {
+                                throw new Error(
+                                    proposalResponse.error.message ||
+                                        proposalResponse.error.code ||
+                                        'Proposal rejected'
+                                );
+                            }
+
+                            const proposal = proposalResponse?.proposal;
+                            if (!proposal?.id) throw new Error('No proposal returned');
+
+                            live = {
+                                id: proposal.id,
+                                ask: Number(proposal.ask_price),
+                                payout: Number(proposal.payout),
+                            };
+                        }
+
+                        const ask = Number(live.ask);
+                        win_payout = Number(live.payout);
+                        if (!(ask > 0)) throw new Error('Invalid proposal price');
+
+                        if (ask > 0 && win_payout > 0) {
+                            setPayout(Number((win_payout / ask).toFixed(3)));
+                        }
+
+                        const response = await api_base.api.send({
+                            buy: live.id,
+                            price: ask,
+                            passthrough: {
+                                nolimitz_source: 'matches-pro',
+                                predicted_digit: digit,
+                            },
+                        });
+
+                        if (response?.error) {
+                            throw new Error(response.error.message || response.error.code || 'Buy rejected');
+                        }
+
+                        if (!response?.buy?.contract_id) {
+                            throw new Error('Buy did not return a contract');
+                        }
+
+                        bought = response;
+                    } catch (attemptError) {
+                        lastError = attemptError;
+                        if (attempt < 2) await new Promise(resolve => window.setTimeout(resolve, 120));
+                    }
                 }
 
-                if (!live) {
-                    const proposal = await api_base.api.send({
-                        proposal: 1,
-                        amount: stake,
-                        basis: 'stake',
-                        contract_type: 'DIGITMATCH',
-                        currency,
-                        duration: 1,
-                        duration_unit: 't',
-                        underlying_symbol: sym,
-                        barrier: String(digit),
-                    });
-                    if (!proposal?.proposal?.id) throw new Error('No proposal returned');
-                    live = {
-                        id: proposal.proposal.id,
-                        ask: Number(proposal.proposal.ask_price),
-                        payout: Number(proposal.proposal.payout),
-                    };
-                }
-
-                const id = live.id;
-                const ask = live.ask;
-                const win_payout = live.payout;
-                if (ask > 0 && win_payout > 0) setPayout(Number((win_payout / ask).toFixed(3)));
-
-                const bought = await api_base.api.send({ buy: id, price: ask });
                 const contract_id = bought?.buy?.contract_id;
-                if (!contract_id) throw new Error('Buy did not return a contract');
+                if (!contract_id) throw lastError || new Error('Unable to buy Matches contract');
 
                 open_ref.current.add(contract_id);
                 cooldown_ref.current = 0;
 
+                try {
+                    run_panel?.setIsRunning?.(true);
+                    run_panel?.setHasOpenContract?.(true);
+                    run_panel?.toggleDrawer?.(true);
+                } catch {
+                    /* Bot Builder mirror is best-effort only */
+                }
+
+                setGate({
+                    allowed: true,
+                    reason: `Bought MATCH ${digit} · contract ${contract_id} · waiting for settlement`,
+                });
+
                 const tracker = trackContracts([contract_id], {
+                    timeoutMs: 60000,
                     onContract: contract => {
-                        // Matches Pro lives outside the Bot Builder route. Mirror every
-                        // open-contract update into the same stores used by Bot Builder,
-                        // so Summary and Transactions stay live even if its event
-                        // listeners are not mounted on this route.
                         try {
                             transactions?.onBotContractEvent?.(contract);
                             summary_card?.onBotContractEvent?.(contract);
+                            run_panel?.onBotContractEvent?.(contract);
                         } catch {
                             /* display mirroring must never interrupt execution */
                         }
@@ -306,6 +388,12 @@ const MatchesPro = () => {
                     onDone: ({ profits }) => {
                         const profit = Number(Object.values(profits)[0] ?? 0);
                         open_ref.current.delete(contract_id);
+
+                        try {
+                            run_panel?.setHasOpenContract?.(open_ref.current.size > 0);
+                        } catch {
+                            /* noop */
+                        }
 
                         const updatedDay = recordTrade(sym, {
                             t: Date.now(),
@@ -345,18 +433,25 @@ const MatchesPro = () => {
                                 losses: s.losses,
                                 target: hitTp ? tp : sl,
                             });
+                        } else if (auto_ref.current) {
+                            setGate({
+                                allowed: true,
+                                reason: 'Contract settled. Waiting for the next live model consensus…',
+                            });
                         }
                     },
                 });
                 trackers_ref.current.push(tracker);
             } catch (e) {
-                setError(describeError(e));
-                cooldown_ref.current = Math.max(cooldown_ref.current, 5);
+                const message = describeError(e);
+                setError(message);
+                setGate({ allowed: false, reason: `Buy failed: ${message}` });
+                cooldown_ref.current = Math.max(cooldown_ref.current, 1);
             } finally {
                 firing_ref.current = false;
             }
         },
-        [currency, refreshDay, transactions, summary_card]
+        [currency, transactions, summary_card, run_panel]
     );
 
 
@@ -556,23 +651,35 @@ const MatchesPro = () => {
             const current_day = loadDay(sym);
             setDay(current_day);
 
+            const liveDigit = autoTradeDigit(next);
+            const autoQuality = liveDigit !== null ? 'MEDIUM' : 'NO SIGNAL';
+
             const decision = evaluate({
                 limits: limits_ref.current,
                 day: current_day,
-                quality: next.signalQuality,
+                quality: autoQuality,
                 is_authorized: isAuthorized,
                 loginid: activeLoginid,
                 open_count: open_ref.current.size,
                 cooldown_remaining: cooldown_ref.current,
                 evidence: state.total,
+                min_evidence: auto_ref.current ? 0 : MIN_EVIDENCE,
                 auto_on: auto_ref.current,
                 session_pl: session_stats_ref.current.pnl,
                 stop_mode: 'targets',
             });
-            setGate(decision);
 
-            if (decision.allowed && next.predictedDigit !== null) {
-                fireTrade(sym, next.predictedDigit);
+            if (auto_ref.current && liveDigit === null) {
+                setGate({
+                    allowed: false,
+                    reason: 'Waiting for at least two independent Matches models to agree on one digit…',
+                });
+            } else {
+                setGate(decision);
+            }
+
+            if (decision.allowed && liveDigit !== null) {
+                fireTrade(sym, liveDigit);
             }
         },
         [refreshStats, isAuthorized, activeLoginid, fireTrade, calibratePrediction]
@@ -839,7 +946,7 @@ const MatchesPro = () => {
     const predicted = prediction?.predictedDigit;
     const quality = prediction?.signalQuality || 'NO SIGNAL';
     const evidence = stats?.summary?.n || 0;
-    const unlocked = evidence >= MIN_EVIDENCE;
+    const unlocked = digits.length >= 250;
     const can_arm = isAuthorized && is_demo && unlocked;
 
     const setLimit = (key, value) => {
@@ -864,7 +971,25 @@ const MatchesPro = () => {
         cooldown_ref.current = 0;
         auto_ref.current = true;
         setAuto(true);
-        setGate({ allowed: true, reason: 'Running until take profit or stop loss is reached' });
+
+        const livePrediction = predict(digits_ref.current, {
+            payout: payout_ref.current,
+            payoutByDigit: payout_by_digit_ref.current,
+        });
+        const firstDigit = autoTradeDigit(livePrediction);
+
+        if (firstDigit !== null) {
+            setGate({
+                allowed: true,
+                reason: `Starting Matches Auto Trader · buying MATCH ${firstDigit}…`,
+            });
+            fireTrade(symbol_ref.current, firstDigit);
+        } else {
+            setGate({
+                allowed: false,
+                reason: 'Auto trader started. Waiting for at least two independent Matches models to agree…',
+            });
+        }
     };
 
     const marketLabel = React.useMemo(
@@ -1155,7 +1280,7 @@ const MatchesPro = () => {
                             {is_demo ? 'Demo execution enabled' : 'Demo account required'}
                         </div>
                         <div className={`matches-pro__lock ${unlocked ? 'ok' : 'bad'}`}>
-                            Verified evidence {evidence}/{MIN_EVIDENCE}
+                            {unlocked ? `Live model ready · ${digits.length} ticks` : `Loading model · ${digits.length}/250 ticks`}
                         </div>
                     </div>
 
@@ -1195,7 +1320,7 @@ const MatchesPro = () => {
                     </div>
 
                     <div className='matches-pro__v2-safety'>
-                        Auto trading remains demo-only while validation is active. Once started, Matches Pro keeps taking eligible 1-tick contracts until your Take Profit or Stop Loss is reached.
+                        Demo auto trading starts from the live Matches consensus model immediately. It keeps one 1-tick DIGITMATCH contract open at a time and continues until your Take Profit or Stop Loss is reached.
                     </div>
                 </section>
             </div>
