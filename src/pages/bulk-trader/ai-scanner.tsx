@@ -107,6 +107,16 @@ const bestLocalCandidate = digits =>
 
 const pct = value => (Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : '—');
 
+const withTimeout = (promise, ms, label) =>
+    Promise.race([
+        Promise.resolve(promise),
+        new Promise((_, reject) =>
+            window.setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms)
+        ),
+    ]);
+
+const sleep = ms => new Promise(resolve => window.setTimeout(resolve, ms));
+
 const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn = false }) => {
     const { run_panel, transactions, summary_card } = useStore();
 
@@ -274,7 +284,6 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
         unlockAudio();
         try {
             run_panel.run_id = `bulk-scanner-${Date.now()}`;
-            run_panel?.setIsRunning?.(true);
             run_panel?.toggleDrawer?.(true);
         } catch {
             /* run panel unavailable */
@@ -298,29 +307,63 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
             barrier: String(candidate.barrier),
         };
 
-        const proposalResults = await Promise.allSettled(
-            Array.from({ length: n }, () => api_base.api.send(proposalReq))
-        );
+        const prepared = [];
+        setFireLog(prev => [...prev, `[PREP] Preparing ${n} live Deriv proposals…`]);
 
-        const prepared = proposalResults.map((result, index) => {
-            if (result.status !== 'fulfilled') {
-                return { index, error: describeError(result.reason) };
+        // Prepare proposals individually. Sending many identical proposal requests
+        // in the exact same event-loop turn can leave one unresolved on some
+        // mobile/WebSocket sessions. A tiny stagger plus a hard timeout makes the
+        // batch deterministic while the eventual buys still launch together.
+        for (let index = 0; index < n; index += 1) {
+            try {
+                setStatus(
+                    `BEST MARKET FOUND · ${candidate.market.label} · ${candidate.label} · preparing ${index + 1}/${n}…`
+                );
+
+                const response = await withTimeout(
+                    api_base.api.send({
+                        ...proposalReq,
+                        passthrough: {
+                            nolimitz_batch: run_panel?.run_id || 'bulk-scanner',
+                            slot: index + 1,
+                        },
+                    }),
+                    5000,
+                    `Proposal #${index + 1}`
+                );
+
+                if (response?.error) {
+                    throw new Error(response.error.message || response.error.code || 'Proposal rejected');
+                }
+
+                const proposal = response?.proposal;
+                if (!proposal?.id) {
+                    throw new Error('No proposal returned');
+                }
+
+                prepared.push({
+                    index,
+                    proposal_id: proposal.id,
+                    ask_price: Number(proposal.ask_price ?? amount),
+                });
+
+                setFireLog(prev => [
+                    ...prev,
+                    `[READY] #${index + 1} proposal · payout ${cur} ${Number(proposal.payout ?? 0).toFixed(2)}`,
+                ]);
+            } catch (error) {
+                setFireLog(prev => [
+                    ...prev,
+                    `[FAIL] #${index + 1} proposal — ${describeError(error)}`,
+                ]);
             }
-            const proposal = result.value?.proposal;
-            if (!proposal?.id) return { index, error: 'No proposal returned' };
-            return {
-                index,
-                proposal_id: proposal.id,
-                ask_price: Number(proposal.ask_price ?? amount),
-            };
-        });
 
-        const ready = prepared.filter(item => !item.error);
-        const failures = prepared.filter(item => item.error);
+            if (index < n - 1) {
+                await sleep(80);
+            }
+        }
 
-        failures.forEach(item =>
-            setFireLog(prev => [...prev, `[FAIL] #${item.index + 1} proposal — ${item.error}`])
-        );
+        const ready = prepared;
 
         if (!ready.length) {
             setPhase('done');
@@ -333,9 +376,27 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
             return;
         }
 
+        setStatus(
+            `BEST MARKET FOUND · ${candidate.market.label} · ${candidate.label} · buying ${ready.length} contracts now…`
+        );
+        setFireLog(prev => [...prev, `[EXEC] Dispatching ${ready.length} buys together…`]);
+
         const launchedAt = performance.now();
         const buyResults = await Promise.allSettled(
-            ready.map(item => api_base.api.send({ buy: item.proposal_id, price: item.ask_price }))
+            ready.map(item =>
+                withTimeout(
+                    api_base.api.send({
+                        buy: item.proposal_id,
+                        price: item.ask_price,
+                        passthrough: {
+                            nolimitz_batch: run_panel?.run_id || 'bulk-scanner',
+                            slot: item.index + 1,
+                        },
+                    }),
+                    5000,
+                    `Buy #${item.index + 1}`
+                )
+            )
         );
         const launchMs = performance.now() - launchedAt;
 
@@ -343,6 +404,13 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
         buyResults.forEach((result, idx) => {
             const item = ready[idx];
             if (result.status === 'fulfilled') {
+                if (result.value?.error) {
+                    setFireLog(prev => [
+                        ...prev,
+                        `[FAIL] #${item.index + 1} buy — ${result.value.error.message || result.value.error.code || 'Buy rejected'}`,
+                    ]);
+                    return;
+                }
                 const cid = result.value?.buy?.contract_id;
                 if (cid) ids.push(cid);
                 setFireLog(prev => [
@@ -366,6 +434,14 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                 0
             )} ms · exposure ${cur} ${exposure.toFixed(2)}.`
         );
+
+        if (ids.length) {
+            try {
+                run_panel?.setIsRunning?.(true);
+            } catch {
+                /* noop */
+            }
+        }
 
         if (!ids.length) {
             setPhase('done');
