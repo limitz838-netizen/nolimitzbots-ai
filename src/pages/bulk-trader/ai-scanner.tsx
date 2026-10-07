@@ -111,6 +111,8 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
     const { run_panel, transactions, summary_card } = useStore();
 
     const [phase, setPhase] = React.useState('idle'); // idle | scanning | firing | settling | done
+    const [scannerStake, setScannerStake] = React.useState(String(stake ?? '0.5'));
+    const [scannerCount, setScannerCount] = React.useState(Math.max(1, Math.min(20, Number(count) || 5)));
     const [logs, setLogs] = React.useState([]);
     const [matrix, setMatrix] = React.useState({});
     const [status, setStatus] = React.useState('Ready to scan all supported volatility markets.');
@@ -134,9 +136,21 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
     const last_eval_ref = React.useRef(0);
     const last_log_ref = React.useRef(0);
     const evaluations_ref = React.useRef(0);
-    const cfg_ref = React.useRef({ stake, count, currency, isLoggedIn, maxExposure });
+    const cfg_ref = React.useRef({
+        stake: scannerStake,
+        count: scannerCount,
+        currency,
+        isLoggedIn,
+        maxExposure,
+    });
 
-    cfg_ref.current = { stake, count, currency, isLoggedIn, maxExposure };
+    cfg_ref.current = {
+        stake: scannerStake,
+        count: scannerCount,
+        currency,
+        isLoggedIn,
+        maxExposure,
+    };
 
     const log = line => setLogs(prev => [...prev, line].slice(-80));
 
@@ -160,6 +174,11 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
     };
 
     React.useEffect(() => {
+        if (open && phase === 'idle') {
+            setScannerStake(String(stake ?? '0.5'));
+            setScannerCount(Math.max(1, Math.min(20, Number(count) || 5)));
+        }
+
         if (!open) {
             teardown();
             track_ref.current?.cancel();
@@ -697,6 +716,44 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
 
                 <div className='ai-scanner__title'>NOLIMITZ AI MARKET MATRIX</div>
                 <div className='ai-scanner__subtitle'>Live Deriv scanner · measured Over/Under edge</div>
+
+                <div className='ai-scanner__config'>
+                    <label>
+                        <span>Stake ({currency})</span>
+                        <input
+                            type='number'
+                            min='0.35'
+                            step='0.01'
+                            value={scannerStake}
+                            disabled={busy}
+                            onChange={event => setScannerStake(event.target.value)}
+                        />
+                    </label>
+                    <label>
+                        <span>Bulk trades</span>
+                        <input
+                            type='number'
+                            min='1'
+                            max='20'
+                            step='1'
+                            value={scannerCount}
+                            disabled={busy}
+                            onChange={event =>
+                                setScannerCount(Math.max(1, Math.min(20, Number(event.target.value) || 1)))
+                            }
+                        />
+                    </label>
+                    <div>
+                        <span>Exposure</span>
+                        <strong>
+                            {currency}{' '}
+                            {(
+                                Math.max(0.35, Number(scannerStake) || 0.35) *
+                                Math.max(1, Number(scannerCount) || 1)
+                            ).toFixed(2)}
+                        </strong>
+                    </div>
+                </div>
 
                 {(scanning || busy) && (
                     <div className='ai-scanner__running'>
