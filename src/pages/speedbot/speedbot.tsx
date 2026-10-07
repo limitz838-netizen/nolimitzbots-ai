@@ -1285,7 +1285,7 @@ const NolimitzAI = observer(() => {
 
                     <button
                         className={`nolimitz-ai__run ${running ? 'stop' : ''}`}
-                        disabled={!is_logged_in}
+                        disabled={!is_logged_in || executionTesting}
                         onClick={running ? stop : start}
                     >
                         {running ? '■ STOP NOLIMITZ AI' : '⚡ RUN NOLIMITZ AI'}
