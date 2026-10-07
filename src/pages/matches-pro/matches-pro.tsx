@@ -1130,7 +1130,7 @@ const MatchesPro = () => {
                     <button
                         type='button'
                         className={`matches-pro__auto matches-pro__auto--v2 ${auto ? 'on' : ''}`}
-                        disabled={!can_arm}
+                        disabled={!can_arm || executionTesting}
                         onClick={() => setAuto(v => !v)}
                     >
                         {auto ? 'STOP AUTO TRADER' : 'START AUTO TRADER'}
