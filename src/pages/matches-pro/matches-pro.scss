@@ -954,7 +954,7 @@
 }
 
 .matches-pro__v2-controls--trade {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .matches-pro__v2-live {
@@ -1282,5 +1282,98 @@
             text-align: left;
             font-size: .82rem;
         }
+    }
+}
+
+
+/* Session TP / SL result popup */
+.matches-pro__target-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    display: grid;
+    place-items: center;
+    padding: 1.25rem;
+    background: rgba(0, 0, 0, .78);
+    backdrop-filter: blur(10px);
+}
+
+.matches-pro__target-popup {
+    position: relative;
+    width: min(430px, 100%);
+    padding: 2rem 1.4rem 1.5rem;
+    border-radius: 1.5rem;
+    text-align: center;
+    background: linear-gradient(180deg, #111827, #080c14);
+    box-shadow: 0 25px 70px rgba(0,0,0,.55);
+
+    > button {
+        position: absolute;
+        top: .7rem;
+        right: .8rem;
+        width: 2.2rem;
+        height: 2.2rem;
+        border: 0;
+        border-radius: 50%;
+        background: rgba(255,255,255,.06);
+        color: #aab3c2;
+        font-size: 1.4rem;
+        cursor: pointer;
+    }
+
+    h3 {
+        margin: .7rem 0;
+        font-size: clamp(2.6rem, 9vw, 4rem);
+        font-variant-numeric: tabular-nums;
+    }
+
+    p {
+        margin: 0 auto 1.2rem;
+        max-width: 340px;
+        color: #9aa3b5;
+        line-height: 1.5;
+    }
+
+    &.tp {
+        border: 1px solid rgba(52, 211, 153, .55);
+        box-shadow: 0 25px 70px rgba(16, 185, 129, .13);
+
+        .matches-pro__target-kicker,
+        h3 { color: #34d399; }
+    }
+
+    &.sl {
+        border: 1px solid rgba(248, 113, 113, .55);
+        box-shadow: 0 25px 70px rgba(239, 68, 68, .12);
+
+        .matches-pro__target-kicker,
+        h3 { color: #f87171; }
+    }
+}
+
+.matches-pro__target-kicker {
+    font-size: .9rem;
+    font-weight: 900;
+    letter-spacing: .14em;
+}
+
+.matches-pro__target-stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: .55rem;
+
+    span {
+        padding: .75rem .45rem;
+        border-radius: .8rem;
+        background: rgba(255,255,255,.04);
+        color: #8f99aa;
+        font-size: .85rem;
+    }
+
+    b {
+        display: block;
+        margin-top: .25rem;
+        color: #f8fafc;
+        font-size: 1.2rem;
     }
 }
