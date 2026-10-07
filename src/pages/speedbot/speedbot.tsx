@@ -111,6 +111,7 @@ const NolimitzAI = observer(() => {
     });
     const [logs, setLogs] = React.useState([]);
     const [result, setResult] = React.useState(null);
+    const [executionTesting, setExecutionTesting] = React.useState(false);
     const [guide_open, setGuideOpen] = React.useState(false);
 
     const run_ref = React.useRef(null);
@@ -480,6 +481,116 @@ const NolimitzAI = observer(() => {
         return contractId;
     };
 
+
+    const testDemoExecution = async () => {
+        if (running || executionTesting) return;
+
+        if (!is_logged_in) {
+            reportGate({
+                status: 'BLOCKED',
+                reason: 'Connect Deriv before testing execution.',
+                breakeven: null,
+                required: null,
+            });
+            return;
+        }
+
+        if (!is_demo) {
+            reportGate({
+                status: 'BLOCKED',
+                reason: 'Execution test is demo-only. Switch to your Deriv demo account.',
+                breakeven: null,
+                required: null,
+            });
+            return;
+        }
+
+        if (!api_base?.api) {
+            reportGate({
+                status: 'BLOCKED',
+                reason: 'Trading connection is not ready yet. Wait a moment and try again.',
+                breakeven: null,
+                required: null,
+            });
+            return;
+        }
+
+        const spec = aiContractSpec || manualContractSpec;
+        if (!spec) {
+            reportGate({
+                status: 'BLOCKED',
+                reason: 'No supported contract is selected for the execution test.',
+                breakeven: null,
+                required: null,
+            });
+            return;
+        }
+
+        const amount = Math.max(0.35, parseFloat(stake) || 0.35);
+        setExecutionTesting(true);
+        setResult(null);
+
+        try {
+            run_panel.run_id = 'nolimitz-ai-test-' + Date.now();
+            summary_card?.clear?.();
+            run_panel?.setIsRunning?.(true);
+            run_panel?.toggleDrawer?.(true);
+
+            reportGate({
+                status: 'TEST',
+                reason: 'Preparing one real Deriv demo proposal to verify execution.',
+                breakeven: null,
+                required: null,
+            });
+
+            const prepared = await prepareProposal(spec, amount, 1);
+            setGateInfo({
+                status: 'TEST',
+                reason: 'Proposal accepted. Sending one demo buy now.',
+                breakeven: prepared.breakeven,
+                required: prepared.breakeven,
+            });
+
+            const cid = await buyPrepared(prepared);
+            log('DEMO TEST BOUGHT · ' + spec.label + ' · contract ' + cid);
+            journalLog('Nolimitz AI demo execution test · contract ' + cid);
+
+            const profit = await settleContract(cid, 1);
+            if (profit === null) throw new Error('Settlement timeout');
+
+            setResult({
+                reason: 'Demo execution test complete',
+                pnl: profit,
+                trades: 1,
+                wins: profit > 0 ? 1 : 0,
+                losses: profit > 0 ? 0 : 1,
+            });
+
+            setGateInfo({
+                status: 'TEST PASSED',
+                reason: 'Execution pipeline verified. Normal AI evidence rules remain unchanged.',
+                breakeven: prepared.breakeven,
+                required: prepared.breakeven,
+            });
+        } catch (e) {
+            const message = describeError(e);
+            setGateInfo({
+                status: 'TEST FAILED',
+                reason: message,
+                breakeven: null,
+                required: null,
+            });
+            log('DEMO TEST FAILED · ' + message);
+            journalLog('Nolimitz AI demo execution test failed · ' + message, MessageTypes.ERROR);
+        } finally {
+            setExecutionTesting(false);
+            try {
+                run_panel?.setIsRunning?.(false);
+            } catch {
+                /* noop */
+            }
+        }
+    };
 
     const reportGate = next => {
         setGateInfo(next);
@@ -1163,6 +1274,14 @@ const NolimitzAI = observer(() => {
                             <small>{strategy === 'alpha' ? 'Alpha test duration' : 'AI evidence horizon is fixed to 1 tick'}</small>
                         </div>
                     </div>
+
+                    <button
+                        className='nolimitz-ai__test'
+                        disabled={!is_logged_in || running || executionTesting}
+                        onClick={testDemoExecution}
+                    >
+                        {executionTesting ? 'TESTING DEMO EXECUTION…' : 'TEST 1 DEMO CONTRACT'}
+                    </button>
 
                     <button
                         className={`nolimitz-ai__run ${running ? 'stop' : ''}`}
