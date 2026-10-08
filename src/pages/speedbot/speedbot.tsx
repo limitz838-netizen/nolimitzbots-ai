@@ -1,13 +1,25 @@
-// @ts-nocheck — follows vendored page code conventions
+// @ts-nocheck — Nolimitz AI replaces the legacy Speedbot UI while preserving
+// the proven Deriv execution / settlement plumbing underneath.
 import React from 'react';
 import { observer } from 'mobx-react-lite';
-import { api_base } from '@/external/bot-skeleton';
+import { api_base, MessageTypes } from '@/external/bot-skeleton';
 import { useStore } from '@/hooks/useStore';
 import { isProduction, WS_SERVERS } from '@/components/shared/utils/config/config';
 import { playLoss, playWin, unlockAudio } from '@/components/shared/nlb/trade-sounds';
 import { trackContracts, describeError } from '@/components/shared/nlb/settlement';
+import { contract_stages } from '@/constants/contract-stage';
+import {
+    analyzeDigitMarket,
+    candidateToContract,
+    NOLIMITZ_AI_ENGINE_VERSION,
+} from '@/components/shared/nlb/nolimitz-ai-engine';
+import {
+    readAiEvidence,
+    recordAiEvidence,
+    setupEvidence,
+    topAiSetups,
+} from '@/components/shared/nlb/nolimitz-ai-evidence';
 import Guide, { GuideButton } from '@/components/shared/nlb/guide';
-import AiScanner from '../bulk-trader/ai-scanner';
 import './speedbot.scss';
 
 const MARKETS = [
@@ -23,206 +35,681 @@ const MARKETS = [
     { code: 'R_10', label: 'Vol 10' },
 ];
 
-const TYPES = [
-    { code: 'DIGITEVEN', label: 'Even' },
-    { code: 'DIGITODD', label: 'Odd' },
-    { code: 'DIGITOVER', label: 'Over 2', barrier: 2 },
-    { code: 'DIGITUNDER', label: 'Under 7', barrier: 7 },
-];
-
 const FALLBACK_DECIMALS = {
     R_10: 3, R_25: 3, R_50: 4, R_75: 4, R_100: 2,
     '1HZ10V': 2, '1HZ25V': 2, '1HZ50V': 2, '1HZ75V': 2, '1HZ100V': 2,
 };
 
-const MAX_MARTINGALE_STEPS = 7;
-const opposite = t => ({ DIGITEVEN: 'DIGITODD', DIGITODD: 'DIGITEVEN', DIGITOVER: 'DIGITUNDER', DIGITUNDER: 'DIGITOVER' })[t];
+const STRATEGIES = [
+    { id: 'alpha', label: 'Alpha', note: 'Demo execution test — one controlled contract' },
+    { id: 'quantum', label: 'Quantum', note: '2-model consensus + fresh forward evidence' },
+    { id: 'apex', label: 'Apex', note: '3-model consensus + stricter evidence gate' },
+];
 
-const Speedbot = observer(() => {
-    const { client, run_panel } = useStore();
+const AI_RULES = {
+    quantum: { minTier: 2, minEvidence: 20, margin: 0.005 },
+    apex: { minTier: 3, minEvidence: 35, margin: 0.01 },
+};
+
+const familyForContract = contract =>
+    contract === 'even_odd' ? 'even_odd' : contract === 'over_under' ? 'over_under' : null;
+
+const CONTRACTS = [
+    { id: 'rise_fall', label: 'Rise/Fall', symbol: '↕', available: true },
+    { id: 'even_odd', label: 'Even/Odd', symbol: '#', available: true },
+    { id: 'match', label: 'Match', symbol: '=', available: false, note: 'Matches Pro' },
+    { id: 'over_under', label: 'Over/Under', symbol: '⌃', available: true, recommended: true },
+    { id: 'differ', label: 'Differ', symbol: '/', available: false, note: 'Coming next' },
+    { id: 'mix', label: 'Mix', symbol: '⌁', available: false, note: 'Coming next' },
+];
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const maxMartingaleSteps = risk => (risk === 'high' ? 4 : risk === 'medium' ? 2 : 0);
+
+const NolimitzAI = observer(() => {
+    const { client, run_panel, transactions, summary_card, journal } = useStore();
     const is_logged_in = !!client?.is_logged_in;
+    const loginid = client?.loginid || 'NOT CONNECTED';
     const currency = client?.currency || 'USD';
+    const balance = Number(client?.balance ?? 0);
+    const is_demo = !!client?.is_virtual || loginid.startsWith('VRT') || loginid.startsWith('VRTC');
+    const account_mode = !is_logged_in ? 'offline' : is_demo ? 'demo' : 'real';
 
     const [symbol, setSymbol] = React.useState('1HZ100V');
-    const [type_code, setTypeCode] = React.useState('DIGITEVEN');
-    const [speed, setSpeed] = React.useState('normal'); // fast | normal
+    const [strategy, setStrategy] = React.useState('quantum');
+    const [contract, setContract] = React.useState('over_under');
+    const [direction, setDirection] = React.useState('over');
+    const [risk, setRisk] = React.useState('low');
     const [duration, setDuration] = React.useState(1);
     const [stake, setStake] = React.useState('0.5');
     const [tp, setTp] = React.useState('10');
-    const [sl, setSl] = React.useState('50');
-    const [alt_eo, setAltEo] = React.useState(false);
-    const [alt_on_loss, setAltOnLoss] = React.useState(false);
+    const [sl, setSl] = React.useState('5');
+    const [optimization, setOptimization] = React.useState(true);
     const [martingale, setMartingale] = React.useState(false);
-    const [mult, setMult] = React.useState('2.0');
-    const [recovery, setRecovery] = React.useState(false);
-    const [digits, setDigits] = React.useState([]);
+    const [mult, setMult] = React.useState('1.5');
 
+    const [digits, setDigits] = React.useState([]);
+    const [quote, setQuote] = React.useState(null);
+    const [feedStatus, setFeedStatus] = React.useState('CONNECTING');
     const [running, setRunning] = React.useState(false);
-    const [stats, setStats] = React.useState({ ticks: 0, last_digit: null, pnl: 0, trades: 0, wins: 0, losses: 0, cur_stake: 0 });
+    const [engineAnalysis, setEngineAnalysis] = React.useState(null);
+    const [evidenceState, setEvidenceState] = React.useState(() => readAiEvidence('1HZ100V', 'over_under'));
+    const [gateInfo, setGateInfo] = React.useState({
+        status: 'SHADOW',
+        reason: 'Collecting measured setup evidence.',
+        breakeven: null,
+        required: null,
+    });
+    const [stats, setStats] = React.useState({
+        ticks: 0,
+        last_digit: null,
+        pnl: 0,
+        trades: 0,
+        wins: 0,
+        losses: 0,
+        cur_stake: 0,
+    });
     const [logs, setLogs] = React.useState([]);
     const [result, setResult] = React.useState(null);
-    const [quote, setQuote] = React.useState(null);
+    const [executionTesting, setExecutionTesting] = React.useState(false);
     const [guide_open, setGuideOpen] = React.useState(false);
-    const [scanner_open, setScannerOpen] = React.useState(false);
 
     const run_ref = React.useRef(null);
     const settle_handles_ref = React.useRef(new Set());
     const ws_ref = React.useRef(null);
     const decimals_ref = React.useRef({ ...FALLBACK_DECIMALS });
     const sym_ref = React.useRef(symbol);
+    const contract_ref = React.useRef(contract);
+    const digits_ref = React.useRef([]);
+    const engine_ref = React.useRef(null);
+    const pending_shadow_ref = React.useRef(null);
+    const last_shadow_fingerprint_ref = React.useRef(null);
+    const last_traded_fingerprint_ref = React.useRef(null);
+    const last_gate_reason_ref = React.useRef('');
     sym_ref.current = symbol;
+    contract_ref.current = contract;
 
     const log = line =>
-        setLogs(prev => [`${new Date().toLocaleTimeString()}  ${line}`, ...prev].slice(0, 40));
+        setLogs(prev => [`${new Date().toLocaleTimeString()}  ${line}`, ...prev].slice(0, 50));
 
-    // ticker socket for display digits
+    const journalLog = (message, type = MessageTypes.SUCCESS) => {
+        try {
+            journal?.pushMessage?.(message, type, 'journal__text');
+        } catch {
+            /* journal mirroring must not interrupt execution */
+        }
+    };
+
+    const publishAnalysis = (history, family) => {
+        if (!family) {
+            engine_ref.current = null;
+            setEngineAnalysis(null);
+            return null;
+        }
+        const next = analyzeDigitMarket(history, family);
+        engine_ref.current = next;
+        setEngineAnalysis(next);
+        return next;
+    };
+
     React.useEffect(() => {
         let alive = true;
-        const ws = new WebSocket(isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING);
-        ws_ref.current = ws;
-        const sub = () => {
+        let reconnect_timer = null;
+        let reconnect_attempt = 0;
+
+        const subscribe = () => {
+            const socket = ws_ref.current;
+            if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
             setDigits([]);
-            ws.send(JSON.stringify({ forget_all: 'ticks' }));
-            ws.send(JSON.stringify({ ticks_history: sym_ref.current, count: 20, end: 'latest', style: 'ticks', subscribe: 1 }));
+            socket.send(JSON.stringify({ forget_all: 'ticks' }));
+            socket.send(
+                JSON.stringify({
+                    ticks_history: sym_ref.current,
+                    count: 1000,
+                    end: 'latest',
+                    style: 'ticks',
+                    subscribe: 1,
+                })
+            );
         };
-        ws.onopen = () => {
-            if (!alive) return;
-            ws.send(JSON.stringify({ active_symbols: 'brief' }));
-            sub();
+
+        const scheduleReconnect = () => {
+            if (!alive || reconnect_timer) return;
+            setFeedStatus('RECONNECTING');
+            const delay = Math.min(10000, 1200 * Math.max(1, reconnect_attempt + 1));
+            reconnect_timer = window.setTimeout(() => {
+                reconnect_timer = null;
+                reconnect_attempt += 1;
+                connect();
+            }, delay);
         };
-        ws.onmessage = msg => {
+
+        const handleMessage = msg => {
             if (!alive) return;
+
             let data;
             try {
                 data = JSON.parse(msg.data);
             } catch {
                 return;
             }
+
             if (data.msg_type === 'active_symbols' && Array.isArray(data.active_symbols)) {
                 data.active_symbols.forEach(s => {
                     const code = s.symbol || s.underlying_symbol;
-                    if (code && typeof s.pip === 'number') decimals_ref.current[code] = `${s.pip}`.split('.')[1]?.length ?? 0;
+                    if (code && typeof s.pip === 'number') {
+                        decimals_ref.current[code] = `${s.pip}`.split('.')[1]?.length ?? 0;
+                    }
                 });
                 return;
             }
+
             if (data.msg_type === 'history' && data.echo_req?.ticks_history === sym_ref.current) {
                 const dec = decimals_ref.current[sym_ref.current] ?? 2;
-                const ds = (data.history?.prices || []).map(pr => Number(Number(pr).toFixed(dec).slice(-1)));
-                setDigits(ds.slice(-20));
+                const prices = data.history?.prices || [];
+                const ds = prices.map(pr => Number(Number(pr).toFixed(dec).slice(-1))).slice(-1000);
+                digits_ref.current = ds;
+                setDigits(ds);
+                if (prices.length) setQuote(Number(prices[prices.length - 1]).toFixed(dec));
+
+                const family = familyForContract(contract_ref.current);
+                const analysis = publishAnalysis(ds, family);
+                if (family && analysis?.candidate && analysis?.fingerprint) {
+                    last_shadow_fingerprint_ref.current = analysis.fingerprint;
+                    pending_shadow_ref.current = {
+                        symbol: sym_ref.current,
+                        family,
+                        fingerprint: analysis.fingerprint,
+                        side: analysis.candidate,
+                        tier: analysis.agreementTier,
+                        models: analysis.agreementModels || [],
+                        estimate: analysis.estimate,
+                    };
+                }
                 return;
             }
+
             if (data.msg_type === 'tick' && data.tick?.symbol === sym_ref.current) {
+                setFeedStatus('LIVE');
                 const dec = decimals_ref.current[sym_ref.current] ?? 2;
                 const q = Number(data.tick.quote).toFixed(dec);
                 const d = Number(q.slice(-1));
                 setQuote(q);
-                setDigits(prev => [...prev, d].slice(-20));
+
+                const pending = pending_shadow_ref.current;
+                if (pending && pending.symbol === sym_ref.current) {
+                    const updatedEvidence = recordAiEvidence(pending.symbol, pending.family, {
+                        ...pending,
+                        actual: d,
+                        t: Date.now(),
+                    });
+                    setEvidenceState(updatedEvidence);
+                }
+                pending_shadow_ref.current = null;
+
+                const nextDigits = [...digits_ref.current, d].slice(-1000);
+                digits_ref.current = nextDigits;
+                setDigits(nextDigits);
                 setStats(prev => ({ ...prev, ticks: prev.ticks + 1, last_digit: d }));
+
+                const family = familyForContract(contract_ref.current);
+                const analysis = publishAnalysis(nextDigits, family);
+
+                if (analysis?.candidate && analysis?.fingerprint) {
+                    if (analysis.fingerprint !== last_shadow_fingerprint_ref.current) {
+                        last_shadow_fingerprint_ref.current = analysis.fingerprint;
+                        pending_shadow_ref.current = {
+                            symbol: sym_ref.current,
+                            family,
+                            fingerprint: analysis.fingerprint,
+                            side: analysis.candidate,
+                            tier: analysis.agreementTier,
+                            models: analysis.agreementModels || [],
+                            estimate: analysis.estimate,
+                        };
+                    }
+                } else {
+                    last_shadow_fingerprint_ref.current = null;
+                }
             }
         };
-        const resub = () => ws.readyState === WebSocket.OPEN && sub();
-        window.addEventListener('nlb-speed-symbol', resub);
+
+        const connect = () => {
+            if (!alive) return;
+
+            const current = ws_ref.current;
+            if (current && (current.readyState === WebSocket.OPEN || current.readyState === WebSocket.CONNECTING)) {
+                return;
+            }
+
+            setFeedStatus(reconnect_attempt ? 'RECONNECTING' : 'CONNECTING');
+            const socket = new WebSocket(isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING);
+            ws_ref.current = socket;
+
+            socket.onopen = () => {
+                if (!alive || ws_ref.current !== socket) return;
+                reconnect_attempt = 0;
+                setFeedStatus('LIVE');
+                socket.send(JSON.stringify({ active_symbols: 'brief' }));
+                subscribe();
+            };
+
+            socket.onmessage = handleMessage;
+
+            socket.onerror = () => {
+                if (!alive || ws_ref.current !== socket) return;
+                setFeedStatus('RECONNECTING');
+                try {
+                    socket.close();
+                } catch {
+                    scheduleReconnect();
+                }
+            };
+
+            socket.onclose = () => {
+                if (!alive || ws_ref.current !== socket) return;
+                ws_ref.current = null;
+                scheduleReconnect();
+            };
+        };
+
+        const resub = () => {
+            const socket = ws_ref.current;
+            if (socket?.readyState === WebSocket.OPEN) subscribe();
+            else connect();
+        };
+
+        const onVisibility = () => {
+            if (document.visibilityState !== 'visible') return;
+            const socket = ws_ref.current;
+            if (socket?.readyState === WebSocket.OPEN) subscribe();
+            else connect();
+        };
+
+        window.addEventListener('nlb-ai-symbol', resub);
+        document.addEventListener('visibilitychange', onVisibility);
+        connect();
+
         return () => {
             alive = false;
-            window.removeEventListener('nlb-speed-symbol', resub);
+            window.removeEventListener('nlb-ai-symbol', resub);
+            document.removeEventListener('visibilitychange', onVisibility);
+
+            if (reconnect_timer) {
+                window.clearTimeout(reconnect_timer);
+                reconnect_timer = null;
+            }
+
             if (run_ref.current) run_ref.current.active = false;
             settle_handles_ref.current.forEach(h => h.cancel());
             settle_handles_ref.current.clear();
+
+            const socket = ws_ref.current;
+            ws_ref.current = null;
             try {
-                ws.close();
+                socket?.close();
             } catch {
                 /* noop */
             }
         };
     }, []);
 
-    // Single-contract settlement via the shared hardened tracker.
-    const settleContract = (contract_id, timeout_ms) =>
+    const selectedFamily = familyForContract(contract);
+
+    React.useEffect(() => {
+        pending_shadow_ref.current = null;
+        last_shadow_fingerprint_ref.current = null;
+        last_traded_fingerprint_ref.current = null;
+        last_gate_reason_ref.current = '';
+        const family = familyForContract(contract);
+        if (family) {
+            setEvidenceState(readAiEvidence(symbol, family));
+            publishAnalysis(digits_ref.current, family);
+        } else {
+            setEvidenceState({ total: 0, correct: 0, by_setup: {}, by_tier: {}, recent: [] });
+            engine_ref.current = null;
+            setEngineAnalysis(null);
+        }
+    }, [symbol, contract]);
+
+    const evenCount = digits.filter(d => d % 2 === 0).length;
+    const evenPct = digits.length ? (100 * evenCount) / digits.length : 50;
+    const over2Pct = digits.length ? (100 * digits.filter(d => d > 2).length) / digits.length : 70;
+    const under7Pct = digits.length ? (100 * digits.filter(d => d < 7).length) / digits.length : 70;
+
+    const manualContractSpec = React.useMemo(() => {
+        if (contract === 'rise_fall') {
+            return direction === 'fall' ? { type: 'PUT', label: 'Fall' } : { type: 'CALL', label: 'Rise' };
+        }
+        if (contract === 'even_odd') {
+            return direction === 'odd'
+                ? { type: 'DIGITODD', label: 'Odd' }
+                : { type: 'DIGITEVEN', label: 'Even' };
+        }
+        if (contract === 'over_under') {
+            return direction === 'under'
+                ? { type: 'DIGITUNDER', label: 'Under 7', barrier: 7 }
+                : { type: 'DIGITOVER', label: 'Over 2', barrier: 2 };
+        }
+        return null;
+    }, [contract, direction]);
+
+    const aiContractSpec = React.useMemo(
+        () => (selectedFamily && engineAnalysis?.candidate
+            ? candidateToContract(selectedFamily, engineAnalysis.candidate)
+            : null),
+        [selectedFamily, engineAnalysis]
+    );
+
+    const contractSpec = strategy === 'alpha' ? manualContractSpec : aiContractSpec;
+    const exactSetupEvidence = React.useMemo(
+        () => setupEvidence(evidenceState, engineAnalysis?.fingerprint),
+        [evidenceState, engineAnalysis?.fingerprint]
+    );
+    const bestSetups = React.useMemo(() => topAiSetups(evidenceState, 5), [evidenceState]);
+
+    const settleContract = (contract_id, durationTicks = 1) =>
         new Promise(resolve => {
             const handle = trackContracts([contract_id], {
-                timeoutMs: timeout_ms,
+                timeoutMs: (durationTicks + 30) * 1000,
+                onContract: contractUpdate => {
+                    try {
+                        transactions?.onBotContractEvent?.(contractUpdate);
+                        summary_card?.onBotContractEvent?.(contractUpdate);
+                        run_panel?.onBotContractEvent?.(contractUpdate);
+                    } catch {
+                        /* Bot Builder mirroring must never interrupt settlement */
+                    }
+                },
                 onDone: ({ profits, settled }) => {
                     settle_handles_ref.current.delete(handle);
-                    const val = Object.values(profits);
-                    resolve(settled > 0 ? val[0] : null);
+                    try {
+                        run_panel?.setHasOpenContract?.(false);
+                        run_panel?.setContractStage?.(contract_stages.CONTRACT_CLOSED);
+                    } catch {
+                        /* noop */
+                    }
+                    const values = Object.values(profits);
+                    resolve(settled > 0 ? values[0] : null);
                 },
             });
             settle_handles_ref.current.add(handle);
         });
 
-    const buyOnce = async (contract_type, barrier, amount) => {
-        const proposal_req = {
+    const prepareProposal = async (spec, amount, durationTicks = 1) => {
+        const req = {
             proposal: 1,
             amount,
             basis: 'stake',
-            contract_type,
+            contract_type: spec.type,
             currency,
-            duration,
+            duration: durationTicks,
             duration_unit: 't',
             underlying_symbol: symbol,
-            ...(barrier !== undefined ? { barrier: String(barrier) } : {}),
+            ...(spec.barrier !== undefined ? { barrier: String(spec.barrier) } : {}),
         };
-        const prop = await api_base.api.send(proposal_req);
-        const id = prop?.proposal?.id;
-        if (!id) throw new Error('No proposal');
-        const res = await api_base.api.send({ buy: id, price: Number(prop.proposal.ask_price) });
-        return res?.buy?.contract_id;
+        const response = await api_base.api.send(req);
+        const proposal = response?.proposal;
+        const ask = Number(proposal?.ask_price ?? amount);
+        const payout = Number(proposal?.payout ?? 0);
+        if (!proposal?.id || !(ask > 0) || !(payout > 0)) throw new Error('Invalid live proposal');
+        return {
+            id: proposal.id,
+            ask,
+            payout,
+            breakeven: ask / payout,
+            proposal,
+        };
     };
 
-    const stopRun = (reason, final_pnl, r) => {
-        if (run_ref.current) run_ref.current.active = false;
-        run_ref.current = null;
-        setRunning(false);
-        try { run_panel?.setIsRunning?.(false); } catch { /* noop */ }
-        if (reason) {
-            const won = final_pnl >= 0;
-            if (won) playWin();
-            else playLoss();
-            setResult({ reason, pnl: final_pnl, trades: r.trades, wins: r.wins, losses: r.losses });
+    const buyPrepared = async prepared => {
+        try {
+            run_panel?.setContractStage?.(contract_stages.PURCHASE_SENT);
+        } catch {
+            /* noop */
+        }
+        const res = await api_base.api.send({ buy: prepared.id, price: prepared.ask });
+        const contractId = res?.buy?.contract_id;
+        if (!contractId) throw new Error('No contract id returned');
+        try {
+            run_panel?.setHasOpenContract?.(true);
+            run_panel?.setContractStage?.(contract_stages.PURCHASE_RECEIVED);
+        } catch {
+            /* noop */
+        }
+        return contractId;
+    };
+
+
+    const testDemoExecution = async () => {
+        if (running || executionTesting) return;
+
+        if (!is_logged_in) {
+            reportGate({
+                status: 'BLOCKED',
+                reason: 'Connect Deriv before testing execution.',
+                breakeven: null,
+                required: null,
+            });
+            return;
+        }
+
+        if (!is_demo) {
+            reportGate({
+                status: 'BLOCKED',
+                reason: 'Execution test is demo-only. Switch to your Deriv demo account.',
+                breakeven: null,
+                required: null,
+            });
+            return;
+        }
+
+        if (!api_base?.api) {
+            reportGate({
+                status: 'BLOCKED',
+                reason: 'Trading connection is not ready yet. Wait a moment and try again.',
+                breakeven: null,
+                required: null,
+            });
+            return;
+        }
+
+        const spec = aiContractSpec || manualContractSpec;
+        if (!spec) {
+            reportGate({
+                status: 'BLOCKED',
+                reason: 'No supported contract is selected for the execution test.',
+                breakeven: null,
+                required: null,
+            });
+            return;
+        }
+
+        const amount = Math.max(0.35, parseFloat(stake) || 0.35);
+        setExecutionTesting(true);
+        setResult(null);
+
+        try {
+            run_panel.run_id = 'nolimitz-ai-test-' + Date.now();
+            summary_card?.clear?.();
+            run_panel?.setIsRunning?.(true);
+            run_panel?.toggleDrawer?.(true);
+
+            reportGate({
+                status: 'TEST',
+                reason: 'Preparing one real Deriv demo proposal to verify execution.',
+                breakeven: null,
+                required: null,
+            });
+
+            const prepared = await prepareProposal(spec, amount, 1);
+            setGateInfo({
+                status: 'TEST',
+                reason: 'Proposal accepted. Sending one demo buy now.',
+                breakeven: prepared.breakeven,
+                required: prepared.breakeven,
+            });
+
+            const cid = await buyPrepared(prepared);
+            log('DEMO TEST BOUGHT · ' + spec.label + ' · contract ' + cid);
+            journalLog('Nolimitz AI demo execution test · contract ' + cid);
+
+            const profit = await settleContract(cid, 1);
+            if (profit === null) throw new Error('Settlement timeout');
+
+            setResult({
+                reason: 'Demo execution test complete',
+                pnl: profit,
+                trades: 1,
+                wins: profit > 0 ? 1 : 0,
+                losses: profit > 0 ? 0 : 1,
+            });
+
+            setGateInfo({
+                status: 'TEST PASSED',
+                reason: 'Execution pipeline verified. Normal AI evidence rules remain unchanged.',
+                breakeven: prepared.breakeven,
+                required: prepared.breakeven,
+            });
+        } catch (e) {
+            const message = describeError(e);
+            setGateInfo({
+                status: 'TEST FAILED',
+                reason: message,
+                breakeven: null,
+                required: null,
+            });
+            log('DEMO TEST FAILED · ' + message);
+            journalLog('Nolimitz AI demo execution test failed · ' + message, MessageTypes.ERROR);
+        } finally {
+            setExecutionTesting(false);
+            try {
+                run_panel?.setIsRunning?.(false);
+            } catch {
+                /* noop */
+            }
         }
     };
 
-    // Fire a single trade with current settings (no loop).
-    const tradeOnce = async () => {
-        if (running || !is_logged_in || !api_base?.api) return;
-        const amount = Math.max(0.35, parseFloat(stake) || 0.5);
-        const t = TYPES.find(x => x.code === type_code);
-        unlockAudio();
-        setResult(null);
-        try {
-            log(`▶ Trade Once — ${t.label} @ ${amount.toFixed(2)}`);
-            const cid = await buyOnce(t.code, t.barrier, amount);
-            const profit = await settleContract(cid, (duration + 30) * 1000);
-            if (profit === null) {
-                log('⚠ settlement timeout');
-                return;
+    const reportGate = next => {
+        setGateInfo(next);
+        if (next?.reason && next.reason !== last_gate_reason_ref.current) {
+            last_gate_reason_ref.current = next.reason;
+            log(next.reason);
+        }
+    };
+
+    const applyTradeResult = (r, profit, baseStake, multiplier, maxSteps) => {
+        const won = profit > 0;
+        r.trades += 1;
+        r.pnl += profit;
+
+        if (won) {
+            r.wins += 1;
+            r.steps = 0;
+            r.curStake = baseStake;
+        } else {
+            r.losses += 1;
+            if (martingale && maxSteps > 0) {
+                r.steps += 1;
+                if (r.steps > maxSteps) {
+                    r.steps = 0;
+                    r.curStake = baseStake;
+                } else {
+                    r.curStake = Math.min(r.curStake * multiplier, baseStake * 10);
+                }
+            } else {
+                r.curStake = baseStake;
             }
-            const won = profit > 0;
+        }
+
+        setStats(prev => ({
+            ...prev,
+            pnl: r.pnl,
+            trades: r.trades,
+            wins: r.wins,
+            losses: r.losses,
+            cur_stake: r.curStake,
+        }));
+
+        const resultLine =
+            (won ? 'WIN ' : 'LOSS ') +
+            (profit >= 0 ? '+' : '') +
+            profit.toFixed(2) +
+            ' · P/L ' +
+            r.pnl.toFixed(2);
+
+        log(resultLine);
+        journalLog(
+            'Nolimitz AI · ' +
+                (won ? 'WIN' : 'LOSS') +
+                ' · ' +
+                (profit >= 0 ? '+' : '') +
+                profit.toFixed(2) +
+                ' ' +
+                currency,
+            MessageTypes.SUCCESS
+        );
+        return won;
+    };
+
+    const stopRun = (reason, r, stopType = null) => {
+        if (!r) return;
+        r.active = false;
+        run_ref.current = null;
+        setRunning(false);
+
+        try {
+            run_panel?.setIsRunning?.(false);
+            if (!run_panel?.has_open_contract) {
+                run_panel?.setContractStage?.(contract_stages.NOT_RUNNING);
+            }
+        } catch {
+            /* noop */
+        }
+
+        if (reason) {
+            const won = r.pnl >= 0;
             if (won) playWin();
             else playLoss();
-            log(`${won ? '✔' : '✘'} ${won ? '+' : ''}${profit.toFixed(2)}`);
-            setStats(prev => ({
-                ...prev,
-                pnl: prev.pnl + profit,
-                trades: prev.trades + 1,
-                wins: prev.wins + (won ? 1 : 0),
-                losses: prev.losses + (won ? 0 : 1),
-            }));
-        } catch (e) {
-            log(`✘ ${describeError(e)}`);
+            setResult({ reason, type: stopType, pnl: r.pnl, trades: r.trades, wins: r.wins, losses: r.losses });
+            journalLog(
+                'Nolimitz AI stopped · ' +
+                    reason +
+                    ' · session P/L ' +
+                    r.pnl.toFixed(2) +
+                    ' ' +
+                    currency
+            );
         }
     };
 
     const start = async () => {
         if (running || !is_logged_in || !api_base?.api) return;
+
+        if (strategy !== 'alpha' && !selectedFamily) {
+            reportGate({
+                status: 'BLOCKED',
+                reason: 'Quantum/Apex currently validate Even/Odd and Over/Under only. Use Alpha for a Rise/Fall execution test.',
+                breakeven: null,
+                required: null,
+            });
+            return;
+        }
+
+        const executionAllowed = is_demo;
+        const baseStake = Math.max(0.35, parseFloat(stake) || 0.5);
+        const tpValue = Math.max(0, parseFloat(tp) || 0);
+        const slValue = Math.max(0, parseFloat(sl) || 0);
+        const multiplier = clamp(parseFloat(mult) || 1.5, 1, 3);
+        const maxSteps = maxMartingaleSteps(risk);
+
         unlockAudio();
         setResult(null);
         setLogs([]);
-        const base_stake = parseFloat(stake) || 0;
-        const tp_v = parseFloat(tp) || 0;
-        const sl_v = parseFloat(sl) || 0;
-        const mult_v = Math.max(1, parseFloat(mult) || 1);
-        if (base_stake < 0.35) return;
+        last_traded_fingerprint_ref.current = null;
+        last_gate_reason_ref.current = '';
 
         const r = {
             active: true,
@@ -230,334 +717,663 @@ const Speedbot = observer(() => {
             trades: 0,
             wins: 0,
             losses: 0,
-            cur_stake: base_stake,
+            curStake: baseStake,
             steps: 0,
-            cur_type: TYPES.find(t => t.code === type_code),
         };
+
         run_ref.current = r;
         setRunning(true);
-        try { run_panel?.setIsRunning?.(true); } catch { /* noop */ }
-        log(`Started — ${r.cur_type.label} on ${symbol}, stake ${base_stake.toFixed(2)}`);
 
-        const checkStop = () => {
-            if (!r.active) return true;
-            if (tp_v > 0 && r.pnl >= tp_v) {
-                log(`🎯 Take Profit hit: +${r.pnl.toFixed(2)}`);
-                stopRun('Take Profit hit', r.pnl, r);
-                return true;
-            }
-            if (sl_v > 0 && r.pnl <= -sl_v) {
-                log(`🛑 Stop Loss hit: ${r.pnl.toFixed(2)}`);
-                stopRun('Stop Loss hit', r.pnl, r);
-                return true;
-            }
-            return false;
-        };
+        try {
+            run_panel.run_id = 'nolimitz-ai-' + Date.now();
+            summary_card?.clear?.();
+            run_panel?.setContractStage?.(contract_stages.STARTING);
+            run_panel?.setIsRunning?.(true);
+            run_panel?.toggleDrawer?.(true);
+        } catch {
+            /* noop */
+        }
 
-        const afterSettle = profit => {
-            if (profit === null) {
-                log('⚠ settlement timeout — counted as unresolved');
+        log(
+            'Nolimitz AI started · ' +
+                STRATEGIES.find(x => x.id === strategy)?.label +
+                ' · ' +
+                symbol
+        );
+        journalLog(
+            'Nolimitz AI started · ' +
+                STRATEGIES.find(x => x.id === strategy)?.label +
+                ' · ' +
+                symbol +
+                ' · ' +
+                (executionAllowed ? 'DEMO EXECUTION' : 'REAL SHADOW')
+        );
+
+        if (strategy === 'alpha') {
+            if (!executionAllowed) {
+                reportGate({
+                    status: 'REAL SHADOW',
+                    reason: 'Alpha is the execution-verification mode. Analysis is available on this real account, but Alpha contract execution remains demo-only while validation is active.',
+                    breakeven: null,
+                    required: null,
+                });
+                stopRun(null, r);
                 return;
             }
-            r.trades += 1;
-            r.pnl += profit;
-            const won = profit > 0;
-            if (won) {
-                r.wins += 1;
-                r.steps = 0;
-                r.cur_stake = base_stake;
-                if (alt_eo) r.cur_type = TYPES.find(t => t.code === opposite(r.cur_type.code)) || r.cur_type;
-            } else {
-                r.losses += 1;
-                if (martingale) {
-                    r.steps += 1;
-                    if (r.steps > MAX_MARTINGALE_STEPS) {
-                        log(`⚠ Martingale cap (${MAX_MARTINGALE_STEPS} steps) — resetting stake`);
-                        r.steps = 0;
-                        r.cur_stake = base_stake;
-                    } else {
-                        r.cur_stake = Math.min(r.cur_stake * mult_v, base_stake * 200);
-                    }
-                } else if (recovery) {
-                    // Recovery Mode: gentler than martingale — add just enough to recover
-                    // the accumulated loss at ~1.9x payout, capped at 5x base.
-                    const deficit = Math.max(0, -r.pnl);
-                    r.cur_stake = Math.min(base_stake + deficit / 1.9, base_stake * 5);
-                    log(`↻ recovery stake → ${r.cur_stake.toFixed(2)}`);
-                }
-                if (alt_on_loss) r.cur_type = TYPES.find(t => t.code === opposite(r.cur_type.code)) || r.cur_type;
+
+            if (!manualContractSpec) {
+                stopRun('No supported Alpha contract selected', r);
+                return;
             }
-            log(`${won ? '✔' : '✘'} ${won ? '+' : ''}${profit.toFixed(2)} — P/L ${r.pnl.toFixed(2)}`);
-            setStats(prev => ({ ...prev, pnl: r.pnl, trades: r.trades, wins: r.wins, losses: r.losses, cur_stake: r.cur_stake }));
-        };
+
+            try {
+                reportGate({
+                    status: 'TEST',
+                    reason: 'Alpha demo execution test: preparing one real Deriv proposal.',
+                    breakeven: null,
+                    required: null,
+                });
+
+                const prepared = await prepareProposal(manualContractSpec, baseStake, duration);
+                setGateInfo({
+                    status: 'TEST',
+                    reason:
+                        'Live proposal ready · break-even ' +
+                        (prepared.breakeven * 100).toFixed(2) +
+                        '%',
+                    breakeven: prepared.breakeven,
+                    required: prepared.breakeven,
+                });
+
+                const cid = await buyPrepared(prepared);
+                journalLog(
+                    'Alpha demo test bought ' +
+                        manualContractSpec.label +
+                        ' · contract ' +
+                        cid
+                );
+
+                const profit = await settleContract(cid, duration);
+                if (profit === null) {
+                    stopRun('Alpha demo execution test settlement timeout', r);
+                    return;
+                }
+
+                applyTradeResult(r, profit, baseStake, multiplier, maxSteps);
+                stopRun('Alpha demo execution test complete', r);
+            } catch (e) {
+                const message = describeError(e);
+                journalLog('Nolimitz AI Alpha error · ' + message, MessageTypes.ERROR);
+                stopRun('Alpha test failed: ' + message, r);
+            }
+            return;
+        }
+
+        const rules = AI_RULES[strategy];
 
         while (r.active) {
-            if (checkStop()) return;
+            if (tpValue > 0 && r.pnl >= tpValue) {
+                stopRun('Take profit reached', r, 'tp');
+                return;
+            }
+
+            if (slValue > 0 && r.pnl <= -slValue) {
+                stopRun('Stop loss reached', r, 'sl');
+                return;
+            }
+
+            const analysis = engine_ref.current;
+
+            if (!analysis?.candidate || !analysis?.fingerprint) {
+                reportGate({
+                    status: 'SHADOW',
+                    reason: analysis?.reason || 'Waiting for measured model consensus.',
+                    breakeven: null,
+                    required: null,
+                });
+                await new Promise(res => setTimeout(res, 250));
+                continue;
+            }
+
+            if (analysis.agreementTier < rules.minTier) {
+                reportGate({
+                    status: 'SHADOW',
+                    reason:
+                        strategy.toUpperCase() +
+                        ' needs ' +
+                        rules.minTier +
+                        ' agreeing models; current setup has ' +
+                        analysis.agreementTier +
+                        '.',
+                    breakeven: null,
+                    required: null,
+                });
+                await new Promise(res => setTimeout(res, 250));
+                continue;
+            }
+
+            const latestEvidence = readAiEvidence(symbol, selectedFamily);
+            setEvidenceState(latestEvidence);
+            const exact = setupEvidence(latestEvidence, analysis.fingerprint);
+
+            if (exact.n < rules.minEvidence) {
+                reportGate({
+                    status: 'SHADOW',
+                    reason:
+                        'Shadow validating exact setup: ' +
+                        exact.n +
+                        '/' +
+                        rules.minEvidence +
+                        ' independent forward results.',
+                    breakeven: null,
+                    required: null,
+                });
+                await new Promise(res => setTimeout(res, 250));
+                continue;
+            }
+
+            if (last_traded_fingerprint_ref.current === analysis.fingerprint) {
+                reportGate({
+                    status: 'COOLDOWN',
+                    reason: 'This fingerprint has already been traded. Waiting for the market state to change.',
+                    breakeven: null,
+                    required: null,
+                });
+                await new Promise(res => setTimeout(res, 250));
+                continue;
+            }
+
+            const liveSpec = candidateToContract(selectedFamily, analysis.candidate);
+
             try {
-                const t = r.cur_type;
-                setStats(prev => ({ ...prev, cur_stake: r.cur_stake }));
-                // eslint-disable-next-line no-await-in-loop
-                const cid = await buyOnce(t.code, t.barrier, Number(r.cur_stake.toFixed(2)));
-                log(`▶ ${t.label} — stake ${r.cur_stake.toFixed(2)}`);
-                const settle_p = settleContract(cid, (duration + 30) * 1000);
-                if (speed === 'normal') {
-                    // eslint-disable-next-line no-await-in-loop
-                    afterSettle(await settle_p);
-                    if (checkStop()) return;
-                } else {
-                    settle_p.then(p => {
-                        afterSettle(p);
-                        checkStop();
+                const prepared = await prepareProposal(liveSpec, Number(r.curStake.toFixed(2)), 1);
+                const required = prepared.breakeven + rules.margin;
+
+                if (!(exact.lowerBound > required)) {
+                    reportGate({
+                        status: 'SHADOW',
+                        reason:
+                            'No trade · exact setup lower bound ' +
+                            (exact.lowerBound * 100).toFixed(2) +
+                            '% must beat live break-even + margin ' +
+                            (required * 100).toFixed(2) +
+                            '%.',
+                        breakeven: prepared.breakeven,
+                        required,
                     });
+                    await new Promise(res => setTimeout(res, 500));
+                    continue;
+                }
+
+                if (!executionAllowed) {
+                    last_traded_fingerprint_ref.current = analysis.fingerprint;
+                    reportGate({
+                        status: 'REAL SHADOW',
+                        reason:
+                            'VALIDATED SETUP · ' +
+                            analysis.agreementTier +
+                            '-model consensus · ' +
+                            exact.correct +
+                            '/' +
+                            exact.n +
+                            ' fresh correct · LB ' +
+                            (exact.lowerBound * 100).toFixed(2) +
+                            '% > ' +
+                            (required * 100).toFixed(2) +
+                            '% required. Real execution remains locked during validation.',
+                        breakeven: prepared.breakeven,
+                        required,
+                    });
+                    journalLog(
+                        'Nolimitz AI real-shadow setup qualified · ' +
+                        liveSpec.label +
+                        ' · no real contract executed.'
+                    );
+                    await new Promise(res => setTimeout(res, 350));
+                    continue;
+                }
+
+                setGateInfo({
+                    status: 'TRADE READY',
+                    reason:
+                        analysis.agreementTier +
+                        '-model consensus · ' +
+                        exact.correct +
+                        '/' +
+                        exact.n +
+                        ' fresh correct · LB ' +
+                        (exact.lowerBound * 100).toFixed(2) +
+                        '% > ' +
+                        (required * 100).toFixed(2) +
+                        '% required.',
+                    breakeven: prepared.breakeven,
+                    required,
+                });
+
+                last_traded_fingerprint_ref.current = analysis.fingerprint;
+                setStats(prev => ({ ...prev, cur_stake: r.curStake }));
+
+                const cid = await buyPrepared(prepared);
+
+                log(
+                    'AI TRADE · ' +
+                        liveSpec.label +
+                        ' · ' +
+                        currency +
+                        ' ' +
+                        r.curStake.toFixed(2) +
+                        ' · LB ' +
+                        (exact.lowerBound * 100).toFixed(2) +
+                        '%'
+                );
+
+                journalLog(
+                    'Nolimitz AI trade · ' +
+                        liveSpec.label +
+                        ' · ' +
+                        currency +
+                        ' ' +
+                        r.curStake.toFixed(2) +
+                        ' · contract ' +
+                        cid
+                );
+
+                const profit = await settleContract(cid, 1);
+                if (profit === null) {
+                    journalLog('Nolimitz AI settlement timeout.', MessageTypes.ERROR);
+                    continue;
+                }
+
+                applyTradeResult(r, profit, baseStake, multiplier, maxSteps);
+
+                if (tpValue > 0 && r.pnl >= tpValue) {
+                    stopRun('Take profit reached', r, 'tp');
+                    return;
+                }
+                if (slValue > 0 && r.pnl <= -slValue) {
+                    stopRun('Stop loss reached', r, 'sl');
+                    return;
                 }
             } catch (e) {
-                log(`✘ ${describeError(e)}`);
-                // eslint-disable-next-line no-await-in-loop
-                await new Promise(res => setTimeout(res, 1500));
+                const message = describeError(e);
+                log('Trade error · ' + message);
+                journalLog('Nolimitz AI trade error · ' + message, MessageTypes.ERROR);
+                await new Promise(res => setTimeout(res, 600));
             }
-            // eslint-disable-next-line no-await-in-loop
-            await new Promise(res => setTimeout(res, speed === 'fast' ? 700 : 250));
-        }
-    };
 
-    const cancelSettlers = () => {
-        settle_handles_ref.current.forEach(h => h.cancel());
-        settle_handles_ref.current.clear();
+            // Contract duration is already the minimum 1 tick. Re-check the
+            // next eligible setup almost immediately after settlement instead of
+            // sleeping for up to 1.2s.
+            await new Promise(res => setTimeout(res, risk === 'low' ? 220 : 120));
+        }
     };
 
     const stop = () => {
         log('Stopped by user');
-        cancelSettlers();
-        if (run_ref.current) stopRun(null, 0, run_ref.current);
+        const r = run_ref.current;
+        if (r) r.active = false;
+        run_ref.current = null;
         setRunning(false);
+
+        try {
+            run_panel?.setIsRunning?.(false);
+            if (!run_panel?.has_open_contract) {
+                run_panel?.setContractStage?.(contract_stages.NOT_RUNNING);
+            }
+        } catch {
+            /* noop */
+        }
+
+        journalLog('Nolimitz AI stopped by user.');
     };
 
+    const currentStrategy = STRATEGIES.find(x => x.id === strategy);
+    const winRate = stats.trades ? (100 * stats.wins) / stats.trades : 0;
+
     return (
-        <div className='speedbot'>
-            <div className='speedbot__panel'>
-                <div className='speedbot__titlerow'>
-                    <div className='speedbot__title'>Speedbot</div>
+        <div className='nolimitz-ai'>
+            <div className='nolimitz-ai__shell'>
+                <div className='nolimitz-ai__hero'>
+                    <div>
+                        <span className='nolimitz-ai__eyebrow'>NOLIMITZBOTS</span>
+                        <h1><span>Nolimitz AI</span> Trading Dashboard</h1>
+                        <p>Automated Deriv execution with live controls, strategy filters and session risk limits.</p>
+                    </div>
                     <GuideButton onClick={() => setGuideOpen(true)} />
                 </div>
                 <Guide tool='speedbot' open={guide_open} onClose={() => setGuideOpen(false)} />
-                <div className='speedbot__subtitle'>Execute a trade on every cycle with TP/SL protection. Demo first.</div>
 
-                {!is_logged_in && <div className='speedbot__warn'>Sign in with your Deriv account to run Speedbot.</div>}
-
-                <div className='speedbot__startbar'>
-                    <button
-                        className={`speedbot__start ${running ? 'speedbot__start--stop' : ''}`}
-                        disabled={!is_logged_in}
-                        onClick={running ? stop : start}
-                    >
-                        {running ? '■ STOP' : '▶ START'}
-                    </button>
-                    <button
-                        className='speedbot__once'
-                        disabled={!is_logged_in || running}
-                        onClick={tradeOnce}
-                    >
-                        Trade Once
-                    </button>
-                    <div className='speedbot__speed'>
-                        <span className='speedbot__speed-label'>Execution speed</span>
-                        <div className='speedbot__speed-btns'>
-                            <button
-                                className={speed === 'fast' ? 'active' : ''}
-                                onClick={() => setSpeed('fast')}
-                                disabled={running}
-                            >
-                                ⚡ Fast
-                            </button>
-                            <button
-                                className={speed === 'normal' ? 'active' : ''}
-                                onClick={() => setSpeed('normal')}
-                                disabled={running}
-                            >
-                                ▶▶ Normal
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                <div className='speedbot__row speedbot__row--market'>
-                    <select value={symbol} disabled={running} onChange={e => {
-                        setSymbol(e.target.value);
-                        setTimeout(() => window.dispatchEvent(new Event('nlb-speed-symbol')), 0);
-                    }}>
-                        {MARKETS.map(m => (
-                            <option key={m.code} value={m.code}>
-                                {m.label}
-                            </option>
-                        ))}
-                    </select>
-                    <div className='speedbot__quote'>{quote ?? '—'}</div>
-                </div>
-
-                <div className='speedbot__row'>
-                    <select value={type_code} disabled={running} onChange={e => setTypeCode(e.target.value)}>
-                        {TYPES.map(t => (
-                            <option key={t.code} value={t.code}>
-                                {t.label}
-                            </option>
-                        ))}
-                    </select>
-                </div>
-
-                <button className='speedbot__scanner-btn' disabled={running} onClick={() => setScannerOpen(true)}>
-                    ⚙ AI SCANNER — find & auto-trade best market
-                </button>
-
-                {(() => {
-                    const evenCount = digits.filter(d => d % 2 === 0).length;
-                    const total = digits.length || 1;
-                    const evenPct = (100 * evenCount) / total;
-                    return (
-                        <div className='speedbot__pattern'>
-                            <div className='speedbot__pattern-head'>Even/Odd pattern (last {digits.length})</div>
-                            <div className='speedbot__pattern-stream'>
-                                {digits.slice(-16).map((d, i) => (
-                                    <span key={i} className={`speedbot__eo ${d % 2 === 0 ? 'e' : 'o'}`}>
-                                        {d % 2 === 0 ? 'E' : 'O'}
-                                    </span>
-                                ))}
-                                {digits.length === 0 && <span className='speedbot__pattern-empty'>—</span>}
-                            </div>
-                            <div className='speedbot__pattern-stats'>
-                                <span>Even: {digits.length ? evenPct.toFixed(1) : '0.0'}%</span>
-                                <span>Odd: {digits.length ? (100 - evenPct).toFixed(1) : '0.0'}%</span>
-                                <span>Total: {digits.length}</span>
+                <section className='nolimitz-ai__account'>
+                    <div className='nolimitz-ai__account-top'>
+                        <div className='nolimitz-ai__account-id'>
+                            <div className='nolimitz-ai__avatar'>NL</div>
+                            <div>
+                                <small>CONNECTED ACCOUNT</small>
+                                <strong>{loginid}</strong>
                             </div>
                         </div>
-                    );
-                })()}
+                        <span className={`nolimitz-ai__account-type ${account_mode}`}>
+                            <i /> {!is_logged_in ? 'OFFLINE' : is_demo ? 'DEMO' : 'REAL'}
+                        </span>
+                    </div>
+                    <div className='nolimitz-ai__balance'>
+                        <small>LIVE BALANCE</small>
+                        <strong>{balance.toFixed(2)} <span>{currency}</span></strong>
+                        <div className={`nolimitz-ai__live-dot ${feedStatus.toLowerCase()}`}>● <span>{feedStatus}</span></div>
+                    </div>
+                </section>
 
-                <div className='speedbot__grid'>
-                    <div className='speedbot__field'>
-                        <span>Ticks</span>
-                        <input type='number' min={1} max={10} value={duration} disabled={running} onChange={e => setDuration(Math.min(10, Math.max(1, parseInt(e.target.value || 1, 10))))} />
+                {!is_logged_in && (
+                    <div className='nolimitz-ai__warning'>Connect your Deriv account before starting Nolimitz AI.</div>
+                )}
+                {is_logged_in && !is_demo && (
+                    <div className='nolimitz-ai__warning nolimitz-ai__warning--real'>
+                        REAL ACCOUNT ACTIVE — Nolimitz AI analysis and shadow validation are available automatically. Contract execution remains demo-only during validation.
                     </div>
-                    <div className='speedbot__field'>
-                        <span>Stake</span>
-                        <input type='number' min='0.35' step='0.01' value={stake} disabled={running} onChange={e => setStake(e.target.value)} />
-                    </div>
-                    <div className='speedbot__field'>
-                        <span>Take Profit</span>
-                        <input type='number' min='0' step='1' value={tp} disabled={running} onChange={e => setTp(e.target.value)} />
-                    </div>
-                    <div className='speedbot__field'>
-                        <span>Stop Loss</span>
-                        <input type='number' min='0' step='1' value={sl} disabled={running} onChange={e => setSl(e.target.value)} />
-                    </div>
-                </div>
+                )}
 
-                <div className='speedbot__toggles'>
-                    <label className='speedbot__toggle'>
-                        <span>Alternate Even and Odd</span>
-                        <input type='checkbox' checked={alt_eo} disabled={running} onChange={e => setAltEo(e.target.checked)} />
-                        <i />
-                    </label>
-                    <label className='speedbot__toggle'>
-                        <span>Alternate on Loss</span>
-                        <input type='checkbox' checked={alt_on_loss} disabled={running} onChange={e => setAltOnLoss(e.target.checked)} />
-                        <i />
-                    </label>
-                    <label className='speedbot__toggle'>
-                        <span>Enable Martingale</span>
-                        <input type='checkbox' checked={martingale} disabled={running} onChange={e => setMartingale(e.target.checked)} />
-                        <i />
-                    </label>
-                    {martingale && (
-                        <div className='speedbot__field speedbot__field--inline'>
-                            <span>Martingale Multiplier</span>
-                            <input type='number' min='1' max='5' step='0.05' value={mult} disabled={running} onChange={e => setMult(e.target.value)} />
+                <section className='nolimitz-ai__card nolimitz-ai__card--engine'>
+                    <div className='nolimitz-ai__card-head'>
+                        <div className='nolimitz-ai__brand-icon'>✦</div>
+                        <div>
+                            <span className='nolimitz-ai__tag'>NOLIMITZ AI</span>
+                            <h2>Automated Trading Engine</h2>
+                        </div>
+                        <span className='nolimitz-ai__mode-badge'>{running ? 'RUNNING' : 'READY'}</span>
+                    </div>
+
+                    <div className='nolimitz-ai__field-label'>MARKET</div>
+                    <div className='nolimitz-ai__market-row'>
+                        <select
+                            value={symbol}
+                            disabled={running}
+                            onChange={e => {
+                                setSymbol(e.target.value);
+                                setTimeout(() => window.dispatchEvent(new Event('nlb-ai-symbol')), 0);
+                            }}
+                        >
+                            {MARKETS.map(m => <option key={m.code} value={m.code}>{m.label}</option>)}
+                        </select>
+                        <div className='nolimitz-ai__quote'>
+                            <small>LIVE TICK</small>
+                            <strong>{quote ?? '—'}</strong>
+                        </div>
+                    </div>
+
+                    <div className='nolimitz-ai__field-label'>TRADING STRATEGY</div>
+                    <div className='nolimitz-ai__segmented'>
+                        {STRATEGIES.map(s => (
+                            <button
+                                key={s.id}
+                                disabled={running}
+                                className={strategy === s.id ? 'active' : ''}
+                                onClick={() => setStrategy(s.id)}
+                            >
+                                {s.label}
+                            </button>
+                        ))}
+                    </div>
+                    <div className='nolimitz-ai__strategy-note'>
+                        {currentStrategy?.note}
+                    </div>
+
+                    <div className='nolimitz-ai__engine-panel'>
+                        <div>
+                            <span>ENGINE</span>
+                            <strong>{NOLIMITZ_AI_ENGINE_VERSION}</strong>
+                        </div>
+                        <div>
+                            <span>TICK FEED</span>
+                            <strong>{feedStatus}</strong>
+                        </div>
+                        <div>
+                            <span>STATUS</span>
+                            <strong>{strategy === 'alpha' ? 'EXECUTION TEST' : gateInfo.status}</strong>
+                        </div>
+                        <div>
+                            <span>CANDIDATE</span>
+                            <strong>{engineAnalysis?.candidate ? engineAnalysis.candidate.toUpperCase() : '—'}</strong>
+                        </div>
+                        <div>
+                            <span>AGREEMENT</span>
+                            <strong>{engineAnalysis?.agreementTier ? `${engineAnalysis.agreementTier} models` : '—'}</strong>
+                        </div>
+                        <div>
+                            <span>FRESH EVIDENCE</span>
+                            <strong>{evidenceState?.correct || 0}/{evidenceState?.total || 0}</strong>
+                        </div>
+                        <div>
+                            <span>EXACT SETUP</span>
+                            <strong>{exactSetupEvidence.correct}/{exactSetupEvidence.n}</strong>
+                        </div>
+                        <div>
+                            <span>SETUP LOWER BOUND</span>
+                            <strong>{exactSetupEvidence.n ? `${(exactSetupEvidence.lowerBound * 100).toFixed(2)}%` : '—'}</strong>
+                        </div>
+                        <div>
+                            <span>LIVE BREAK-EVEN</span>
+                            <strong>{gateInfo.breakeven ? `${(gateInfo.breakeven * 100).toFixed(2)}%` : '—'}</strong>
+                        </div>
+                        <p>{strategy === 'alpha' ? 'Alpha places one user-selected demo contract only, to verify the full execution pipeline.' : gateInfo.reason}</p>
+                    </div>
+
+                    {strategy !== 'alpha' && engineAnalysis?.votes?.length > 0 && (
+                        <div className='nolimitz-ai__votes'>
+                            <span className='nolimitz-ai__votes-title'>LIVE MODEL VOTES</span>
+                            {engineAnalysis.votes.map(vote => (
+                                <div key={vote.model} className={engineAnalysis.agreementModels?.includes(vote.model) ? 'agree' : ''}>
+                                    <b>{vote.model}</b>
+                                    <span>{vote.side.toUpperCase()}</span>
+                                    <small>{(vote.probability * 100).toFixed(2)}% from {vote.samples} samples</small>
+                                </div>
+                            ))}
                         </div>
                     )}
-                    <label className='speedbot__toggle'>
-                        <span>Recovery Mode (gentler than martingale)</span>
-                        <input type='checkbox' checked={recovery} disabled={running || martingale} onChange={e => setRecovery(e.target.checked)} />
-                        <i />
-                    </label>
-                </div>
 
-                {recovery && !martingale && (
-                    <div className='speedbot__mart-warn'>
-                        Recovery Mode raises stake just enough to recover the running loss, capped at 5× base. Gentler
-                        than martingale but still risk — test on demo.
-                    </div>
-                )}
-
-                {martingale && (
-                    <div className='speedbot__mart-warn'>
-                        Martingale multiplies stake after losses — it can drain a balance fast. Capped at{' '}
-                        {MAX_MARTINGALE_STEPS} steps, then stake resets.
-                    </div>
-                )}
-
-                <div className='speedbot__status'>
-                    <div>
-                        <span>Ticks</span>
-                        {stats.ticks}
-                    </div>
-                    <div>
-                        <span>Last digit</span>
-                        {stats.last_digit ?? '—'}
-                    </div>
-                    <div>
-                        <span>Trades</span>
-                        {stats.trades}
-                    </div>
-                    <div>
-                        <span>W / L</span>
-                        {stats.wins}/{stats.losses}
-                    </div>
-                    <div className={stats.pnl >= 0 ? 'pos' : 'neg'}>
-                        <span>P/L</span>
-                        {stats.pnl >= 0 ? '+' : ''}
-                        {stats.pnl.toFixed(2)}
-                    </div>
-                </div>
-
-                {logs.length > 0 && (
-                    <div className='speedbot__log'>
-                        {logs.map((l, i) => (
-                            <div key={i}>{l}</div>
+                    <div className='nolimitz-ai__field-label'>CONTRACT TYPE</div>
+                    <div className='nolimitz-ai__contracts'>
+                        {CONTRACTS.map(item => (
+                            <button
+                                key={item.id}
+                                disabled={running || !item.available || (strategy !== 'alpha' && item.id === 'rise_fall')}
+                                className={`${contract === item.id ? 'active' : ''} ${item.recommended ? 'recommended' : ''}`}
+                                onClick={() => item.available && setContract(item.id)}
+                            >
+                                <b>{item.symbol}</b>
+                                <span>{item.label}</span>
+                                {item.recommended && <small>RECOMMENDED</small>}
+                                {!item.available && <small>{item.note}</small>}
+                            </button>
                         ))}
                     </div>
+
+                    {strategy === 'alpha' && contract === 'rise_fall' && (
+                        <div className='nolimitz-ai__choice-row'>
+                            <button className={direction === 'rise' ? 'active' : ''} onClick={() => setDirection('rise')} disabled={running}>RISE</button>
+                            <button className={direction === 'fall' ? 'active' : ''} onClick={() => setDirection('fall')} disabled={running}>FALL</button>
+                        </div>
+                    )}
+                    {strategy === 'alpha' && contract === 'even_odd' && (
+                        <div className='nolimitz-ai__choice-row'>
+                            <button className={direction === 'even' ? 'active' : ''} onClick={() => setDirection('even')} disabled={running}>EVEN</button>
+                            <button className={direction === 'odd' ? 'active' : ''} onClick={() => setDirection('odd')} disabled={running}>ODD</button>
+                        </div>
+                    )}
+                    {strategy === 'alpha' && contract === 'over_under' && (
+                        <div className='nolimitz-ai__choice-row'>
+                            <button className={direction === 'over' ? 'active' : ''} onClick={() => setDirection('over')} disabled={running}>OVER 2</button>
+                            <button className={direction === 'under' ? 'active' : ''} onClick={() => setDirection('under')} disabled={running}>UNDER 7</button>
+                        </div>
+                    )}
+
+                    <div className='nolimitz-ai__field-label'>STAKE SIZE [{currency}]</div>
+                    <div className='nolimitz-ai__stepper'>
+                        <button disabled={running} onClick={() => setStake(String(Math.max(0.35, (parseFloat(stake) || 0.5) - 0.5).toFixed(2)))}>−</button>
+                        <input value={stake} disabled={running} onChange={e => setStake(e.target.value)} />
+                        <button disabled={running} onClick={() => setStake(String(((parseFloat(stake) || 0.5) + 0.5).toFixed(2)))}>+</button>
+                    </div>
+
+                    <label className='nolimitz-ai__optimization'>
+                        <span>
+                            <b>MEASURED VALIDATION</b>
+                            <small>Real tick models + fresh forward evidence + live payout break-even. This safety gate cannot be bypassed in AI modes.</small>
+                        </span>
+                        <input type='checkbox' checked disabled />
+                        <i />
+                    </label>
+
+                    <div className='nolimitz-ai__field-label'>RISK LEVEL</div>
+                    <div className='nolimitz-ai__risk-tabs'>
+                        {['low', 'medium', 'high'].map(level => (
+                            <button
+                                key={level}
+                                className={risk === level ? 'active' : ''}
+                                disabled={running}
+                                onClick={() => {
+                                    setRisk(level);
+                                    if (level === 'low') setMartingale(false);
+                                }}
+                            >
+                                {level.toUpperCase()}
+                            </button>
+                        ))}
+                    </div>
+
+                    <div className='nolimitz-ai__targets'>
+                        <label>
+                            <span>PROFIT TARGET</span>
+                            <div><b>◎</b><input value={tp} disabled={running} onChange={e => setTp(e.target.value)} /><small>{currency}</small></div>
+                        </label>
+                        <label>
+                            <span>MAXIMUM LOSS</span>
+                            <div><b>♢</b><input value={sl} disabled={running} onChange={e => setSl(e.target.value)} /><small>{currency}</small></div>
+                        </label>
+                    </div>
+
+                    <div className='nolimitz-ai__advanced'>
+                        <label>
+                            <span>Martingale</span>
+                            <input
+                                type='checkbox'
+                                checked={martingale}
+                                disabled={running || risk === 'low'}
+                                onChange={e => setMartingale(e.target.checked)}
+                            />
+                            <i />
+                        </label>
+                        {martingale && (
+                            <div className='nolimitz-ai__multiplier'>
+                                <span>Factor</span>
+                                <input value={mult} disabled={running} onChange={e => setMult(e.target.value)} />
+                                <small>Max {maxMartingaleSteps(risk)} recovery steps</small>
+                            </div>
+                        )}
+                        <div className='nolimitz-ai__duration'>
+                            <span>Contract duration</span>
+                            <select
+                                value={strategy === 'alpha' ? duration : 1}
+                                disabled={running || strategy !== 'alpha'}
+                                onChange={e => setDuration(clamp(parseInt(e.target.value || 1, 10), 1, 10))}
+                            >
+                                {[1,2,3,4,5,10].map(v => <option key={v} value={v}>{v} tick{v > 1 ? 's' : ''}</option>)}
+                            </select>
+                            <small>{strategy === 'alpha' ? 'Alpha test duration' : 'AI evidence horizon is fixed to 1 tick'}</small>
+                        </div>
+                    </div>
+
+                    <button
+                        className='nolimitz-ai__test'
+                        disabled={!is_logged_in || running || executionTesting}
+                        onClick={testDemoExecution}
+                    >
+                        {executionTesting ? 'TESTING DEMO EXECUTION…' : 'TEST 1 DEMO CONTRACT'}
+                    </button>
+
+                    <button
+                        className={`nolimitz-ai__run ${running ? 'stop' : ''}`}
+                        disabled={!is_logged_in || executionTesting}
+                        onClick={running ? stop : start}
+                    >
+                        {running ? '■ STOP NOLIMITZ AI' : '⚡ RUN UNTIL TP / SL'}
+                    </button>
+                </section>
+
+                <section className='nolimitz-ai__session'>
+                    <div>
+                        <span>TRADES</span>
+                        <strong>{stats.trades}</strong>
+                    </div>
+                    <div>
+                        <span>WINS / LOSSES</span>
+                        <strong>{stats.wins}/{stats.losses}</strong>
+                    </div>
+                    <div>
+                        <span>HIT RATE</span>
+                        <strong>{stats.trades ? `${winRate.toFixed(1)}%` : '—'}</strong>
+                    </div>
+                    <div className={stats.pnl >= 0 ? 'positive' : 'negative'}>
+                        <span>SESSION P/L</span>
+                        <strong>{stats.pnl >= 0 ? '+' : ''}{stats.pnl.toFixed(2)} {currency}</strong>
+                    </div>
+                </section>
+
+                <div className='nolimitz-ai__signal'>
+                    <span>CURRENT ENGINE PICK</span>
+                    <strong>{contractSpec ? contractSpec.label : 'WAITING'}</strong>
+                    <small>
+                        {strategy === 'alpha'
+                            ? (is_demo ? 'Manual demo execution test — no AI probability claim.' : 'Alpha execution test is demo-only; real account remains analysis/shadow.')
+                            : engineAnalysis?.reason || 'Waiting for measured consensus.'}
+                    </small>
+                </div>
+
+                {strategy !== 'alpha' && bestSetups.length > 0 && (
+                    <section className='nolimitz-ai__setups'>
+                        <div className='nolimitz-ai__setups-title'>FRESH EXACT-SETUP CALIBRATION</div>
+                        {bestSetups.map(row => (
+                            <div key={row.fingerprint}>
+                                <span>{row.side.toUpperCase()} · {row.tier}-model</span>
+                                <strong>{row.correct}/{row.n}</strong>
+                                <small>LB {(row.lowerBound * 100).toFixed(2)}%</small>
+                            </div>
+                        ))}
+                    </section>
                 )}
 
-                <div className='speedbot__disclaimer'>
-                    Every cycle stakes real balance on random tick outcomes. TP/SL limit a session — they don't create an
-                    edge.
+                {logs.length > 0 && (
+                    <section className='nolimitz-ai__log'>
+                        {logs.map((line, index) => <div key={index}>{line}</div>)}
+                    </section>
+                )}
+
+                <div className='nolimitz-ai__disclaimer'>
+                    Nolimitz AI automates execution and risk rules. Digit/tick outcomes remain probabilistic; filters do not guarantee profit.
                 </div>
             </div>
 
-            <AiScanner open={scanner_open} onClose={() => setScannerOpen(false)} stake={stake} count={5} currency={currency} isLoggedIn={is_logged_in} />
-
             {result && (
-                <div className='speedbot__overlay' role='dialog'>
-                    <div className={`speedbot__popup ${result.pnl >= 0 ? 'speedbot__popup--win' : 'speedbot__popup--loss'}`}>
-                        <button className='speedbot__popup-close' onClick={() => setResult(null)}>
-                            ✕
-                        </button>
-                        <div className='speedbot__popup-tag'>{result.reason}</div>
-                        <div className='speedbot__popup-amount'>
-                            {result.pnl >= 0 ? '+' : ''}
-                            {result.pnl.toFixed(2)}
-                        </div>
-                        <div className='speedbot__popup-grid'>
-                            <div>
-                                <span>Trades</span>
-                                {result.trades}
-                            </div>
-                            <div>
-                                <span>Wins</span>
-                                {result.wins}
-                            </div>
-                            <div>
-                                <span>Losses</span>
-                                {result.losses}
-                            </div>
+                <div className='nolimitz-ai__overlay'>
+                    <div className={`nolimitz-ai__result ${result.pnl >= 0 ? 'win' : 'loss'}`}>
+                        <button onClick={() => setResult(null)}>×</button>
+                        <small>
+                            {result.type === 'tp'
+                                ? 'TAKE PROFIT REACHED'
+                                : result.type === 'sl'
+                                  ? 'STOP LOSS REACHED'
+                                  : result.reason}
+                        </small>
+                        <h3>{result.pnl >= 0 ? '+' : ''}{result.pnl.toFixed(2)} {currency}</h3>
+                        {(result.type === 'tp' || result.type === 'sl') && (
+                            <p className='nolimitz-ai__target-message'>
+                                {result.type === 'tp'
+                                    ? 'Profit target reached. Nolimitz AI stopped the session automatically.'
+                                    : 'Stop loss reached. Nolimitz AI stopped the session automatically.'}
+                            </p>
+                        )}
+                        <div>
+                            <span>Trades <b>{result.trades}</b></span>
+                            <span>Wins <b>{result.wins}</b></span>
+                            <span>Losses <b>{result.losses}</b></span>
                         </div>
                     </div>
                 </div>
@@ -566,4 +1382,4 @@ const Speedbot = observer(() => {
     );
 });
 
-export default Speedbot;
+export default NolimitzAI;

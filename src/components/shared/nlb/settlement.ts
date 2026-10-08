@@ -32,13 +32,14 @@ export const describeError = e => {
 // Returns a handle with .cancel(). Calls onUpdate({settled,total}) as they resolve,
 // and onDone({profits, total, wins, settled, count}) exactly once when all are in
 // (or the safety timeout fires). Never double-counts, never leaks subscriptions.
-export const trackContracts = (contract_ids, { onUpdate, onDone, timeoutMs = 120000 } = {}) => {
+export const trackContracts = (contract_ids, { onUpdate, onDone, onContract, timeoutMs = 120000 } = {}) => {
     const pending = new Set(contract_ids);
     const profits = {};
     const count = contract_ids.length;
     let finalized = false;
     let sub = null;
     let poll = null;
+    let initialPoll = null;
     let timeout = null;
 
     const cleanup = () => {
@@ -53,6 +54,10 @@ export const trackContracts = (contract_ids, { onUpdate, onDone, timeoutMs = 120
         if (poll) {
             clearInterval(poll);
             poll = null;
+        }
+        if (initialPoll) {
+            clearTimeout(initialPoll);
+            initialPoll = null;
         }
         if (timeout) {
             clearTimeout(timeout);
@@ -74,6 +79,9 @@ export const trackContracts = (contract_ids, { onUpdate, onDone, timeoutMs = 120
         if (!contract) return;
         // Feed the run panel on every update (open + sold) so it shows live.
         reportContract(contract);
+        // Callers outside Bot Builder can also mirror the same contract directly
+        // into the shared stores when the Bot Builder listeners are not mounted.
+        onContract?.(contract);
         if (!contract.is_sold) return;
         const id = contract.contract_id;
         if (!pending.has(id)) return; // dedupe: already recorded
@@ -92,8 +100,10 @@ export const trackContracts = (contract_ids, { onUpdate, onDone, timeoutMs = 120
         /* stream unavailable — poll will cover it */
     }
 
-    // Fallback: actively poll any still-pending contracts. Covers missed stream messages.
-    poll = setInterval(() => {
+    // Fallback: actively poll any still-pending contracts. Covers missed stream
+    // messages, especially very fast 1-tick contracts that can settle before the
+    // shared proposal_open_contract stream delivers their first update.
+    const pollPending = () => {
         if (pending.size === 0) return;
         pending.forEach(id => {
             try {
@@ -104,7 +114,12 @@ export const trackContracts = (contract_ids, { onUpdate, onDone, timeoutMs = 120
                 /* noop */
             }
         });
-    }, 3000);
+    };
+
+    // Do one near-immediate read, then continue at a moderate cadence so Bot
+    // Builder/Summary mirrors fast contracts without hammering the API.
+    initialPoll = setTimeout(pollPending, 250);
+    poll = setInterval(pollPending, 1500);
 
     // Safety net: never hang forever. Unsettled contracts are reported as-is.
     timeout = setTimeout(finalize, timeoutMs);

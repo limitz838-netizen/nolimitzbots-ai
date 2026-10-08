@@ -10,7 +10,7 @@ import { useStore } from '@/hooks/useStore';
 import { isDemoAccount } from '@/utils/account-helpers';
 import { subscribeTicks, TICK_STATUS, getDiagnostics } from '@/components/shared/nlb/tick-stream';
 import { predict, Z_CRITICAL } from '@/components/shared/nlb/matches-engine';
-import { record, read, reset, summarise } from '@/components/shared/nlb/backtest-store';
+import { record, read, reset, summarise, setupStats, topSetups } from '@/components/shared/nlb/backtest-store';
 import {
     read as readAnalyse,
     record as recordAnalyse,
@@ -48,6 +48,8 @@ const DEFAULT_SYMBOLS = [
 
 const WINDOW_CHOICES = [50, 100, 250, 500, 1000];
 const HISTORY = 1000;
+const MIN_SETUP_EVIDENCE = 30;
+const SETUP_EDGE_MARGIN = 0.005;
 
 const STATUS_TEXT = {
     [TICK_STATUS.LIVE]: 'LIVE',
@@ -82,9 +84,27 @@ const FLOOR_RATE = {
 const pct = v => `${(v * 100).toFixed(2)}%`;
 const clockOf = ts => new Date(ts).toLocaleTimeString('en-GB');
 
+const autoTradeDigit = prediction => {
+    if (!prediction) return null;
+    if (prediction.predictedDigit !== null && prediction.predictedDigit !== undefined) {
+        return prediction.predictedDigit;
+    }
+    // Demo auto mode may use the live consensus candidate before the slower
+    // long-run fingerprint calibration unlocks. This is still model-derived:
+    // at least two independent Matches models must agree on the same digit.
+    if (
+        prediction.candidateDigit !== null &&
+        prediction.candidateDigit !== undefined &&
+        Number(prediction.agreementTier || 0) >= 2
+    ) {
+        return prediction.candidateDigit;
+    }
+    return null;
+};
+
 const MatchesPro = () => {
     const { isAuthorized, accountList, activeLoginid } = useApiBase();
-    const { run_panel } = useStore();
+    const { run_panel, transactions, summary_card } = useStore();
 
     const [symbol, setSymbol] = React.useState('R_100');
     const [symbols, setSymbols] = React.useState(DEFAULT_SYMBOLS);
@@ -109,6 +129,10 @@ const MatchesPro = () => {
     const [analyse_stats, setAnalyseStats] = React.useState(null);
 
     const [auto, setAuto] = React.useState(false);
+    const [executionTesting, setExecutionTesting] = React.useState(false);
+    const [executionTestResult, setExecutionTestResult] = React.useState('');
+    const [sessionResult, setSessionResult] = React.useState(null);
+    const [sessionStats, setSessionStats] = React.useState({ trades: 0, wins: 0, losses: 0, pnl: 0 });
     const [limits, setLimits] = React.useState(DEFAULT_LIMITS);
     const [day, setDay] = React.useState(() => loadDay('R_100'));
     const [gate, setGate] = React.useState({ allowed: false, reason: 'Auto trade is off' });
@@ -125,16 +149,21 @@ const MatchesPro = () => {
     const trackers_ref = React.useRef([]);
     const analysis_ref = React.useRef(null);
     const proposals_ref = React.useRef(null);
+    const payout_by_digit_ref = React.useRef({});
+    const last_shadow_fingerprint_ref = React.useRef(null);
+    const session_stats_ref = React.useRef({ trades: 0, wins: 0, losses: 0, pnl: 0 });
 
     payout_ref.current = payout;
     auto_ref.current = auto;
     limits_ref.current = limits;
     symbol_ref.current = symbol;
 
-    const currency = React.useMemo(() => {
-        const acc = (accountList || []).find(a => a.loginid === activeLoginid);
-        return acc?.currency || 'USD';
-    }, [accountList, activeLoginid]);
+    const activeAccount = React.useMemo(
+        () => (accountList || []).find(a => a.loginid === activeLoginid),
+        [accountList, activeLoginid]
+    );
+    const currency = activeAccount?.currency || 'USD';
+    const accountBalance = Number(activeAccount?.balance);
 
     const is_demo = isDemoAccount(activeLoginid || '');
 
@@ -154,60 +183,219 @@ const MatchesPro = () => {
         return d;
     }, []);
 
+    const calibratePrediction = React.useCallback((raw, state) => {
+        if (!raw) return raw;
+        if (!raw.fingerprint || raw.candidateDigit === null || raw.candidateDigit === undefined) {
+            return {
+                ...raw,
+                predictedDigit: null,
+                signalQuality: 'NO SIGNAL',
+                liveCalibration: { n: 0, correct: 0, accuracy: 0, lowerBound: 0, tradeReady: false },
+            };
+        }
+
+        const setup = setupStats(state, raw.fingerprint);
+        const required = Number(raw.breakeven || 0.1) + SETUP_EDGE_MARGIN;
+        const enough = setup.n >= MIN_SETUP_EVIDENCE;
+        const tradeReady = enough && setup.lowerBound > required;
+
+        let reason = raw.reason;
+        if (!enough) {
+            reason = `Shadow testing setup: ${setup.n}/${MIN_SETUP_EVIDENCE} independent forward results collected for this exact fingerprint.`;
+        } else if (!tradeReady) {
+            reason = `No trade: this exact setup's lower-bound accuracy is ${(setup.lowerBound * 100).toFixed(2)}%; it must exceed ${(required * 100).toFixed(2)}% for this digit's current payout.`;
+        } else {
+            reason = `TRADE CANDIDATE: exact setup has ${setup.correct}/${setup.n} correct, ${(setup.accuracy * 100).toFixed(2)}% raw accuracy and ${(setup.lowerBound * 100).toFixed(2)}% lower-bound accuracy versus ${(required * 100).toFixed(2)}% required.`;
+        }
+
+        return {
+            ...raw,
+            predictedDigit: tradeReady ? raw.candidateDigit : null,
+            signalQuality: tradeReady ? 'STRONG' : 'NO SIGNAL',
+            reason,
+            liveCalibration: { ...setup, required, tradeReady },
+        };
+    }, []);
+
+    const resetV2Evidence = React.useCallback(() => {
+        // Only reset measured prediction/analyse evidence for the selected
+        // market. Trading limits and account settings are intentionally kept.
+        reset(symbol);
+        resetAnalyse(symbol);
+        pending_ref.current = null;
+        last_shadow_fingerprint_ref.current = null;
+        analysis_ref.current = null;
+        setFeed([]);
+        setAnalysis(null);
+        setPrediction(null);
+        const clean = refreshStats(symbol);
+        setAnalyseStats(summariseAnalyse(readAnalyse(symbol)));
+
+        // Seed a fresh next-tick prediction from the currently visible history.
+        // It is not counted until a future real tick arrives.
+        if (digits_ref.current.length) {
+            const raw = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
+            const seeded = calibratePrediction(raw, clean);
+            setPrediction(seeded);
+            if (seeded.fingerprint && seeded.candidateDigit !== null) {
+                last_shadow_fingerprint_ref.current = seeded.fingerprint;
+                pending_ref.current = {
+                    symbol,
+                    predicted: seeded.candidateDigit,
+                    quality: seeded.signalQuality,
+                    score: seeded.score,
+                    model: seeded.selectedModel,
+                    engineVersion: seeded.engineVersion,
+                    tradable: seeded.predictedDigit !== null,
+                    fingerprint: seeded.fingerprint,
+                    agreementTier: seeded.agreementTier,
+                    agreementModels: seeded.agreementModels,
+                };
+            }
+
+        }
+
+        setError('');
+        return clean;
+    }, [symbol, refreshStats, calibratePrediction]);
+
     // ------------------------------------------------------------- execution
     const fireTrade = React.useCallback(
         async (sym, digit) => {
-            if (firing_ref.current) return;
+            if (firing_ref.current || open_ref.current.size > 0) return;
+            if (!api_base?.api) {
+                setError('Deriv trading connection is not ready yet.');
+                return;
+            }
+
             firing_ref.current = true;
+            setError('');
+
             try {
-                const stake = Number(limits_ref.current.stake);
+                const stake = Math.max(0.35, Number(limits_ref.current.stake) || 0.35);
+                let bought = null;
+                let win_payout = 0;
+                let lastError = null;
 
-                // Fast path: a subscribed proposal for this digit is already
-                // priced, so the buy goes out immediately.
-                let live = null;
-                try {
-                    live = proposals_ref.current?.get?.(digit) || null;
-                } catch {
-                    live = null;
+                // Attempt 1 uses the live subscribed quote for speed.
+                // Attempt 2 always requests a fresh proposal so an expired
+                // stream proposal can never leave the auto trader stuck.
+                for (let attempt = 1; attempt <= 2 && !bought?.buy?.contract_id; attempt += 1) {
+                    try {
+                        let live = null;
+
+                        if (attempt === 1) {
+                            try {
+                                live = proposals_ref.current?.get?.(digit) || null;
+                            } catch {
+                                live = null;
+                            }
+                        }
+
+                        if (!live) {
+                            const proposalResponse = await api_base.api.send({
+                                proposal: 1,
+                                amount: stake,
+                                basis: 'stake',
+                                contract_type: 'DIGITMATCH',
+                                currency,
+                                duration: 1,
+                                duration_unit: 't',
+                                underlying_symbol: sym,
+                                barrier: String(digit),
+                            });
+
+                            if (proposalResponse?.error) {
+                                throw new Error(
+                                    proposalResponse.error.message ||
+                                        proposalResponse.error.code ||
+                                        'Proposal rejected'
+                                );
+                            }
+
+                            const proposal = proposalResponse?.proposal;
+                            if (!proposal?.id) throw new Error('No proposal returned');
+
+                            live = {
+                                id: proposal.id,
+                                ask: Number(proposal.ask_price),
+                                payout: Number(proposal.payout),
+                            };
+                        }
+
+                        const ask = Number(live.ask);
+                        win_payout = Number(live.payout);
+                        if (!(ask > 0)) throw new Error('Invalid proposal price');
+
+                        if (ask > 0 && win_payout > 0) {
+                            setPayout(Number((win_payout / ask).toFixed(3)));
+                        }
+
+                        const response = await api_base.api.send({
+                            buy: live.id,
+                            price: ask,
+                            passthrough: {
+                                nolimitz_source: 'matches-pro',
+                                predicted_digit: digit,
+                            },
+                        });
+
+                        if (response?.error) {
+                            throw new Error(response.error.message || response.error.code || 'Buy rejected');
+                        }
+
+                        if (!response?.buy?.contract_id) {
+                            throw new Error('Buy did not return a contract');
+                        }
+
+                        bought = response;
+                    } catch (attemptError) {
+                        lastError = attemptError;
+                        if (attempt < 2) await new Promise(resolve => window.setTimeout(resolve, 120));
+                    }
                 }
 
-                if (!live) {
-                    const proposal = await api_base.api.send({
-                        proposal: 1,
-                        amount: stake,
-                        basis: 'stake',
-                        contract_type: 'DIGITMATCH',
-                        currency,
-                        duration: 1,
-                        duration_unit: 't',
-                        underlying_symbol: sym,
-                        barrier: String(digit),
-                    });
-                    if (!proposal?.proposal?.id) throw new Error('No proposal returned');
-                    live = {
-                        id: proposal.proposal.id,
-                        ask: Number(proposal.proposal.ask_price),
-                        payout: Number(proposal.proposal.payout),
-                    };
-                }
-
-                const id = live.id;
-                const ask = live.ask;
-                const win_payout = live.payout;
-                if (ask > 0 && win_payout > 0) setPayout(Number((win_payout / ask).toFixed(3)));
-
-                const bought = await api_base.api.send({ buy: id, price: ask });
                 const contract_id = bought?.buy?.contract_id;
-                if (!contract_id) throw new Error('Buy did not return a contract');
+                if (!contract_id) throw lastError || new Error('Unable to buy Matches contract');
 
                 open_ref.current.add(contract_id);
-                cooldown_ref.current = Number(limits_ref.current.cooldown_ticks) || 0;
+                cooldown_ref.current = 0;
+
+                try {
+                    run_panel?.setIsRunning?.(true);
+                    run_panel?.setHasOpenContract?.(true);
+                    run_panel?.toggleDrawer?.(true);
+                } catch {
+                    /* Bot Builder mirror is best-effort only */
+                }
+
+                setGate({
+                    allowed: true,
+                    reason: `Bought MATCH ${digit} · contract ${contract_id} · waiting for settlement`,
+                });
 
                 const tracker = trackContracts([contract_id], {
+                    timeoutMs: 60000,
+                    onContract: contract => {
+                        try {
+                            transactions?.onBotContractEvent?.(contract);
+                            summary_card?.onBotContractEvent?.(contract);
+                            run_panel?.onBotContractEvent?.(contract);
+                        } catch {
+                            /* display mirroring must never interrupt execution */
+                        }
+                    },
                     onDone: ({ profits }) => {
                         const profit = Number(Object.values(profits)[0] ?? 0);
                         open_ref.current.delete(contract_id);
-                        recordTrade(sym, {
+
+                        try {
+                            run_panel?.setHasOpenContract?.(open_ref.current.size > 0);
+                        } catch {
+                            /* noop */
+                        }
+
+                        const updatedDay = recordTrade(sym, {
                             t: Date.now(),
                             contract_id,
                             symbol: sym,
@@ -216,33 +404,195 @@ const MatchesPro = () => {
                             payout: win_payout,
                             profit,
                         });
-                        refreshDay(sym);
+                        setDay(updatedDay);
+
+                        const s = session_stats_ref.current;
+                        s.trades += 1;
+                        s.pnl = Number((s.pnl + profit).toFixed(4));
+                        if (profit > 0) s.wins += 1;
+                        else s.losses += 1;
+                        setSessionStats({ ...s });
+
+                        const tp = Math.abs(Number(limits_ref.current.daily_profit_target) || 0);
+                        const sl = Math.abs(Number(limits_ref.current.daily_loss_limit) || 0);
+                        const hitTp = tp > 0 && s.pnl >= tp;
+                        const hitSl = sl > 0 && s.pnl <= -sl;
+
+                        if (auto_ref.current && (hitTp || hitSl)) {
+                            auto_ref.current = false;
+                            setAuto(false);
+                            setGate({
+                                allowed: false,
+                                reason: hitTp ? 'Take profit reached' : 'Stop loss reached',
+                            });
+                            setSessionResult({
+                                type: hitTp ? 'tp' : 'sl',
+                                pnl: s.pnl,
+                                trades: s.trades,
+                                wins: s.wins,
+                                losses: s.losses,
+                                target: hitTp ? tp : sl,
+                            });
+                        } else if (auto_ref.current) {
+                            setGate({
+                                allowed: true,
+                                reason: 'Contract settled. Waiting for the next live model consensus…',
+                            });
+                        }
                     },
                 });
                 trackers_ref.current.push(tracker);
             } catch (e) {
-                setError(describeError(e));
-                cooldown_ref.current = Math.max(cooldown_ref.current, 5);
+                const message = describeError(e);
+                setError(message);
+                setGate({ allowed: false, reason: `Buy failed: ${message}` });
+                cooldown_ref.current = Math.max(cooldown_ref.current, 1);
             } finally {
                 firing_ref.current = false;
             }
         },
-        [currency, refreshDay]
+        [currency, transactions, summary_card, run_panel]
     );
+
+
+    const testDemoExecution = React.useCallback(async () => {
+        if (executionTesting) return;
+
+        if (!isAuthorized) {
+            setExecutionTestResult('TEST FAILED — Deriv trading connection is not authorized.');
+            return;
+        }
+        if (!is_demo) {
+            setExecutionTestResult('TEST BLOCKED — switch to a Deriv demo account.');
+            return;
+        }
+        if (!api_base?.api) {
+            setExecutionTestResult('TEST FAILED — trading connection is not ready yet.');
+            return;
+        }
+
+        const testDigit =
+            prediction?.candidateDigit ??
+            (digits_ref.current.length ? digits_ref.current[digits_ref.current.length - 1] : null);
+
+        if (testDigit === null || testDigit === undefined) {
+            setExecutionTestResult('TEST FAILED — waiting for a live digit first.');
+            return;
+        }
+
+        const stake = Math.max(0.35, Number(limits_ref.current.stake) || 0.35);
+        setExecutionTesting(true);
+        setExecutionTestResult('Preparing one live demo DIGITMATCH proposal…');
+        setError('');
+
+        try {
+            run_panel.run_id = 'matches-pro-test-' + Date.now();
+            summary_card?.clear?.();
+            run_panel?.setIsRunning?.(true);
+            run_panel?.toggleDrawer?.(true);
+
+            const response = await api_base.api.send({
+                proposal: 1,
+                amount: stake,
+                basis: 'stake',
+                contract_type: 'DIGITMATCH',
+                currency,
+                duration: 1,
+                duration_unit: 't',
+                underlying_symbol: symbol,
+                barrier: String(testDigit),
+            });
+
+            const proposal = response?.proposal;
+            if (!proposal?.id) throw new Error('No proposal returned');
+
+            setExecutionTestResult('Proposal accepted. Sending one demo buy…');
+
+            const bought = await api_base.api.send({
+                buy: proposal.id,
+                price: Number(proposal.ask_price),
+            });
+
+            const contract_id = bought?.buy?.contract_id;
+            if (!contract_id) throw new Error('Buy did not return a contract');
+
+            setExecutionTestResult('BOUGHT demo contract ' + contract_id + ' · waiting for settlement.');
+
+            const tracker = trackContracts([contract_id], {
+                timeoutMs: 60000,
+                onContract: contract => {
+                    try {
+                        transactions?.onBotContractEvent?.(contract);
+                        summary_card?.onBotContractEvent?.(contract);
+                        run_panel?.onBotContractEvent?.(contract);
+                    } catch {
+                        /* display mirroring must never interrupt execution */
+                    }
+                },
+                onDone: ({ profits, settled }) => {
+                    const profit = Number(Object.values(profits)[0] ?? 0);
+                    setExecutionTestResult(
+                        settled > 0
+                            ? 'TEST PASSED — contract settled ' +
+                              (profit >= 0 ? '+' : '') +
+                              profit.toFixed(2) +
+                              ' ' +
+                              currency +
+                              '. Normal Matches Pro evidence gates remain unchanged.'
+                            : 'TEST FAILED — contract did not settle before timeout.'
+                    );
+                    setExecutionTesting(false);
+                    try {
+                        run_panel?.setIsRunning?.(false);
+                    } catch {
+                        /* noop */
+                    }
+                },
+            });
+
+            trackers_ref.current.push(tracker);
+        } catch (e) {
+            const message = describeError(e);
+            setExecutionTestResult('TEST FAILED — ' + message);
+            setError(message);
+            setExecutionTesting(false);
+            try {
+                run_panel?.setIsRunning?.(false);
+            } catch {
+                /* noop */
+            }
+        }
+    }, [
+        executionTesting,
+        isAuthorized,
+        is_demo,
+        prediction,
+        currency,
+        symbol,
+        run_panel,
+        transactions,
+        summary_card,
+    ]);
 
     // ------------------------------------------------------------- per tick
     const step = React.useCallback(
-        (sym, actual_digit, ts) => {
+        (sym, actual_digit, ts, already_graded = false) => {
             if (cooldown_ref.current > 0) cooldown_ref.current -= 1;
 
             const pending = pending_ref.current;
-            if (pending && pending.predicted !== null && pending.symbol === sym) {
+            if (!already_graded && pending && pending.predicted !== null && pending.symbol === sym) {
                 record(sym, {
                     t: ts,
                     predicted: pending.predicted,
                     actual: actual_digit,
                     quality: pending.quality,
                     score: pending.score,
+                    model: pending.model,
+                    engineVersion: pending.engineVersion,
+                    tradable: pending.tradable,
+                    fingerprint: pending.fingerprint,
+                    agreementTier: pending.agreementTier,
+                    agreementModels: pending.agreementModels,
                 });
                 setFeed(prev =>
                     [
@@ -267,42 +617,78 @@ const MatchesPro = () => {
                 setAnalysis({ ...open });
             }
 
-            const next = predict(digits_ref.current, { payout: payout_ref.current });
-            setPrediction(next);
-            pending_ref.current = {
-                symbol: sym,
-                predicted: next.predictedDigit,
-                quality: next.signalQuality,
-                score: next.score,
-            };
-
+            const rawNext = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
             const state = refreshStats(sym);
+            const next = calibratePrediction(rawNext, state);
+            setPrediction(next);
+
+            // Count a fingerprint only once while it remains unchanged.
+            // A materially different setup (digit/models/tier/strength/previous digit)
+            // can create a new independent shadow observation.
+            if (next.fingerprint && next.candidateDigit !== null) {
+                if (next.fingerprint !== last_shadow_fingerprint_ref.current) {
+                    last_shadow_fingerprint_ref.current = next.fingerprint;
+                    pending_ref.current = {
+                        symbol: sym,
+                        predicted: next.candidateDigit,
+                        quality: next.signalQuality,
+                        score: next.score,
+                        model: next.selectedModel,
+                        engineVersion: next.engineVersion,
+                        tradable: next.predictedDigit !== null,
+                        fingerprint: next.fingerprint,
+                        agreementTier: next.agreementTier,
+                        agreementModels: next.agreementModels,
+                    };
+                } else {
+                    pending_ref.current = null;
+                }
+            } else {
+                last_shadow_fingerprint_ref.current = null;
+                pending_ref.current = null;
+            }
+
             const current_day = loadDay(sym);
             setDay(current_day);
+
+            const liveDigit = autoTradeDigit(next);
+            const autoQuality = liveDigit !== null ? 'MEDIUM' : 'NO SIGNAL';
 
             const decision = evaluate({
                 limits: limits_ref.current,
                 day: current_day,
-                quality: next.signalQuality,
+                quality: autoQuality,
                 is_authorized: isAuthorized,
                 loginid: activeLoginid,
                 open_count: open_ref.current.size,
                 cooldown_remaining: cooldown_ref.current,
                 evidence: state.total,
+                min_evidence: auto_ref.current ? 0 : MIN_EVIDENCE,
                 auto_on: auto_ref.current,
+                session_pl: session_stats_ref.current.pnl,
+                stop_mode: 'targets',
             });
-            setGate(decision);
 
-            if (decision.allowed && next.predictedDigit !== null) {
-                fireTrade(sym, next.predictedDigit);
+            if (auto_ref.current && liveDigit === null) {
+                setGate({
+                    allowed: false,
+                    reason: 'Waiting for at least two independent Matches models to agree on one digit…',
+                });
+            } else {
+                setGate(decision);
+            }
+
+            if (decision.allowed && liveDigit !== null) {
+                fireTrade(sym, liveDigit);
             }
         },
-        [refreshStats, isAuthorized, activeLoginid, fireTrade]
+        [refreshStats, isAuthorized, activeLoginid, fireTrade, calibratePrediction]
     );
 
     React.useEffect(() => {
         digits_ref.current = [];
         pending_ref.current = null;
+        last_shadow_fingerprint_ref.current = null;
         open_ref.current = new Set();
         cooldown_ref.current = 0;
         setDigits([]);
@@ -333,21 +719,55 @@ const MatchesPro = () => {
                 setDigits(d);
                 setQuote(q);
                 setDecimals(dec);
-                const seeded = predict(digits_ref.current, { payout: payout_ref.current });
+                const rawSeeded = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
+                const currentState = read(symbol);
+                const seeded = calibratePrediction(rawSeeded, currentState);
                 setPrediction(seeded);
-                pending_ref.current = {
-                    symbol,
-                    predicted: seeded.predictedDigit,
-                    quality: seeded.signalQuality,
-                    score: seeded.score,
-                };
+                if (seeded.fingerprint && seeded.candidateDigit !== null) {
+                    last_shadow_fingerprint_ref.current = seeded.fingerprint;
+                    pending_ref.current = {
+                        symbol,
+                        predicted: seeded.candidateDigit,
+                        quality: seeded.signalQuality,
+                        score: seeded.score,
+                        model: seeded.selectedModel,
+                        engineVersion: seeded.engineVersion,
+                        tradable: seeded.predictedDigit !== null,
+                        fingerprint: seeded.fingerprint,
+                        agreementTier: seeded.agreementTier,
+                        agreementModels: seeded.agreementModels,
+                    };
+                }
             },
             onTick: ({ digit, quote: q, decimals: dec }) => {
                 setDecimals(dec);
                 setQuote(q);
+
+                // The pending prediction was created before this tick, so it is
+                // safe to grade it against the arriving digit. Then include the
+                // now-known tick in history before creating the prediction for
+                // the NEXT tick. That is the correct boundary for a 1-tick contract.
+                const pendingBeforeTick = pending_ref.current;
+                if (pendingBeforeTick && pendingBeforeTick.predicted !== null && pendingBeforeTick.symbol === symbol) {
+                    record(symbol, {
+                        t: Date.now(),
+                        predicted: pendingBeforeTick.predicted,
+                        actual: digit,
+                        quality: pendingBeforeTick.quality,
+                        score: pendingBeforeTick.score,
+                        model: pendingBeforeTick.model,
+                        engineVersion: pendingBeforeTick.engineVersion,
+                        tradable: pendingBeforeTick.tradable,
+                        fingerprint: pendingBeforeTick.fingerprint,
+                        agreementTier: pendingBeforeTick.agreementTier,
+                        agreementModels: pendingBeforeTick.agreementModels,
+                    });
+                }
+                pending_ref.current = null;
+
                 digits_ref.current = [...digits_ref.current, digit].slice(-HISTORY);
                 setDigits(digits_ref.current);
-                step(symbol, digit, Date.now());
+                step(symbol, digit, Date.now(), true);
             },
         });
 
@@ -362,7 +782,7 @@ const MatchesPro = () => {
             });
             trackers_ref.current = [];
         };
-    }, [symbol, step, refreshStats, refreshDay]);
+    }, [symbol, step, refreshStats, refreshDay, calibratePrediction]);
 
     // Switching market stops auto trading. Limits are per day, per market.
     React.useEffect(() => {
@@ -380,6 +800,7 @@ const MatchesPro = () => {
         proposals_ref.current?.stop?.();
         proposals_ref.current = null;
         setLivePricing(false);
+        payout_by_digit_ref.current = {};
 
         if (!isAuthorized || !activeLoginid) return undefined;
         const stake = Number(limits.stake);
@@ -391,7 +812,16 @@ const MatchesPro = () => {
                 symbol,
                 currency,
                 amount: stake,
-                onUpdate: ({ multiplier }) => {
+                onUpdate: ({ multiplier, latest }) => {
+                    if (latest) {
+                        const exact = {};
+                        Object.entries(latest).forEach(([digit, proposal]) => {
+                            const ask = Number(proposal?.ask);
+                            const winPayout = Number(proposal?.payout);
+                            if (ask > 0 && winPayout > 0) exact[Number(digit)] = winPayout / ask;
+                        });
+                        payout_by_digit_ref.current = exact;
+                    }
                     if (!multiplier || !Number.isFinite(multiplier)) return;
                     setLivePricing(true);
                     setPayout(prev => (Math.abs(prev - multiplier) > 0.005 ? Number(multiplier.toFixed(3)) : prev));
@@ -429,7 +859,7 @@ const MatchesPro = () => {
     }, [symbol, refreshAnalyseStats]);
 
     const startAnalysis = () => {
-        const next = predict(digits_ref.current, { payout: payout_ref.current });
+        const next = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
         if (next.predictedDigit === null) return;
         const open = {
             symbol,
@@ -472,11 +902,19 @@ const MatchesPro = () => {
         return () => clearInterval(id);
     }, [analysis, refreshAnalyseStats]);
 
-    // Arming auto trade opens the run panel drawer, so Summary, Transactions
-    // and Journal are on screen as contracts settle. Disarming closes it.
+    // Give a Matches Auto Trader session the same run identity/state as Bot Builder.
+    // Contracts themselves are mirrored into its Summary/Transactions stores above.
     React.useEffect(() => {
         try {
-            run_panel?.setIsRunning?.(auto);
+            if (auto) {
+                run_panel.run_id = `matches-pro-${Date.now()}`;
+                run_panel?.setIsRunning?.(true);
+                run_panel?.setHasOpenContract?.(open_ref.current.size > 0);
+                run_panel?.toggleDrawer?.(true);
+            } else {
+                run_panel?.setIsRunning?.(false);
+                if (open_ref.current.size === 0) run_panel?.setHasOpenContract?.(false);
+            }
         } catch {
             /* run panel unavailable - trading still works */
         }
@@ -505,10 +943,18 @@ const MatchesPro = () => {
     const max_pct = Math.max(10, ...distribution.map(d => d.p));
     const current_digit = digits.length ? digits[digits.length - 1] : null;
     const status_text = STATUS_TEXT[status] || STATUS_TEXT[TICK_STATUS.DISCONNECTED];
-    const predicted = prediction?.predictedDigit;
-    const quality = prediction?.signalQuality || 'NO SIGNAL';
+    const liveAutoPick = autoTradeDigit(prediction);
+    const predicted =
+        prediction?.predictedDigit ??
+        (Number(prediction?.agreementTier || 0) >= 2 ? prediction?.candidateDigit : null);
+    const quality =
+        prediction?.predictedDigit !== null && prediction?.predictedDigit !== undefined
+            ? prediction?.signalQuality || 'STRONG'
+            : liveAutoPick !== null
+              ? `${prediction?.agreementTier || 2}-MODEL CONSENSUS`
+              : 'NO SIGNAL';
     const evidence = stats?.summary?.n || 0;
-    const unlocked = evidence >= MIN_EVIDENCE;
+    const unlocked = digits.length >= 250;
     const can_arm = isAuthorized && is_demo && unlocked;
 
     const setLimit = (key, value) => {
@@ -517,34 +963,100 @@ const MatchesPro = () => {
         saveLimits(next);
     };
 
+    const toggleAutoSession = () => {
+        if (auto) {
+            auto_ref.current = false;
+            setAuto(false);
+            setGate({ allowed: false, reason: 'Auto trade stopped by user' });
+            return;
+        }
+
+        const fresh = { trades: 0, wins: 0, losses: 0, pnl: 0 };
+        session_stats_ref.current = fresh;
+        setSessionStats(fresh);
+        setSessionResult(null);
+        setExecutionTestResult('');
+        cooldown_ref.current = 0;
+        auto_ref.current = true;
+        setAuto(true);
+
+        const livePrediction = predict(digits_ref.current, {
+            payout: payout_ref.current,
+            payoutByDigit: payout_by_digit_ref.current,
+        });
+        const firstDigit = autoTradeDigit(livePrediction);
+
+        if (firstDigit !== null) {
+            setGate({
+                allowed: true,
+                reason: `Starting Matches Auto Trader · buying MATCH ${firstDigit}…`,
+            });
+            fireTrade(symbol_ref.current, firstDigit);
+        } else {
+            setGate({
+                allowed: false,
+                reason: 'Auto trader started. Waiting for at least two independent Matches models to agree…',
+            });
+        }
+    };
+
     const marketLabel = React.useMemo(
         () => symbols.find(s => s.code === symbol)?.label || symbol,
         [symbols, symbol]
     );
 
-    // Same numbers as the panel above, said in a sentence.
-    const plainRead = React.useMemo(() => {
-        if (!prediction || prediction.predictedDigit === null) return '';
-        const lead = `Digit ${prediction.predictedDigit} is leading on ${marketLabel}`;
-        if (prediction.signalQuality === 'NO SIGNAL') {
-            return `${lead}, but the lead is within normal variation - nothing decisive.`;
+    const runAnalysis = () => {
+        const rawNext = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
+        const next = calibratePrediction(rawNext, read(symbol));
+        setPrediction(next);
+        if (next?.predictedDigit === null || next?.predictedDigit === undefined) {
+            setAnalysis(null);
+            setError(next?.reason || 'NO PREDICTION — no validated edge detected.');
+            return;
         }
-        if (prediction.signalQuality === 'WEAK') {
-            return `${lead} and the lead is building, but it has not cleared the significance bar.`;
-        }
-        if (prediction.probabilityEstimate <= prediction.breakeven) {
-            return `${lead} and the lead is statistically real, but at ${pct(prediction.probabilityEstimate)} it is still under the ${pct(prediction.breakeven)} this payout needs.`;
-        }
-        return `${lead}, clears the significance bar, and at ${pct(prediction.probabilityEstimate)} sits above the ${pct(prediction.breakeven)} break-even.`;
-    }, [prediction, marketLabel]);
+        setError('');
+        setAnalysis({
+            symbol,
+            digit: next.predictedDigit,
+            sampleSize: next.sampleSize,
+            createdAt: Date.now(),
+        });
+    };
+
+    const predictionHistory = stats?.state?.recent?.slice(-10).reverse() || [];
+    const predictionDistribution = React.useMemo(
+        () => (stats?.state?.by_digit || []).map((row, digit) => ({ digit, n: row?.n || 0, correct: row?.correct || 0 })),
+        [stats]
+    );
+    const modelUsage = React.useMemo(
+        () => Object.entries(stats?.state?.by_model || {}).map(([model, row]) => ({
+            model,
+            n: row?.n || 0,
+            correct: row?.correct || 0,
+        })),
+        [stats]
+    );
+    const setupLeaderboard = React.useMemo(() => topSetups(stats?.state, 8), [stats]);
+    const tierStats = React.useMemo(
+        () => Object.entries(stats?.state?.by_tier || {}).map(([tier, row]) => ({
+            tier: Number(tier),
+            n: row?.n || 0,
+            correct: row?.correct || 0,
+            accuracy: row?.n ? row.correct / row.n : 0,
+        })).sort((a, b) => b.tier - a.tier),
+        [stats]
+    );
 
     return (
-        <div className='matches-pro'>
-            <div className='matches-pro__panel'>
-                <div className='matches-pro__head'>
+        <div className='matches-pro matches-pro--v2'>
+            <div className='matches-pro__panel matches-pro__panel--v2'>
+                <div className='matches-pro__v2-head'>
                     <div>
-                        <div className='matches-pro__title'>MATCHES PRO</div>
-                        <div className='matches-pro__subtitle'>Phase 3 - demo auto trading with risk limits.</div>
+                        <div className='matches-pro__eyebrow'>NOLIMITZ AI</div>
+                        <div className='matches-pro__title'>MATCHES PRO V2</div>
+                        <div className='matches-pro__subtitle'>
+                            Live last-digit prediction analysis for Deriv Matches contracts.
+                        </div>
                     </div>
                     <div className={`matches-pro__status matches-pro__status--${status}`}>
                         <i className='matches-pro__dot' />
@@ -554,436 +1066,300 @@ const MatchesPro = () => {
 
                 {error && <div className='matches-pro__warn'>{error}</div>}
 
-                <div className='matches-pro__controls'>
-                    <label className='matches-pro__field'>
-                        <span>Market</span>
-                        <select value={symbol} onChange={e => setSymbol(e.target.value)}>
-                            {symbols.map(s => (
-                                <option key={s.code} value={s.code}>
-                                    {s.label}
-                                </option>
-                            ))}
-                        </select>
-                    </label>
-                    <label className='matches-pro__field'>
-                        <span>Distribution window</span>
-                        <select value={window_size} onChange={e => setWindowSize(Number(e.target.value))}>
-                            {WINDOW_CHOICES.map(w => (
-                                <option key={w} value={w}>
-                                    {w} ticks
-                                </option>
-                            ))}
-                        </select>
-                    </label>
-                    <label className='matches-pro__field'>
-                        <span>{live_pricing ? 'Payout multiplier (live from Deriv)' : 'Payout multiplier'}</span>
-                        <input
-                            type='number'
-                            step='0.1'
-                            min='1.1'
-                            value={payout}
-                            readOnly={live_pricing}
-                            onChange={e => setPayout(Number(e.target.value) || 9.3)}
-                        />
-                    </label>
-                </div>
-
-                <div className='matches-pro__readout'>
-                    <div className='matches-pro__stat'>
-                        <span>Current tick</span>
-                        <strong>{quote ?? '-'}</strong>
-                    </div>
-                    <div className='matches-pro__stat'>
-                        <span>Current digit</span>
-                        <strong className='matches-pro__digit'>{current_digit ?? '-'}</strong>
-                    </div>
-                    <div className='matches-pro__stat'>
-                        <span>Decimals</span>
-                        <strong>{decimals ?? '-'}</strong>
-                    </div>
-                    <div className='matches-pro__stat'>
-                        <span>History</span>
-                        <strong>{digits.length}</strong>
-                    </div>
-                </div>
-
-                <div className='matches-pro__section-title'>Statistical analysis</div>
-                <div className={`matches-pro__signal matches-pro__signal--${quality.replace(' ', '-').toLowerCase()}`}>
-                    <div className='matches-pro__signal-main'>
-                        <div className='matches-pro__signal-digit'>{predicted ?? '-'}</div>
+                <section className='matches-pro__v2-card matches-pro__v2-card--analyser'>
+                    <div className='matches-pro__v2-section-head'>
                         <div>
-                            <div className='matches-pro__signal-quality'>{quality}</div>
-                            <div className='matches-pro__signal-sub'>
-                                Score {prediction?.score ?? 0}/100, sample {prediction?.sampleSize ?? 0}
-                            </div>
+                            <span className='matches-pro__v2-step'>01</span>
+                            <h2>Prediction Analyzer</h2>
+                            <p>Uses real Deriv tick history. Tap Analyze to generate one last-digit prediction.</p>
                         </div>
                     </div>
-                    <div className='matches-pro__signal-nums'>
-                        <div>
-                            <span>Estimated probability</span>
-                            <strong>{prediction ? pct(prediction.probabilityEstimate) : '-'}</strong>
-                        </div>
-                        <div>
-                            <span>Break-even needed</span>
-                            <strong>{prediction ? pct(prediction.breakeven) : '-'}</strong>
-                        </div>
-                    </div>
-                </div>
 
-                {plainRead && <div className='matches-pro__read'>{plainRead}</div>}
-
-                {prediction && (
-                    <>
-                        <button type='button' className='matches-pro__link' onClick={() => setShowWhy(v => !v)}>
-                            {show_why ? 'Hide reasoning' : 'Why?'}
-                        </button>
-                        {show_why && (
-                            <div className='matches-pro__why'>
-                                <p>{prediction.reason}</p>
-                                <table>
-                                    <tbody>
-                                        {prediction.factors.map(f => (
-                                            <tr key={f.label}>
-                                                <td>{f.label}</td>
-                                                <td className={f.value >= 0 ? 'pos' : 'neg'}>
-                                                    {f.value >= 0 ? '+' : ''}
-                                                    {f.value.toFixed(2)} sigma
-                                                </td>
-                                                <td className='note'>{f.note || ''}</td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                                <p className='matches-pro__why-foot'>
-                                    Significance bar is {Z_CRITICAL} sigma, corrected for testing 10 digits across 5
-                                    windows every tick. Probability is shrunk toward 10% with a 500-observation prior.
-                                </p>
-                            </div>
-                        )}
-                    </>
-                )}
-
-                {/* -------------------------------- analyse -------------------------------- */}
-                <div className='matches-pro__section-title'>Analyse</div>
-                <div className='matches-pro__analyse'>
-                    <div className='matches-pro__analyse-controls'>
-                        <button
-                            type='button'
-                            className='matches-pro__analyse-btn'
-                            disabled={!prediction || prediction.predictedDigit === null}
-                            onClick={startAnalysis}
-                        >
-                            {analysis && !analysis.done ? 'ANALYSING...' : 'ANALYSE'}
-                        </button>
+                    <div className='matches-pro__v2-controls'>
                         <label className='matches-pro__field'>
-                            <span>Window</span>
-                            <select
-                                value={window_seconds}
-                                onChange={e => setWindowSeconds(Number(e.target.value))}
-                                disabled={analysis && !analysis.done}
-                            >
-                                {WINDOW_SECONDS.map(w => (
-                                    <option key={w} value={w}>
-                                        {w} seconds
-                                    </option>
+                            <span>Market</span>
+                            <select value={symbol} onChange={e => setSymbol(e.target.value)}>
+                                {symbols.map(s => (
+                                    <option key={s.code} value={s.code}>{s.label}</option>
                                 ))}
                             </select>
                         </label>
+                        <div className='matches-pro__v2-live'>
+                            <span>Live tick</span>
+                            <strong>{quote ?? '-'}</strong>
+                            <small>Last digit {current_digit ?? '-'}</small>
+                        </div>
+                        <div className='matches-pro__v2-live'>
+                            <span>Real tick history</span>
+                            <strong>{digits.length}</strong>
+                            <small>{marketLabel}</small>
+                        </div>
                     </div>
 
-                    {analysis && (
-                        <div className={`matches-pro__analyse-card ${analysis.done ? 'done' : 'live'}`}>
-                            <div className='matches-pro__analyse-digit'>{analysis.digit}</div>
-                            <div className='matches-pro__analyse-body'>
-                                {!analysis.done ? (
-                                    <>
-                                        <div className='matches-pro__analyse-count'>{remaining}s</div>
-                                        <div className='matches-pro__analyse-bar'>
-                                            <span
-                                                style={{
-                                                    width: `${(remaining / window_seconds) * 100}%`,
-                                                }}
-                                            />
-                                        </div>
-                                        <div className='matches-pro__analyse-sub'>
-                                            {analysis.ticks.length} tick{analysis.ticks.length === 1 ? '' : 's'} so far,{' '}
-                                            {analysis.hits} match{analysis.hits === 1 ? '' : 'es'}
-                                        </div>
-                                    </>
-                                ) : (
-                                    <>
-                                        <div className='matches-pro__analyse-count'>
-                                            {analysis.hits}/{analysis.ticks.length}
-                                        </div>
-                                        <div className='matches-pro__analyse-sub'>
-                                            Digit {analysis.digit} appeared {analysis.hits} time
-                                            {analysis.hits === 1 ? '' : 's'} in {analysis.ticks.length} tick
-                                            {analysis.ticks.length === 1 ? '' : 's'}. Expected about{' '}
-                                            {(analysis.ticks.length * 0.1).toFixed(1)}.
-                                        </div>
-                                    </>
-                                )}
-                                <div className='matches-pro__analyse-nums'>
-                                    {analysis.quality} &middot; estimated {pct(analysis.probability)} &middot; break-even{' '}
-                                    {pct(analysis.breakeven)}
-                                </div>
+                    <button
+                        type='button'
+                        className='matches-pro__analyse-btn matches-pro__analyse-btn--primary'
+                        disabled={status !== TICK_STATUS.LIVE || digits.length < 100}
+                        onClick={runAnalysis}
+                    >
+                        ANALYZE LAST DIGIT
+                    </button>
+
+                    <div className='matches-pro__prediction-result'>
+                        <span className='matches-pro__prediction-label'>PREDICTED LAST DIGIT</span>
+                        <strong>{analysis?.digit ?? '-'}</strong>
+                        <p>
+                            {analysis
+                                ? `Prediction generated from ${analysis.sampleSize} real Deriv ticks. This is a model prediction, not a guaranteed outcome.`
+                                : status === TICK_STATUS.LIVE
+                                  ? 'Ready. Tap Analyze when you want a new prediction.'
+                                  : 'Connecting to the Deriv tick stream...'}
+                        </p>
+                    </div>
+
+                    <div className='matches-pro__truth-grid'>
+                        <div><span>Verified predictions</span><strong>{stats?.summary?.n ?? 0}</strong></div>
+                        <div><span>Correct</span><strong>{stats?.summary?.k ?? 0}</strong></div>
+                        <div>
+                            <span>Measured accuracy</span>
+                            <strong>{stats?.summary?.n ? pct(stats.summary.accuracy) : '-'}</strong>
+                        </div>
+                        <div><span>Random baseline</span><strong>10.00%</strong></div>
+                        <div><span>Engine</span><strong>{prediction?.engineVersion || '-'}</strong></div>
+                        <div><span>Consensus rate</span><strong>{prediction?.consensus?.trials ? pct(prediction.consensus.accuracy) : '-'}</strong></div>
+                        <div><span>Lower bound</span><strong>{prediction?.consensus?.trials ? pct(prediction.consensus.lowerBound) : '-'}</strong></div>
+                        <div><span>Exact digit break-even</span><strong>{prediction?.breakeven ? pct(prediction.breakeven) : '-'}</strong></div>
+                        <div><span>Consensus trials</span><strong>{prediction?.consensus?.trials ?? 0}</strong></div>
+                        <div><span>Consensus coverage</span><strong>{prediction?.consensus ? pct(prediction.consensus.coverage) : '-'}</strong></div>
+                        <div><span>Candidate digit</span><strong>{prediction?.candidateDigit ?? '-'}</strong></div>
+                        <div><span>Agreement tier</span><strong>{prediction?.agreementTier ? `${prediction.agreementTier}-model` : '-'}</strong></div>
+                        <div><span>Exact setup sample</span><strong>{prediction?.liveCalibration?.n ?? 0}/{MIN_SETUP_EVIDENCE}</strong></div>
+                        <div><span>Setup lower bound</span><strong>{prediction?.liveCalibration?.n ? pct(prediction.liveCalibration.lowerBound) : '-'}</strong></div>
+                        <div><span>Decision</span><strong>{prediction?.liveCalibration?.tradeReady ? 'TRADE CANDIDATE' : 'SHADOW ONLY'}</strong></div>
+                    </div>
+
+                    <div className='matches-pro__verification'>
+                        <div className='matches-pro__v2-subtitle'>Walk-forward model comparison</div>
+                        {prediction?.modelResults?.map(model => (
+                            <div key={model.id} className='matches-pro__verify-row'>
+                                <span><b>{model.id}</b></span>
+                                <span>{model.hits}/{model.trials} correct</span>
+                                <strong>{model.trials ? pct(model.accuracy) : '-'}</strong>
                             </div>
-                            {analysis.ticks.length > 0 && (
-                                <div className='matches-pro__analyse-ticks'>
-                                    {analysis.ticks.map((d, i) => (
-                                        <span key={`${i}-${d}`} className={d === analysis.digit ? 'hit' : ''}>
-                                            {d}
-                                        </span>
-                                    ))}
-                                </div>
-                            )}
-                        </div>
-                    )}
-
-                    {analyse_stats && analyse_stats.state.analyses > 0 && (
-                        <div className='matches-pro__verdict'>
-                            {analyse_stats.summary.verdict}
-                            <button
-                                type='button'
-                                className='matches-pro__link'
-                                onClick={() => {
-                                    resetAnalyse(symbol);
-                                    refreshAnalyseStats(symbol);
-                                }}
-                            >
-                                Reset tally
-                            </button>
-                        </div>
-                    )}
-
-                    <div className='matches-pro__note-inline'>
-                        The countdown is a window to act in, not a period during which the digit becomes more likely.
-                        Each digit stays at roughly 10% per tick throughout. The tally above is this button&apos;s own
-                        record - watch it rather than any single result.
-                    </div>
-                </div>
-
-                {/* -------------------------------- trading -------------------------------- */}
-                <div className='matches-pro__section-title'>Trading</div>
-
-                <div className='matches-pro__locks'>
-                    <div className={`matches-pro__lock ${isAuthorized ? 'ok' : 'bad'}`}>
-                        {isAuthorized ? 'Signed in' : 'Not signed in'}
-                    </div>
-                    <div className={`matches-pro__lock ${is_demo ? 'ok' : 'bad'}`}>
-                        {activeLoginid ? `${activeLoginid} ${is_demo ? '(demo)' : '(REAL - blocked)'}` : 'No account'}
-                    </div>
-                    <div className={`matches-pro__lock ${unlocked ? 'ok' : 'bad'}`}>
-                        Evidence {evidence}/{MIN_EVIDENCE}
-                    </div>
-                </div>
-
-                <div className='matches-pro__limits'>
-                    {MAIN_FIELDS.map(f => (
-                        <label key={f.key} className='matches-pro__field'>
-                            <span>{f.label}</span>
-                            <input
-                                type='number'
-                                step={f.step}
-                                min={f.min}
-                                value={limits[f.key]}
-                                onChange={e => setLimit(f.key, e.target.value)}
-                            />
-                        </label>
-                    ))}
-                    <label className='matches-pro__field'>
-                        <span>Trade on</span>
-                        <select value={limits.min_quality} onChange={e => setLimit('min_quality', e.target.value)}>
-                            {QUALITY_FLOORS.map(q => (
-                                <option key={q.value} value={q.value}>
-                                    {q.label}
-                                </option>
-                            ))}
-                        </select>
-                    </label>
-                </div>
-
-                <div className='matches-pro__note-inline'>{FLOOR_RATE[limits.min_quality]}</div>
-
-                {limits.min_quality === 'ANY' && (
-                    <div className='matches-pro__warn'>
-                        Validation mode: every tick qualifies, so the engine&apos;s judgement is bypassed. Useful for
-                        checking the trading path end to end, not a strategy.
-                    </div>
-                )}
-
-                <button type='button' className='matches-pro__link' onClick={() => setShowAdvanced(v => !v)}>
-                    {show_advanced ? 'Hide advanced limits' : 'Advanced limits'}
-                </button>
-
-                {show_advanced && (
-                    <div className='matches-pro__limits'>
-                        {ADVANCED_FIELDS.map(f => (
-                            <label key={f.key} className='matches-pro__field'>
-                                <span>{f.label}</span>
-                                <input
-                                    type='number'
-                                    step={f.step}
-                                    min={f.min}
-                                    value={limits[f.key]}
-                                    onChange={e => setLimit(f.key, e.target.value)}
-                                />
-                            </label>
                         ))}
                     </div>
-                )}
 
-                <div className='matches-pro__trade-bar'>
-                    <button
-                        type='button'
-                        className={`matches-pro__auto ${auto ? 'on' : ''}`}
-                        disabled={!can_arm}
-                        onClick={() => setAuto(v => !v)}
-                    >
-                        {auto ? 'STOP AUTO TRADING' : 'START AUTO TRADING (DEMO)'}
-                    </button>
-                    <div className={`matches-pro__gate ${gate.allowed ? 'ok' : ''}`}>{gate.reason}</div>
-                </div>
-
-                <div className='matches-pro__readout'>
-                    <div className='matches-pro__stat'>
-                        <span>Trades today</span>
-                        <strong>{day.trades.length}</strong>
-                    </div>
-                    <div className='matches-pro__stat'>
-                        <span>Wins / losses</span>
-                        <strong>
-                            {day.wins}/{day.losses}
-                        </strong>
-                    </div>
-                    <div className='matches-pro__stat'>
-                        <span>Hit rate</span>
-                        <strong>
-                            {day.trades.length ? `${((day.wins / day.trades.length) * 100).toFixed(1)}%` : '-'}
-                        </strong>
-                    </div>
-                    <div className='matches-pro__stat'>
-                        <span>Profit / loss</span>
-                        <strong className={day.pl >= 0 ? 'pos' : 'neg'}>
-                            {day.pl >= 0 ? '+' : ''}
-                            {day.pl.toFixed(2)}
-                        </strong>
-                    </div>
-                </div>
-
-                <div className='matches-pro__note-inline'>
-                    Every contract appears in the run panel below under Summary, Transactions and Journal.
-                </div>
-
-                <button
-                    type='button'
-                    className='matches-pro__link'
-                    onClick={() => {
-                        resetDay(symbol);
-                        refreshDay(symbol);
-                    }}
-                >
-                    Reset today&apos;s trading counters
-                </button>
-
-                {/* -------------------------------- backtest -------------------------------- */}
-                <div className='matches-pro__section-title'>
-                    Backtest
-                    <button
-                        type='button'
-                        className='matches-pro__reset'
-                        onClick={() => {
-                            reset(symbol);
-                            setFeed([]);
-                            refreshStats(symbol);
-                        }}
-                    >
-                        Reset
-                    </button>
-                </div>
-                {stats && (
-                    <>
-                        <div className='matches-pro__readout'>
-                            <div className='matches-pro__stat'>
-                                <span>Predictions</span>
-                                <strong>{stats.summary.n}</strong>
-                            </div>
-                            <div className='matches-pro__stat'>
-                                <span>Correct</span>
-                                <strong>{stats.summary.k}</strong>
-                            </div>
-                            <div className='matches-pro__stat'>
-                                <span>Accuracy</span>
-                                <strong>{stats.summary.n ? pct(stats.summary.accuracy) : '-'}</strong>
-                            </div>
-                            <div className='matches-pro__stat'>
-                                <span>Baseline</span>
-                                <strong>10.00%</strong>
-                            </div>
+                    <div className='matches-pro__verification'>
+                        <div className='matches-pro__v2-subtitle'>Evidence controls</div>
+                        <div className='matches-pro__verify-row'>
+                            <span>Clear current engine evidence for this market and begin a fresh forward test.</span>
+                            <span>Trading limits are kept.</span>
+                            <button type='button' className='matches-pro__secondary' onClick={resetV2Evidence}>
+                                RESET FRESH EVIDENCE
+                            </button>
                         </div>
-                        <div className='matches-pro__verdict'>{stats.summary.verdict}</div>
-                        <div className='matches-pro__mini'>
-                            Last 100: {pct(stats.summary.recent_accuracy)}, longest hit streak{' '}
-                            {stats.state.longest_win}, longest miss streak {stats.state.longest_loss}
+                    </div>
+
+                    <div className='matches-pro__verification'>
+                        <div className='matches-pro__v2-subtitle'>Live Matches model votes</div>
+                        {prediction?.liveVotes?.length ? prediction.liveVotes.map(vote => (
+                            <div key={vote.model} className={`matches-pro__verify-row ${vote.agrees ? 'hit' : ''}`}>
+                                <span><b>{vote.model}</b></span>
+                                <span>Next digit <b>{vote.digit ?? '-'}</b></span>
+                                <strong>{vote.agrees ? 'AGREES' : '—'}</strong>
+                            </div>
+                        )) : <div className='matches-pro__muted'>Waiting for model votes...</div>}
+                    </div>
+
+                    <div className='matches-pro__verification'>
+                        <div className='matches-pro__v2-subtitle'>Agreement-tier forward results</div>
+                        {tierStats.length ? tierStats.map(row => (
+                            <div key={row.tier} className='matches-pro__verify-row'>
+                                <span><b>{row.tier}-model agreement</b></span>
+                                <span>{row.correct}/{row.n} correct</span>
+                                <strong>{row.n ? pct(row.accuracy) : '-'}</strong>
+                            </div>
+                        )) : <div className='matches-pro__muted'>Collecting independent agreement-tier evidence...</div>}
+                    </div>
+
+                    <div className='matches-pro__verification'>
+                        <div className='matches-pro__v2-subtitle'>Exact setup calibration</div>
+                        {setupLeaderboard.length ? setupLeaderboard.map(row => (
+                            <div key={row.fingerprint} className='matches-pro__setup-row'>
+                                <div>
+                                    <strong>Digit {row.digit} · {row.tier}-model</strong>
+                                    <small>{(row.models || []).join(' + ') || 'unknown models'}</small>
+                                </div>
+                                <span>{row.correct}/{row.n}</span>
+                                <span>{pct(row.accuracy)}</span>
+                                <span>LB {pct(row.lowerBound)}</span>
+                            </div>
+                        )) : <div className='matches-pro__muted'>No independent setup fingerprints graded yet.</div>}
+                    </div>
+
+                    <div className='matches-pro__verification'>
+                        <div className='matches-pro__v2-subtitle'>Fresh prediction distribution</div>
+                        <div className='matches-pro__digit-diagnostics'>
+                            {predictionDistribution.map(row => (
+                                <div key={row.digit} className='matches-pro__digit-diagnostic'>
+                                    <strong>{row.digit}</strong>
+                                    <span>{row.n} picks</span>
+                                    <small>{row.n ? `${((row.correct / row.n) * 100).toFixed(1)}% hit` : '—'}</small>
+                                </div>
+                            ))}
                         </div>
-                        {Object.keys(stats.state.by_quality).length > 0 && (
-                            <div className='matches-pro__mini'>
-                                {Object.entries(stats.state.by_quality).map(([q, v]) => (
-                                    <span key={q} className='matches-pro__tag'>
-                                        {q}: {v.correct}/{v.n} ({v.n ? ((v.correct / v.n) * 100).toFixed(1) : '0.0'}%)
-                                    </span>
+                        {modelUsage.length > 0 && (
+                            <div className='matches-pro__model-usage'>
+                                {modelUsage.map(row => (
+                                    <span key={row.model}>{row.model}: {row.n} emitted / {row.correct} correct</span>
                                 ))}
                             </div>
                         )}
-                    </>
-                )}
-
-                <div className='matches-pro__section-title'>Signal feed</div>
-                <div className='matches-pro__feed'>
-                    {feed.map(f => (
-                        <div key={f.t} className={`matches-pro__feed-row ${f.hit ? 'hit' : 'miss'}`}>
-                            <span>{clockOf(f.t)}</span>
-                            <span>MATCH {f.predicted}</span>
-                            <span>actual {f.actual}</span>
-                            <span>{f.quality}</span>
-                            <span>{f.hit ? 'HIT' : 'miss'}</span>
-                        </div>
-                    ))}
-                    {!feed.length && <span className='matches-pro__muted'>Waiting for the next tick...</span>}
-                </div>
-
-                <div className='matches-pro__section-title'>Digit distribution - last {sample.length} ticks</div>
-                <div className='matches-pro__dist'>
-                    {distribution.map(d => (
-                        <div key={d.digit} className='matches-pro__row'>
-                            <span className={`matches-pro__row-digit ${d.digit === predicted ? 'is-predicted' : ''}`}>
-                                {d.digit}
-                            </span>
-                            <span className='matches-pro__bar'>
-                                <span style={{ width: `${(d.p / max_pct) * 100}%` }} />
-                            </span>
-                            <span className='matches-pro__row-pct'>{d.p.toFixed(1)}%</span>
-                        </div>
-                    ))}
-                </div>
-
-                {diag && (
-                    <div className='matches-pro__diag'>
-                        socket {diag.ready_state} | messages {diag.messages} | last {diag.last_msg_type} | symbols{' '}
-                        {diag.symbols_seen} | precision {diag.pip_source} ({diag.known_decimals} known) | open{' '}
-                        {open_ref.current.size}
-                        {diag.last_error ? ` | ${diag.last_error}` : ''}
                     </div>
-                )}
 
-                <div className='matches-pro__note'>
-                    Demo accounts only in this phase - a real login id is refused by the execution layer, not just
-                    hidden here. Auto trading unlocks per market at {MIN_EVIDENCE} graded predictions. The signal floor is yours to
-                    set, but lowering it does not create an edge - it only trades more often on weaker evidence. Every trade still faces a negative expected value at a{' '}
-                    {payout}x payout unless the estimated probability beats {pct(1 / payout)}, so treat a profitable
-                    demo run as a small sample, not a discovery.
-                </div>
+                    <div className='matches-pro__verification'>
+                        <div className='matches-pro__v2-subtitle'>Recent verified predictions</div>
+                        {predictionHistory.length ? predictionHistory.map((item, i) => (
+                            <div key={`${item.t}-${i}`} className={`matches-pro__verify-row ${item.hit ? 'hit' : 'miss'}`}>
+                                <span>Predicted <b>{item.predicted}</b></span>
+                                <span>Actual <b>{item.actual}</b></span>
+                                <strong>{item.hit ? 'CORRECT' : 'MISS'}</strong>
+                            </div>
+                        )) : <div className='matches-pro__muted'>Waiting for verified live predictions...</div>}
+                    </div>
+                </section>
+
+                <section className='matches-pro__v2-card'>
+                    <div className='matches-pro__v2-section-head'>
+                        <div>
+                            <span className='matches-pro__v2-step'>02</span>
+                            <h2>Matches Auto Trader</h2>
+                            <p>Automatically buys a 1-tick DIGITMATCH contract only when the existing risk gate allows it.</p>
+                        </div>
+                        <div className={`matches-pro__account-pill ${is_demo ? 'demo' : 'blocked'}`}>
+                            {activeLoginid ? (is_demo ? 'DEMO ACCOUNT' : 'REAL BLOCKED') : 'NOT SIGNED IN'}
+                        </div>
+                    </div>
+
+                    <div className='matches-pro__v2-controls matches-pro__v2-controls--trade'>
+                        <label className='matches-pro__field'>
+                            <span>Stake ({currency})</span>
+                            <input
+                                type='number'
+                                step='0.05'
+                                min='0.35'
+                                value={limits.stake}
+                                onChange={e => setLimit('stake', e.target.value)}
+                            />
+                        </label>
+                        <label className='matches-pro__field'>
+                            <span>Stop after profit</span>
+                            <input
+                                type='number'
+                                step='0.5'
+                                min='0.5'
+                                value={limits.daily_profit_target}
+                                onChange={e => setLimit('daily_profit_target', e.target.value)}
+                            />
+                        </label>
+                        <label className='matches-pro__field'>
+                            <span>Stop after loss</span>
+                            <input
+                                type='number'
+                                step='0.5'
+                                min='0.5'
+                                value={limits.daily_loss_limit}
+                                onChange={e => setLimit('daily_loss_limit', e.target.value)}
+                            />
+                        </label>
+                    </div>
+
+                    <div className='matches-pro__auto-pick'>
+                        <span>Current model pick</span>
+                        <strong>{predicted ?? '-'}</strong>
+                        <small>
+                            {liveAutoPick === null
+                                ? 'Waiting for at least two independent models to agree'
+                                : `MATCH ${liveAutoPick} · ${quality}`}
+                        </small>
+                    </div>
+
+                    <div className='matches-pro__locks'>
+                        <div className={`matches-pro__lock ${isAuthorized ? 'ok' : 'bad'}`}>
+                            {isAuthorized ? 'Deriv connected' : 'Connect Deriv'}
+                        </div>
+                        <div className={`matches-pro__lock ${is_demo ? 'ok' : 'bad'}`}>
+                            {is_demo ? 'Demo execution enabled' : 'Demo account required'}
+                        </div>
+                        <div className={`matches-pro__lock ${unlocked ? 'ok' : 'bad'}`}>
+                            {unlocked ? `Live model ready · ${digits.length} ticks` : `Loading model · ${digits.length}/250 ticks`}
+                        </div>
+                    </div>
+
+                    <button
+                        type='button'
+                        className='matches-pro__auto matches-pro__auto--v2 matches-pro__auto--test'
+                        disabled={!isAuthorized || !is_demo || executionTesting || auto}
+                        onClick={testDemoExecution}
+                    >
+                        {executionTesting ? 'TESTING DEMO EXECUTION…' : 'TEST 1 DEMO MATCH CONTRACT'}
+                    </button>
+                    {executionTestResult && (
+                        <div className='matches-pro__gate'>{executionTestResult}</div>
+                    )}
+
+                    <button
+                        type='button'
+                        className={`matches-pro__auto matches-pro__auto--v2 ${auto ? 'on' : ''}`}
+                        disabled={!can_arm || executionTesting}
+                        onClick={toggleAutoSession}
+                    >
+                        {auto ? 'STOP AUTO TRADER' : 'START AUTO TRADER'}
+                    </button>
+                    <div className={`matches-pro__gate ${gate.allowed ? 'ok' : ''}`}>{gate.reason}</div>
+
+                    <div className='matches-pro__truth-grid matches-pro__truth-grid--trading'>
+                        <div><span>Session trades</span><strong>{sessionStats.trades}</strong></div>
+                        <div><span>Wins / losses</span><strong>{sessionStats.wins}/{sessionStats.losses}</strong></div>
+                        <div>
+                            <span>Trade hit rate</span>
+                            <strong>{sessionStats.trades ? `${((sessionStats.wins / sessionStats.trades) * 100).toFixed(1)}%` : '-'}</strong>
+                        </div>
+                        <div>
+                            <span>Session P/L</span>
+                            <strong className={sessionStats.pnl >= 0 ? 'pos' : 'neg'}>{sessionStats.pnl >= 0 ? '+' : ''}{sessionStats.pnl.toFixed(2)} {currency}</strong>
+                        </div>
+                    </div>
+
+                    <div className='matches-pro__v2-safety'>
+                        Demo auto trading starts from the live Matches consensus model immediately. It keeps one 1-tick DIGITMATCH contract open at a time and continues until your Take Profit or Stop Loss is reached.
+                    </div>
+                </section>
             </div>
+
+            {sessionResult && (
+                <div className='matches-pro__target-overlay' role='dialog' aria-modal='true'>
+                    <div className={`matches-pro__target-popup ${sessionResult.type}`}>
+                        <button type='button' onClick={() => setSessionResult(null)}>×</button>
+                        <div className='matches-pro__target-kicker'>
+                            {sessionResult.type === 'tp' ? 'TAKE PROFIT REACHED' : 'STOP LOSS REACHED'}
+                        </div>
+                        <h3>
+                            {sessionResult.pnl >= 0 ? '+' : ''}{sessionResult.pnl.toFixed(2)} {currency}
+                        </h3>
+                        <p>
+                            {sessionResult.type === 'tp'
+                                ? `Profit target of ${sessionResult.target.toFixed(2)} ${currency} reached. Auto trading stopped.`
+                                : `Stop loss of ${sessionResult.target.toFixed(2)} ${currency} reached. Auto trading stopped.`}
+                        </p>
+                        <div className='matches-pro__target-stats'>
+                            <span>Trades <b>{sessionResult.trades}</b></span>
+                            <span>Wins <b>{sessionResult.wins}</b></span>
+                            <span>Losses <b>{sessionResult.losses}</b></span>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };
