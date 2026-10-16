@@ -158,8 +158,18 @@ const scoreCandidate = (digits, candidate) => {
     };
 };
 
+// If one digit fills >25% of a 1000-tick window the decimals are wrong
+// (e.g. a padded trailing zero). Never score a market on broken digits.
+const digitsLookBroken = digits => {
+    const counts = Array(10).fill(0);
+    digits.forEach(d => (counts[d] += 1));
+    return digits.length > 0 && Math.max(...counts) / digits.length > 0.25;
+};
+
 const bestCandidate = digits =>
-    CANDIDATES.map(candidate => scoreCandidate(digits, candidate)).sort(
+    digitsLookBroken(digits)
+        ? null
+        : CANDIDATES.map(candidate => scoreCandidate(digits, candidate)).sort(
         (a, b) => b.edge - a.edge || b.votes - a.votes || b.hitRate - a.hitRate
     )[0] || null;
 
@@ -219,6 +229,7 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
     const stopSocket = () => {
         stopSweepTimer();
         try {
+            if (ws_ref.current) ws_ref.current.onclose = null;
             ws_ref.current?.close();
         } catch {
             /* noop */
@@ -302,73 +313,96 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
             barrier: String(candidate.barrier),
         };
 
-        for (let slot = 1; slot <= requested; slot += 1) {
-            let opened = false;
+        // Fire every slot at the same moment so the whole batch shares one entry
+        // tick (the reference scanner's behaviour). Each slot first tries a direct
+        // buy with parameters (one round trip); if that is rejected for a soft
+        // reason it falls back to the proposal -> buy path with retries.
+        const directBuy = slot =>
+            withTimeout(
+                api_base.api.send({
+                    buy: '1',
+                    price: amount,
+                    parameters: {
+                        amount,
+                        basis: 'stake',
+                        contract_type: candidate.type,
+                        currency: cur,
+                        duration: 1,
+                        duration_unit: 't',
+                        underlying_symbol: candidate.market.code,
+                        barrier: String(candidate.barrier),
+                    },
+                    passthrough: { nolimitz_batch: run_panel?.run_id || 'bulk-scanner', slot, attempt: 0 },
+                }),
+                5000,
+                `Buy #${slot}`
+            );
 
-            for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_SLOT && !opened; attempt += 1) {
-                try {
-                    const proposalResponse = await withTimeout(
-                        api_base.api.send({
-                            ...proposalReq,
-                            passthrough: {
-                                nolimitz_batch: run_panel?.run_id || 'bulk-scanner',
-                                slot,
-                                attempt,
-                            },
-                        }),
-                        5000,
-                        `Proposal #${slot}`
-                    );
+        const proposalBuy = async (slot, attempt) => {
+            const proposalResponse = await withTimeout(
+                api_base.api.send({
+                    ...proposalReq,
+                    passthrough: { nolimitz_batch: run_panel?.run_id || 'bulk-scanner', slot, attempt },
+                }),
+                5000,
+                `Proposal #${slot}`
+            );
+            if (proposalResponse?.error) throw new Error(proposalResponse.error.message || 'Proposal rejected');
+            const proposal = proposalResponse?.proposal;
+            if (!proposal?.id) throw new Error('No proposal returned');
+            return withTimeout(
+                api_base.api.send({
+                    buy: proposal.id,
+                    price: Number(proposal.ask_price ?? amount),
+                    passthrough: { nolimitz_batch: run_panel?.run_id || 'bulk-scanner', slot, attempt },
+                }),
+                5000,
+                `Buy #${slot}`
+            );
+        };
 
-                    if (proposalResponse?.error) {
-                        throw new Error(proposalResponse.error.message || 'Proposal rejected');
-                    }
+        const HARD = /Insufficient balance|Market closed|Session expired/;
 
-                    const proposal = proposalResponse?.proposal;
-                    if (!proposal?.id) throw new Error('No proposal returned');
-
-                    const buyResponse = await withTimeout(
-                        api_base.api.send({
-                            buy: proposal.id,
-                            price: Number(proposal.ask_price ?? amount),
-                            passthrough: {
-                                nolimitz_batch: run_panel?.run_id || 'bulk-scanner',
-                                slot,
-                                attempt,
-                            },
-                        }),
-                        5000,
-                        `Buy #${slot}`
-                    );
-
-                    if (buyResponse?.error) {
-                        throw new Error(buyResponse.error.message || 'Buy rejected');
-                    }
-
-                    const contractId = buyResponse?.buy?.contract_id;
-                    if (!contractId) throw new Error('No contract id returned');
-
-                    ids.push(contractId);
-                    opened = true;
-
-                    if (ids.length === 1) {
-                        try {
-                            run_panel?.setIsRunning?.(true);
-                        } catch {
-                            /* noop */
-                        }
-                    }
-                } catch (error) {
-                    if (attempt === MAX_ATTEMPTS_PER_SLOT) {
-                        log(`[WARN] Trade ${slot}/${requested} could not open: ${describeError(error)}`);
-                    } else {
-                        await sleep(100);
-                    }
+        const openSlot = async slot => {
+            try {
+                const res = await directBuy(slot);
+                if (res?.error) throw res;
+                if (res?.buy?.contract_id) return res.buy.contract_id;
+                throw new Error('No contract id returned');
+            } catch (error) {
+                if (HARD.test(describeError(error))) {
+                    log(`[WARN] Trade ${slot}/${requested} could not open: ${describeError(error)}`);
+                    return null;
                 }
             }
+            for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_SLOT; attempt += 1) {
+                try {
+                    const res = await proposalBuy(slot, attempt);
+                    if (res?.error) throw new Error(res.error.message || 'Buy rejected');
+                    if (res?.buy?.contract_id) return res.buy.contract_id;
+                    throw new Error('No contract id returned');
+                } catch (error) {
+                    if (attempt === MAX_ATTEMPTS_PER_SLOT || HARD.test(describeError(error))) {
+                        log(`[WARN] Trade ${slot}/${requested} could not open: ${describeError(error)}`);
+                        return null;
+                    }
+                    await sleep(120 + slot * 40);
+                }
+            }
+            return null;
+        };
 
-            if (slot < requested) await sleep(55);
+        const t0 = performance.now();
+        const opened = await Promise.all(Array.from({ length: requested }, (_, i) => openSlot(i + 1)));
+        opened.forEach(id => id && ids.push(id));
+        if (ids.length) {
+            try {
+                run_panel?.setIsRunning?.(true);
+            } catch {
+                /* noop */
+            }
         }
+        const sendMs = Math.round(performance.now() - t0);
 
         if (!ids.length) {
             try {
@@ -382,7 +416,7 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
             return;
         }
 
-        log(`[OK] ${ids.length}/${requested} contracts opened.`);
+        log(`[OK] ${ids.length}/${requested} contracts opened together in ${sendMs}ms.`);
         setPhase('settling');
         setStatusTitle('TRADING');
         setStatusText('Waiting for settlement…');
@@ -531,7 +565,10 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
         active_ref.current = true;
 
         log(`[INFO] Scanning digit patterns on ${SCAN_MARKETS.length} volatility markets...`);
+        openStream();
+    };
 
+    const openStream = () => {
         const ws = new WebSocket(isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING);
         ws_ref.current = ws;
 
@@ -576,6 +613,7 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                 const code = data.echo_req.ticks_history;
                 if (!SCAN_MARKETS.some(market => market.code === code)) return;
 
+                if (typeof data.pip_size === 'number') decimals_ref.current[code] = data.pip_size;
                 const decimals = decimals_ref.current[code] ?? 2;
                 const digits = (data.history?.prices || [])
                     .map(price => lastDigit(price, decimals))
@@ -596,6 +634,7 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                 const code = data.tick.symbol;
                 if (!SCAN_MARKETS.some(market => market.code === code)) return;
 
+                if (typeof data.tick.pip_size === 'number') decimals_ref.current[code] = data.tick.pip_size;
                 const decimals = decimals_ref.current[code] ?? 2;
                 const prev = digits_ref.current[code] || [];
                 digits_ref.current[code] = [
@@ -606,10 +645,17 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
         };
 
         ws.onerror = () => {
-            if (!active_ref.current) return;
-            setStatusTitle('SCANNING');
-            setStatusText('Live stream interrupted. Reconnecting may be required.');
-            log('[WARN] Deriv market stream interrupted.');
+            /* onclose handles recovery */
+        };
+
+        // Auto-reconnect while scanning; tick history is re-requested on open.
+        ws.onclose = () => {
+            if (!active_ref.current || ws_ref.current !== ws) return;
+            log('[WARN] Deriv market stream dropped — reconnecting...');
+            setStatusText('Live stream dropped. Reconnecting…');
+            window.setTimeout(() => {
+                if (active_ref.current && ws_ref.current === ws) openStream();
+            }, 1000);
         };
     };
 
@@ -782,9 +828,7 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                             type='button'
                             onClick={() => {
                                 setBatchResult(null);
-                                setPhase('idle');
-                                setStatusTitle('STANDBY');
-                                setStatusText('Ready. Tap Scan for Best Market.');
+                                startScan();
                             }}
                         >
                             SCAN AGAIN
