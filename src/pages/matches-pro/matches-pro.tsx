@@ -102,6 +102,47 @@ const autoTradeDigit = prediction => {
     return null;
 };
 
+// ---------------------------------------------------------------- contract mode
+// MATCH: win if the next digit equals the pick. Pays ~8x profit, wins ~1 in 10.
+// DIFF:  win if the next digit is NOT the pick. Pays ~9.6% profit, wins ~9 in 10.
+// Measured on 100k real Deriv ticks: no digit-selection rule beat 10% / 90%.
+// Deriv's DIFF payout is rounded down hard at small stakes (0.35 -> 5.7% profit,
+// 1 -> 9.0%, 2+ -> ~9.6%), so Differs requires a stake of at least DIFF_MIN_STAKE.
+const DIFF_MIN_STAKE = 2;
+const MODE_KEY = 'nlb_matches_contract_mode';
+const loadMode = () => {
+    try {
+        return window.localStorage.getItem(MODE_KEY) === 'DIFF' ? 'DIFF' : 'MATCH';
+    } catch {
+        return 'MATCH';
+    }
+};
+const saveMode = mode => {
+    try {
+        window.localStorage.setItem(MODE_KEY, mode);
+    } catch {
+        /* per-viewer convenience only */
+    }
+};
+
+// Differs pick: the digit seen least in the last 250 ticks (ties -> lowest digit).
+// Any digit has the same ~90% chance; this just gives a stable, explainable pick.
+const differDigit = digits => {
+    if (!digits || digits.length < 250) return null;
+    const counts = new Array(10).fill(0);
+    digits.slice(-250).forEach(d => {
+        counts[d] += 1;
+    });
+    let pick = 0;
+    for (let d = 1; d < 10; d++) if (counts[d] < counts[pick]) pick = d;
+    return pick;
+};
+
+const pickForMode = (mode, prediction, digits) =>
+    mode === 'DIFF' ? differDigit(digits) : autoTradeDigit(prediction);
+
+const contractLabel = mode => (mode === 'DIFF' ? 'DIFFERS' : 'MATCH');
+
 const MatchesPro = () => {
     const { isAuthorized, accountList, activeLoginid } = useApiBase();
     const { run_panel, transactions, summary_card } = useStore();
@@ -136,6 +177,10 @@ const MatchesPro = () => {
     const [limits, setLimits] = React.useState(DEFAULT_LIMITS);
     const [day, setDay] = React.useState(() => loadDay('R_100'));
     const [gate, setGate] = React.useState({ allowed: false, reason: 'Auto trade is off' });
+    const [contract_mode, setContractMode] = React.useState(loadMode);
+    const [diff_payout, setDiffPayout] = React.useState(null); // win payout / stake for DIGITDIFF
+    const mode_ref = React.useRef(contract_mode);
+    mode_ref.current = contract_mode;
 
     const digits_ref = React.useRef([]);
     const pending_ref = React.useRef(null);
@@ -268,11 +313,23 @@ const MatchesPro = () => {
                 return;
             }
 
+            const mode = mode_ref.current;
+            const contract_type = mode === 'DIFF' ? 'DIGITDIFF' : 'DIGITMATCH';
+            const stake = Math.max(0.35, Number(limits_ref.current.stake) || 0.35);
+            if (mode === 'DIFF' && stake < DIFF_MIN_STAKE) {
+                auto_ref.current = false;
+                setAuto(false);
+                setGate({
+                    allowed: false,
+                    reason: `Differs needs a stake of at least ${DIFF_MIN_STAKE} ${currency} — below that Deriv cuts the payout to ~6%.`,
+                });
+                return;
+            }
+
             firing_ref.current = true;
             setError('');
 
             try {
-                const stake = Math.max(0.35, Number(limits_ref.current.stake) || 0.35);
                 let bought = null;
                 let win_payout = 0;
                 let lastError = null;
@@ -284,7 +341,8 @@ const MatchesPro = () => {
                     try {
                         let live = null;
 
-                        if (attempt === 1) {
+                        // The pre-priced stream only holds MATCH proposals.
+                        if (attempt === 1 && mode === 'MATCH') {
                             try {
                                 live = proposals_ref.current?.get?.(digit) || null;
                             } catch {
@@ -297,7 +355,7 @@ const MatchesPro = () => {
                                 proposal: 1,
                                 amount: stake,
                                 basis: 'stake',
-                                contract_type: 'DIGITMATCH',
+                                contract_type,
                                 currency,
                                 duration: 1,
                                 duration_unit: 't',
@@ -328,7 +386,8 @@ const MatchesPro = () => {
                         if (!(ask > 0)) throw new Error('Invalid proposal price');
 
                         if (ask > 0 && win_payout > 0) {
-                            setPayout(Number((win_payout / ask).toFixed(3)));
+                            if (mode === 'MATCH') setPayout(Number((win_payout / ask).toFixed(3)));
+                            else setDiffPayout(Number((win_payout / ask).toFixed(4)));
                         }
 
                         const response = await api_base.api.send({
@@ -336,6 +395,7 @@ const MatchesPro = () => {
                             price: ask,
                             passthrough: {
                                 nolimitz_source: 'matches-pro',
+                                contract_type,
                                 predicted_digit: digit,
                             },
                         });
@@ -356,7 +416,7 @@ const MatchesPro = () => {
                 }
 
                 const contract_id = bought?.buy?.contract_id;
-                if (!contract_id) throw lastError || new Error('Unable to buy Matches contract');
+                if (!contract_id) throw lastError || new Error(`Unable to buy ${contractLabel(mode)} contract`);
 
                 open_ref.current.add(contract_id);
                 cooldown_ref.current = 0;
@@ -371,7 +431,7 @@ const MatchesPro = () => {
 
                 setGate({
                     allowed: true,
-                    reason: `Bought MATCH ${digit} · contract ${contract_id} · waiting for settlement`,
+                    reason: `Bought ${contractLabel(mode)} ${digit} · contract ${contract_id} · waiting for settlement`,
                 });
 
                 const tracker = trackContracts([contract_id], {
@@ -400,6 +460,7 @@ const MatchesPro = () => {
                             contract_id,
                             symbol: sym,
                             predicted: digit,
+                            contract_type,
                             stake,
                             payout: win_payout,
                             profit,
@@ -436,7 +497,10 @@ const MatchesPro = () => {
                         } else if (auto_ref.current) {
                             setGate({
                                 allowed: true,
-                                reason: 'Contract settled. Waiting for the next live model consensus…',
+                                reason:
+                                    mode === 'DIFF'
+                                        ? 'Contract settled. Placing the next Differs contract…'
+                                        : 'Contract settled. Waiting for the next live model consensus…',
                             });
                         }
                     },
@@ -651,7 +715,7 @@ const MatchesPro = () => {
             const current_day = loadDay(sym);
             setDay(current_day);
 
-            const liveDigit = autoTradeDigit(next);
+            const liveDigit = pickForMode(mode_ref.current, next, digits_ref.current);
             const autoQuality = liveDigit !== null ? 'MEDIUM' : 'NO SIGNAL';
 
             const decision = evaluate({
@@ -672,7 +736,10 @@ const MatchesPro = () => {
             if (auto_ref.current && liveDigit === null) {
                 setGate({
                     allowed: false,
-                    reason: 'Waiting for at least two independent Matches models to agree on one digit…',
+                    reason:
+                        mode_ref.current === 'DIFF'
+                            ? 'Loading at least 250 ticks before the first Differs contract…'
+                            : 'Waiting for at least two independent Matches models to agree on one digit…',
                 });
             } else {
                 setGate(decision);
@@ -846,6 +913,37 @@ const MatchesPro = () => {
         };
     }, [symbol, currency, limits.stake, isAuthorized, activeLoginid]);
 
+    React.useEffect(() => {
+        if (!isAuthorized || !activeLoginid || !api_base?.api) return undefined;
+        const stake = Number(limits.stake);
+        if (!(stake >= 0.35)) return undefined;
+        let alive = true;
+        const t = window.setTimeout(async () => {
+            try {
+                const r = await api_base.api.send({
+                    proposal: 1,
+                    amount: stake,
+                    basis: 'stake',
+                    contract_type: 'DIGITDIFF',
+                    currency,
+                    duration: 1,
+                    duration_unit: 't',
+                    underlying_symbol: symbol,
+                    barrier: '5',
+                });
+                const ask = Number(r?.proposal?.ask_price);
+                const win = Number(r?.proposal?.payout);
+                if (alive && ask > 0 && win > 0) setDiffPayout(Number((win / ask).toFixed(4)));
+            } catch {
+                /* display only */
+            }
+        }, 500);
+        return () => {
+            alive = false;
+            window.clearTimeout(t);
+        };
+    }, [symbol, currency, limits.stake, isAuthorized, activeLoginid]);
+
     const refreshAnalyseStats = React.useCallback(sym => {
         const state = readAnalyse(sym);
         setAnalyseStats({ state, summary: summariseAnalyse(state) });
@@ -943,7 +1041,18 @@ const MatchesPro = () => {
     const max_pct = Math.max(10, ...distribution.map(d => d.p));
     const current_digit = digits.length ? digits[digits.length - 1] : null;
     const status_text = STATUS_TEXT[status] || STATUS_TEXT[TICK_STATUS.DISCONNECTED];
-    const liveAutoPick = autoTradeDigit(prediction);
+    const liveAutoPick = pickForMode(contract_mode, prediction, digits);
+    const is_diff = contract_mode === 'DIFF';
+    const stake_num = Number(limits.stake) || 0;
+    const diff_stake_low = is_diff && stake_num < DIFF_MIN_STAKE;
+    const match_profit_pct = payout > 1 ? (payout - 1) * 100 : null;
+    const diff_profit_pct = diff_payout > 1 ? (diff_payout - 1) * 100 : null;
+    const changeMode = mode => {
+        if (auto || mode === contract_mode) return;
+        setContractMode(mode);
+        saveMode(mode);
+        setGate({ allowed: false, reason: `${contractLabel(mode)} mode selected. Auto trade is off.` });
+    };
     const predicted =
         prediction?.predictedDigit ??
         (Number(prediction?.agreementTier || 0) >= 2 ? prediction?.candidateDigit : null);
@@ -971,6 +1080,14 @@ const MatchesPro = () => {
             return;
         }
 
+        if (mode_ref.current === 'DIFF' && (Number(limits_ref.current.stake) || 0) < DIFF_MIN_STAKE) {
+            setGate({
+                allowed: false,
+                reason: `Set stake to at least ${DIFF_MIN_STAKE} ${currency} for Differs — below that Deriv cuts the payout to ~6%.`,
+            });
+            return;
+        }
+
         const fresh = { trades: 0, wins: 0, losses: 0, pnl: 0 };
         session_stats_ref.current = fresh;
         setSessionStats(fresh);
@@ -984,12 +1101,12 @@ const MatchesPro = () => {
             payout: payout_ref.current,
             payoutByDigit: payout_by_digit_ref.current,
         });
-        const firstDigit = autoTradeDigit(livePrediction);
+        const firstDigit = pickForMode(mode_ref.current, livePrediction, digits_ref.current);
 
         if (firstDigit !== null) {
             setGate({
                 allowed: true,
-                reason: `Starting Matches Auto Trader · buying MATCH ${firstDigit}…`,
+                reason: `Starting auto trader · buying ${contractLabel(mode_ref.current)} ${firstDigit}…`,
             });
             fireTrade(symbol_ref.current, firstDigit);
         } else {
@@ -1233,21 +1350,59 @@ const MatchesPro = () => {
                     <div className='matches-pro__v2-section-head'>
                         <div>
                             <span className='matches-pro__v2-step'>02</span>
-                            <h2>Matches Auto Trader</h2>
-                            <p>Automatically buys a 1-tick DIGITMATCH contract only when the existing risk gate allows it.</p>
+                            <h2>{is_diff ? 'Differs Auto Trader' : 'Matches Auto Trader'}</h2>
+                            <p>
+                                {is_diff
+                                    ? 'Buys one 1-tick DIGITDIFF contract at a time: wins when the next digit is anything except the pick.'
+                                    : 'Buys one 1-tick DIGITMATCH contract at a time: wins only when the next digit equals the pick.'}
+                            </p>
                         </div>
                         <div className={`matches-pro__account-pill ${is_demo ? 'demo' : 'blocked'}`}>
                             {activeLoginid ? (is_demo ? 'DEMO ACCOUNT' : 'REAL BLOCKED') : 'NOT SIGNED IN'}
                         </div>
                     </div>
 
+                    <div className='matches-pro__mode' role='radiogroup' aria-label='Contract type'>
+                        <button
+                            type='button'
+                            role='radio'
+                            aria-checked={!is_diff}
+                            disabled={auto}
+                            className={`matches-pro__mode-btn ${!is_diff ? 'on' : ''}`}
+                            onClick={() => changeMode('MATCH')}
+                        >
+                            <b>Matches</b>
+                            <span>
+                                Pays {match_profit_pct ? `+${match_profit_pct.toFixed(0)}%` : '~+790%'} · wins ~1 in 10
+                            </span>
+                        </button>
+                        <button
+                            type='button'
+                            role='radio'
+                            aria-checked={is_diff}
+                            disabled={auto}
+                            className={`matches-pro__mode-btn ${is_diff ? 'on' : ''}`}
+                            onClick={() => changeMode('DIFF')}
+                        >
+                            <b>Differs</b>
+                            <span>
+                                Pays {diff_profit_pct ? `+${diff_profit_pct.toFixed(1)}%` : '~+9.6%'} · wins ~9 in 10
+                            </span>
+                        </button>
+                    </div>
+                    <div className='matches-pro__mode-note'>
+                        {is_diff
+                            ? `Differs: break-even is ${diff_payout ? ((1 / diff_payout) * 100).toFixed(1) : '91.2'}% wins. Use a stake of ${DIFF_MIN_STAKE} ${currency} or more — at 0.35 Deriv pays only ~5.7%.`
+                            : `Matches: break-even is ${payout ? ((1 / payout) * 100).toFixed(1) : '11.2'}% wins. Expect long losing runs between wins — size your stop-loss for 20+ misses in a row.`}
+                    </div>
+
                     <div className='matches-pro__v2-controls matches-pro__v2-controls--trade'>
-                        <label className='matches-pro__field'>
-                            <span>Stake ({currency})</span>
+                        <label className={`matches-pro__field ${diff_stake_low ? 'warn' : ''}`}>
+                            <span>Stake ({currency}){is_diff ? ` · min ${DIFF_MIN_STAKE}` : ''}</span>
                             <input
                                 type='number'
                                 step='0.05'
-                                min='0.35'
+                                min={is_diff ? DIFF_MIN_STAKE : 0.35}
                                 value={limits.stake}
                                 onChange={e => setLimit('stake', e.target.value)}
                             />
@@ -1275,12 +1430,16 @@ const MatchesPro = () => {
                     </div>
 
                     <div className='matches-pro__auto-pick'>
-                        <span>Current model pick</span>
-                        <strong>{predicted ?? '-'}</strong>
+                        <span>{is_diff ? 'Digit to avoid' : 'Current model pick'}</span>
+                        <strong>{(is_diff ? liveAutoPick : predicted) ?? '-'}</strong>
                         <small>
                             {liveAutoPick === null
-                                ? 'Waiting for at least two independent models to agree'
-                                : `MATCH ${liveAutoPick} · ${quality}`}
+                                ? is_diff
+                                    ? 'Loading 250 ticks'
+                                    : 'Waiting for at least two independent models to agree'
+                                : is_diff
+                                  ? `DIFFERS ${liveAutoPick} · least seen in last 250 ticks`
+                                  : `MATCH ${liveAutoPick} · ${quality}`}
                         </small>
                     </div>
 
@@ -1311,7 +1470,7 @@ const MatchesPro = () => {
                     <button
                         type='button'
                         className={`matches-pro__auto matches-pro__auto--v2 ${auto ? 'on' : ''}`}
-                        disabled={!can_arm || executionTesting}
+                        disabled={!can_arm || executionTesting || (!auto && diff_stake_low)}
                         onClick={toggleAutoSession}
                     >
                         {auto ? 'STOP AUTO TRADER' : 'START AUTO TRADER'}
@@ -1332,7 +1491,7 @@ const MatchesPro = () => {
                     </div>
 
                     <div className='matches-pro__v2-safety'>
-                        Demo auto trading starts from the live Matches consensus model immediately. It keeps one 1-tick DIGITMATCH contract open at a time and continues until your Take Profit or Stop Loss is reached.
+                        Demo only. Keeps one 1-tick {is_diff ? 'DIGITDIFF' : 'DIGITMATCH'} contract open at a time and stops at your profit or loss target. Tested on 100,000 real Deriv ticks: Matches wins about 10% and Differs about 90% whichever digit is picked — both sit just under break-even, so the targets are what protect the balance.
                     </div>
                 </section>
             </div>
