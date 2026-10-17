@@ -53,7 +53,8 @@ const FALLBACK_DECIMALS = {
 };
 
 const SWEEP_MS = 2500;
-const MAX_COVER = 5;
+const MAX_COVER = 8;
+const AUTO_GAP_MS = 1500;
 const DEFAULT_PAYOUT = 8.93; // payout per 1 staked; replaced by a live quote
 const SETTINGS_KEY = 'nlb_matches_pro_v3';
 const STEPS = ['Scan', 'Confirm', 'Fire', 'Result'];
@@ -77,6 +78,25 @@ const saveSettings = s => {
     } catch {
         /* per-viewer convenience only */
     }
+};
+
+// Chance a session reaches the profit target before the stop-loss, by Monte Carlo
+// on fair odds (each covered digit = 10%, which real Deriv ticks matched).
+const sessionOdds = (cover, stake, payout, tp, sl) => {
+    if (!(stake > 0) || !(tp > 0) || !(sl > 0)) return null;
+    const p = cover / 10;
+    const win = stake * (payout - cover);
+    const loss = stake * cover;
+    let seed = 1234567;
+    const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    let reached = 0;
+    const RUNS = 2000;
+    for (let r = 0; r < RUNS; r++) {
+        let pnl = 0;
+        for (let n = 0; n < 2000 && pnl < tp && pnl > -sl; n++) pnl += rnd() < p ? win : -loss;
+        if (pnl >= tp) reached += 1;
+    }
+    return reached / RUNS;
 };
 
 const pct = v => `${(v * 100).toFixed(1)}%`;
@@ -113,6 +133,8 @@ const MatchesPro = () => {
     const [result, setResult] = React.useState(null);
     const [session, setSession] = React.useState({ batches: 0, hits: 0, pnl: 0 });
     const [notice, setNotice] = React.useState('');
+    const [auto, setAuto] = React.useState(false);
+    const [lastEntry, setLastEntry] = React.useState(null);
 
     const ws_ref = React.useRef(null);
     const timer_ref = React.useRef(null);
@@ -129,6 +151,9 @@ const MatchesPro = () => {
     cfg_ref.current = { settings, currency, can_trade, payout };
     const session_ref = React.useRef(session);
     session_ref.current = session;
+    const auto_ref = React.useRef(auto);
+    auto_ref.current = auto;
+    const auto_timer_ref = React.useRef(null);
 
     const say = line => setFeed(prev => [{ t: Date.now() + Math.random(), line }, ...prev].slice(0, 8));
 
@@ -175,6 +200,7 @@ const MatchesPro = () => {
         mounted_ref.current = true;
         return () => {
             mounted_ref.current = false;
+            if (auto_timer_ref.current) window.clearTimeout(auto_timer_ref.current);
             stopAll();
             track_ref.current?.cancel?.();
         };
@@ -351,11 +377,20 @@ const MatchesPro = () => {
                 } catch {
                     /* mirror only */
                 }
-                const shown = c?.exit_tick_display_value ?? c?.exit_spot_display_value;
-                if (c?.is_sold && shown !== undefined && shown !== null) {
-                    const ch = String(shown).slice(-1);
-                    if (/\d/.test(ch)) exitDigit = Number(ch);
+                if (!c?.is_sold) return;
+                // A winning MATCH contract's barrier IS the landed digit.
+                if (Number(c.profit) > 0 && c.barrier !== undefined && c.barrier !== null) {
+                    exitDigit = Number(c.barrier);
+                    return;
                 }
+                if (exitDigit !== null) return;
+                const shown =
+                    c.exit_tick_display_value ?? c.exit_spot_display_value ?? c.exit_tick ?? c.exit_spot ?? c.current_spot;
+                if (shown === undefined || shown === null) return;
+                const dec = decimals_ref.current[code] ?? 2;
+                const str = typeof shown === 'number' ? shown.toFixed(dec) : String(shown);
+                const ch = str.slice(-1);
+                if (/\d/.test(ch)) exitDigit = Number(ch);
             },
             onDone: ({ total, wins, count }) => {
                 try {
@@ -373,7 +408,26 @@ const MatchesPro = () => {
                     hits: prev.hits + (hit ? 1 : 0),
                     pnl: Number((prev.pnl + total).toFixed(2)),
                 }));
-                setResult({ code, digit, digits, edge, total, wins, count, exitDigit, currency: cur });
+                const entry = { code, digit, digits, edge, total, wins, count, exitDigit, currency: cur };
+                const lim = cfg_ref.current.settings;
+                const nextPnl = session_ref.current.pnl + total;
+                const willStop =
+                    nextPnl <= -Math.abs(Number(lim.stop_loss) || Infinity) ||
+                    nextPnl >= Math.abs(Number(lim.take_profit) || Infinity);
+                setLastEntry(entry);
+                if (auto_ref.current && !willStop) {
+                    // Auto mode: no sheet, short pause, then hunt the next entry.
+                    auto_timer_ref.current = window.setTimeout(() => {
+                        auto_timer_ref.current = null;
+                        if (auto_ref.current && mounted_ref.current) startScan();
+                    }, AUTO_GAP_MS);
+                } else {
+                    if (willStop && auto_ref.current) {
+                        setAuto(false);
+                        auto_ref.current = false;
+                    }
+                    setResult(entry);
+                }
                 say(
                     hit
                         ? `HIT on ${code}: digit ${exitDigit ?? '?'} landed in ${list}. +${money(total)} ${cur}`
@@ -532,6 +586,12 @@ const MatchesPro = () => {
     };
 
     const stopScan = () => {
+        if (auto_timer_ref.current) {
+            window.clearTimeout(auto_timer_ref.current);
+            auto_timer_ref.current = null;
+        }
+        setAuto(false);
+        auto_ref.current = false;
         stopAll();
         armed_ref.current = null;
         setArmed(null);
@@ -544,6 +604,17 @@ const MatchesPro = () => {
     const cover = settings.cover;
     const win_amount = stake * (payout - cover);
     const breakeven = cover / payout;
+    const odds = React.useMemo(
+        () =>
+            sessionOdds(
+                cover,
+                stake,
+                payout,
+                Math.abs(Number(settings.take_profit) || 0),
+                Math.abs(Number(settings.stop_loss) || 0)
+            ),
+        [cover, stake, payout, settings.take_profit, settings.stop_loss]
+    );
     const limit_state =
         session.pnl <= -Math.abs(Number(settings.stop_loss) || Infinity)
             ? 'loss'
@@ -560,6 +631,7 @@ const MatchesPro = () => {
         .filter(m => m.r)
         .sort((a, b) => b.r.edge - a.r.edge);
 
+    const waitingAuto = auto && phase === 'done' && !result && !limit_state;
     const coreLabel = (() => {
         if (phase === 'idle') return { big: 'SCAN', small: 'tap to find an entry' };
         if (phase === 'scanning')
@@ -571,10 +643,15 @@ const MatchesPro = () => {
         if (phase === 'firing') return { big: batch?.digit ?? '…', small: 'opening contracts' };
         if (phase === 'settling') return { big: batch?.digit ?? '…', small: `settling ${batch?.settled || 0}/${batch?.opened || 0}` };
         if (limit_state) return { big: 'STOP', small: limit_state === 'loss' ? 'stop-loss reached' : 'target reached' };
+        if (waitingAuto) return { big: lastEntry ? (lastEntry.total > 0 ? 'HIT' : 'MISS') : '…', small: 'auto · next scan…' };
         return { big: result ? (result.exitDigit ?? result.digit) : (batch?.digit ?? '—'), small: 'tap to scan again' };
     })();
 
     const onCore = () => {
+        if (waitingAuto) {
+            stopScan();
+            return;
+        }
         if (busy || (limit_state && !scanning)) return;
         if (scanning) stopScan();
         else startScan();
@@ -670,6 +747,10 @@ const MatchesPro = () => {
                         Break-even <b>{pct(breakeven)}</b> hits
                     </span>
                 </div>
+                <div className={`mpro__odds ${odds === null ? '' : odds >= 0.45 ? 'good' : odds >= 0.3 ? 'mid' : 'bad'}`}>
+                    <span>Chance this session reaches the profit target before the stop-loss</span>
+                    <b>{odds === null ? '—' : `${Math.round(odds * 100)}%`}</b>
+                </div>
                 <div className='mpro__limits'>
                     <label>
                         <span>Stop session at loss</span>
@@ -694,6 +775,27 @@ const MatchesPro = () => {
                         />
                     </label>
                 </div>
+                <label className={`mpro__auto ${auto ? 'on' : ''}`}>
+                    <input
+                        type='checkbox'
+                        checked={auto}
+                        disabled={!can_trade || Boolean(limit_state)}
+                        onChange={e => {
+                            const on = e.target.checked;
+                            setAuto(on);
+                            auto_ref.current = on;
+                            if (!on && auto_timer_ref.current) {
+                                window.clearTimeout(auto_timer_ref.current);
+                                auto_timer_ref.current = null;
+                                setPhase('done');
+                            }
+                        }}
+                    />
+                    <i />
+                    <span>
+                        <b>Auto</b> keeps scanning and firing until the stop-loss or profit target ends the session
+                    </span>
+                </label>
             </section>
 
             <ol className='mpro__steps'>
@@ -760,6 +862,13 @@ const MatchesPro = () => {
                         </>
                     )}
                 </div>
+                {auto && lastEntry && (
+                    <div className={`mpro__last-entry ${lastEntry.total > 0 ? 'hit' : 'miss'}`}>
+                        Last: {lastEntry.total > 0 ? 'HIT' : 'MISS'} on {lastEntry.code} · landed {lastEntry.exitDigit ?? '?'} ·{' '}
+                        {lastEntry.total >= 0 ? '+' : ''}
+                        {money(lastEntry.total)} {lastEntry.currency}
+                    </div>
+                )}
                 {notice && <div className='mpro__notice'>{notice}</div>}
             </section>
 
@@ -835,10 +944,11 @@ const MatchesPro = () => {
                     )}
                 </ul>
                 <p className='mpro__fine'>
-                    Demo accounts only. Each covered digit adds about 10% hit chance, but Deriv&apos;s margin stays: in tests
-                    on 130,000 real ticks every cover setting lost about 10% of what was risked over time. Covering more
-                    digits mainly shortens losing runs (longest run: 62 misses covering 1 digit, 11 covering 5). The stop
-                    limits end the session before a bad run gets large.
+                    Demo accounts only. Each covered digit adds about 10% hit chance, but each hit pays less and Deriv&apos;s
+                    margin stays: on 130,000 real ticks every cover setting lost about 10% of what was risked over time.
+                    Winning more entries is not the same as finishing more sessions in profit. With a +10 / −20 session,
+                    covering 3 digits reached the target 48% of the time, 8 digits only 15%. Use the session chance above to
+                    compare settings.
                 </p>
             </section>
 

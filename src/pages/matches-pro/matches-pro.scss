@@ -144,6 +144,7 @@ $neg: #fb7185;
         gap: 0.4rem;
         i {
             width: calc((100% - 3.6rem) / 10);
+            flex: none;
             height: 0.8rem;
             border-radius: 99rem;
             background: rgba(255, 255, 255, 0.07);
@@ -160,6 +161,106 @@ $neg: #fb7185;
             b {
                 color: $gold;
             }
+        }
+    }
+    &__odds {
+        grid-column: 1 / -1;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 1rem 1.2rem;
+        border-radius: 1.2rem;
+        background: rgba(0, 0, 0, 0.3);
+        border: 1px solid $line-soft;
+        span {
+            font-size: 1.15rem;
+            line-height: 1.4;
+            color: $muted;
+        }
+        b {
+            flex: none;
+            font-size: 2.2rem;
+            font-weight: 900;
+            color: $text;
+        }
+        &.good b {
+            color: $pos;
+        }
+        &.mid b {
+            color: $gold;
+        }
+        &.bad b {
+            color: $neg;
+        }
+    }
+    &__auto {
+        grid-column: 1 / -1;
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        padding: 1rem 1.2rem;
+        border-radius: 1.2rem;
+        border: 1px solid $line-soft;
+        cursor: pointer;
+        input {
+            position: absolute;
+            opacity: 0;
+            pointer-events: none;
+        }
+        i {
+            flex: none;
+            position: relative;
+            width: 4.4rem;
+            height: 2.6rem;
+            border-radius: 99rem;
+            background: rgba(255, 255, 255, 0.12);
+            transition: background 0.2s;
+            &::after {
+                content: '';
+                position: absolute;
+                top: 0.3rem;
+                left: 0.3rem;
+                width: 2rem;
+                height: 2rem;
+                border-radius: 50%;
+                background: #fff;
+                transition: transform 0.2s;
+            }
+        }
+        span {
+            font-size: 1.2rem;
+            line-height: 1.4;
+            color: $muted;
+            b {
+                color: $text;
+            }
+        }
+        &.on {
+            border-color: $line;
+            i {
+                background: $gold;
+                &::after {
+                    transform: translateX(1.8rem);
+                }
+            }
+        }
+        input:disabled + i {
+            opacity: 0.4;
+        }
+    }
+    &__last-entry {
+        margin-top: 1rem;
+        padding: 0.8rem 1.2rem;
+        border-radius: 1rem;
+        font-size: 1.2rem;
+        &.hit {
+            color: $gold;
+            background: rgba(232, 207, 122, 0.1);
+        }
+        &.miss {
+            color: $neg;
+            background: rgba(251, 113, 133, 0.08);
         }
     }
     &__limits {
