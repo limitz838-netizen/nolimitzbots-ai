@@ -1,1520 +1,790 @@
-// @ts-nocheck -- Matches Pro (Phase 3: demo-only DIGITMATCH execution).
+// @ts-nocheck — Matches Pro v3: scan -> lock -> fire (DIGITMATCH only).
 //
-// Trading is off by default. Two hard locks sit in risk-guard.evaluate(), not
-// in this file's UI: a real login id is refused outright, and a market cannot
-// auto-trade until its backtest holds MIN_EVIDENCE graded predictions.
+// Flow: tap SCAN -> 13 volatility markets stream live -> every sweep each market's
+// strongest digit is scored (matches-scan-engine) -> the leader must clear the bar
+// and hold it on the next sweep after fresh ticks -> all contracts are bought in
+// parallel on that market+digit (one shared tick) -> settlement -> result sheet.
+//
+// Demo accounts only. Real accounts can scan but cannot trade from this page.
 import React from 'react';
 import { api_base } from '@/external/bot-skeleton';
 import { useApiBase } from '@/hooks/useApiBase';
 import { useStore } from '@/hooks/useStore';
 import { isDemoAccount } from '@/utils/account-helpers';
-import { subscribeTicks, TICK_STATUS, getDiagnostics } from '@/components/shared/nlb/tick-stream';
-import { predict, Z_CRITICAL } from '@/components/shared/nlb/matches-engine';
-import { record, read, reset, summarise, setupStats, topSetups } from '@/components/shared/nlb/backtest-store';
-import {
-    read as readAnalyse,
-    record as recordAnalyse,
-    reset as resetAnalyse,
-    summarise as summariseAnalyse,
-} from '@/components/shared/nlb/analyse-store';
+import { isProduction, WS_SERVERS } from '@/components/shared/utils/config/config';
 import { trackContracts, describeError } from '@/components/shared/nlb/settlement';
-import { startProposals } from '@/components/shared/nlb/proposal-stream';
+import { playLoss, playWin, unlockAudio } from '@/components/shared/nlb/trade-sounds';
 import {
-    DEFAULT_LIMITS,
-    MIN_EVIDENCE,
-    QUALITY_FLOORS,
-    evaluate,
-    loadDay,
-    loadLimits,
-    recordTrade,
-    resetDay,
-    saveLimits,
-} from '@/components/shared/nlb/risk-guard';
+    bestMatch,
+    lastDigit,
+    CONFIRM_TICKS,
+    EDGE_BAR,
+    HISTORY,
+    MIN_TICKS,
+    NULL_P,
+} from '@/components/shared/nlb/matches-scan-engine';
 import PageBoundary from '@/components/shared/nlb/page-boundary';
 import './matches-pro.scss';
 
-const DEFAULT_SYMBOLS = [
-    { code: 'R_100', label: 'Volatility 100 Index' },
-    { code: 'R_75', label: 'Volatility 75 Index' },
-    { code: 'R_50', label: 'Volatility 50 Index' },
-    { code: 'R_25', label: 'Volatility 25 Index' },
-    { code: 'R_10', label: 'Volatility 10 Index' },
-    { code: '1HZ100V', label: 'Volatility 100 (1s) Index' },
-    { code: '1HZ75V', label: 'Volatility 75 (1s) Index' },
-    { code: '1HZ50V', label: 'Volatility 50 (1s) Index' },
-    { code: '1HZ25V', label: 'Volatility 25 (1s) Index' },
-    { code: '1HZ10V', label: 'Volatility 10 (1s) Index' },
+const MARKETS = [
+    { code: '1HZ10V', name: 'Vol 10 (1s)' },
+    { code: '1HZ15V', name: 'Vol 15 (1s)' },
+    { code: '1HZ25V', name: 'Vol 25 (1s)' },
+    { code: '1HZ30V', name: 'Vol 30 (1s)' },
+    { code: '1HZ50V', name: 'Vol 50 (1s)' },
+    { code: '1HZ75V', name: 'Vol 75 (1s)' },
+    { code: '1HZ90V', name: 'Vol 90 (1s)' },
+    { code: '1HZ100V', name: 'Vol 100 (1s)' },
+    { code: 'R_10', name: 'Vol 10' },
+    { code: 'R_25', name: 'Vol 25' },
+    { code: 'R_50', name: 'Vol 50' },
+    { code: 'R_75', name: 'Vol 75' },
+    { code: 'R_100', name: 'Vol 100' },
 ];
-
-const WINDOW_CHOICES = [50, 100, 250, 500, 1000];
-const HISTORY = 1000;
-const MIN_SETUP_EVIDENCE = 30;
-const SETUP_EDGE_MARGIN = 0.005;
-
-const STATUS_TEXT = {
-    [TICK_STATUS.LIVE]: 'LIVE',
-    [TICK_STATUS.CONNECTING]: 'CONNECTING',
-    [TICK_STATUS.RECONNECTING]: 'RECONNECTING',
-    [TICK_STATUS.DISCONNECTED]: 'DISCONNECTED',
+const FALLBACK_DECIMALS = {
+    R_10: 3, R_25: 3, R_50: 4, R_75: 4, R_100: 2,
+    '1HZ10V': 2, '1HZ15V': 3, '1HZ25V': 2, '1HZ30V': 3, '1HZ50V': 2, '1HZ75V': 2, '1HZ90V': 3, '1HZ100V': 2,
 };
 
-const WINDOW_SECONDS = [5, 10, 20, 30];
+const SWEEP_MS = 2500;
+const MAX_CONTRACTS = 10;
+const DEFAULT_PAYOUT = 8.93; // payout per 1 staked; replaced by a live quote
+const SETTINGS_KEY = 'nlb_matches_pro_v3';
+const STEPS = ['Scan', 'Confirm', 'Fire', 'Result'];
 
-const MAIN_FIELDS = [
-    { key: 'stake', label: 'Stake', step: 0.05, min: 0.35 },
-    { key: 'daily_loss_limit', label: 'Stop after losing', step: 0.5, min: 0.5 },
-];
-
-const ADVANCED_FIELDS = [
-    { key: 'max_trades', label: 'Max trades / day', step: 1, min: 1 },
-    { key: 'max_consecutive_losses', label: 'Max losses in a row', step: 1, min: 1 },
-    { key: 'daily_profit_target', label: 'Daily profit target', step: 0.5, min: 0.5 },
-    { key: 'cooldown_ticks', label: 'Cooldown (ticks)', step: 1, min: 0 },
-];
-
-// Roughly how often each floor fired across 200k simulated ticks. Shown so the
-// choice is made with its trade frequency visible.
-const FLOOR_RATE = {
-    STRONG: 'fires on about 0.4% of ticks - often nothing for hours',
-    MEDIUM: 'fires on about 0.5% of ticks - a few times an hour at most',
-    WEAK: 'fires on about 8% of ticks - roughly every 20 seconds',
-    ANY: 'every tick qualifies - the engine is bypassed entirely',
-};
-
-const pct = v => `${(v * 100).toFixed(2)}%`;
-const clockOf = ts => new Date(ts).toLocaleTimeString('en-GB');
-
-const autoTradeDigit = prediction => {
-    if (!prediction) return null;
-    if (prediction.predictedDigit !== null && prediction.predictedDigit !== undefined) {
-        return prediction.predictedDigit;
-    }
-    // Demo auto mode may use the live consensus candidate before the slower
-    // long-run fingerprint calibration unlocks. This is still model-derived:
-    // at least two independent Matches models must agree on the same digit.
-    if (
-        prediction.candidateDigit !== null &&
-        prediction.candidateDigit !== undefined &&
-        Number(prediction.agreementTier || 0) >= 2
-    ) {
-        return prediction.candidateDigit;
-    }
-    return null;
-};
-
-// ---------------------------------------------------------------- contract mode
-// MATCH: win if the next digit equals the pick. Pays ~8x profit, wins ~1 in 10.
-// DIFF:  win if the next digit is NOT the pick. Pays ~9.6% profit, wins ~9 in 10.
-// Measured on 100k real Deriv ticks: no digit-selection rule beat 10% / 90%.
-// Deriv's DIFF payout is rounded down hard at small stakes (0.35 -> 5.7% profit,
-// 1 -> 9.0%, 2+ -> ~9.6%), so Differs requires a stake of at least DIFF_MIN_STAKE.
-const DIFF_MIN_STAKE = 2;
-const MODE_KEY = 'nlb_matches_contract_mode';
-const loadMode = () => {
+const loadSettings = () => {
     try {
-        return window.localStorage.getItem(MODE_KEY) === 'DIFF' ? 'DIFF' : 'MATCH';
+        const s = JSON.parse(window.localStorage.getItem(SETTINGS_KEY) || '{}');
+        return {
+            stake: Number(s.stake) >= 0.35 ? Number(s.stake) : 1,
+            count: Math.min(MAX_CONTRACTS, Math.max(1, parseInt(s.count, 10) || 3)),
+        };
     } catch {
-        return 'MATCH';
+        return { stake: 1, count: 3 };
     }
 };
-const saveMode = mode => {
+const saveSettings = s => {
     try {
-        window.localStorage.setItem(MODE_KEY, mode);
+        window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
     } catch {
         /* per-viewer convenience only */
     }
 };
 
-// Differs pick: the digit seen least in the last 250 ticks (ties -> lowest digit).
-// Any digit has the same ~90% chance; this just gives a stable, explainable pick.
-const differDigit = digits => {
-    if (!digits || digits.length < 250) return null;
-    const counts = new Array(10).fill(0);
-    digits.slice(-250).forEach(d => {
-        counts[d] += 1;
-    });
-    let pick = 0;
-    for (let d = 1; d < 10; d++) if (counts[d] < counts[pick]) pick = d;
-    return pick;
-};
-
-const pickForMode = (mode, prediction, digits) =>
-    mode === 'DIFF' ? differDigit(digits) : autoTradeDigit(prediction);
-
-const contractLabel = mode => (mode === 'DIFF' ? 'DIFFERS' : 'MATCH');
+const pct = v => `${(v * 100).toFixed(1)}%`;
+const signedPct = v => `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%`;
+const money = v => (Math.round(v * 100) / 100).toFixed(2);
+const sleep = ms => new Promise(r => window.setTimeout(r, ms));
+const withTimeout = (p, ms, label) =>
+    Promise.race([
+        Promise.resolve(p),
+        new Promise((_, rej) => window.setTimeout(() => rej(new Error(`${label} timed out`)), ms)),
+    ]);
 
 const MatchesPro = () => {
     const { isAuthorized, accountList, activeLoginid } = useApiBase();
     const { run_panel, transactions, summary_card } = useStore();
 
-    const [symbol, setSymbol] = React.useState('R_100');
-    const [symbols, setSymbols] = React.useState(DEFAULT_SYMBOLS);
-    const [status, setStatus] = React.useState(TICK_STATUS.CONNECTING);
-    const [quote, setQuote] = React.useState(null);
-    const [decimals, setDecimals] = React.useState(null);
-    const [digits, setDigits] = React.useState([]);
-    const [window_size, setWindowSize] = React.useState(100);
-    const [payout, setPayout] = React.useState(9.3);
-    const [error, setError] = React.useState('');
-    const [diag, setDiag] = React.useState(null);
-    const [prediction, setPrediction] = React.useState(null);
-    const [stats, setStats] = React.useState(null);
-    const [feed, setFeed] = React.useState([]);
-    const [show_why, setShowWhy] = React.useState(false);
-    const [show_advanced, setShowAdvanced] = React.useState(false);
-    const [live_pricing, setLivePricing] = React.useState(false);
-
-    const [analysis, setAnalysis] = React.useState(null);
-    const [remaining, setRemaining] = React.useState(0);
-    const [window_seconds, setWindowSeconds] = React.useState(10);
-    const [analyse_stats, setAnalyseStats] = React.useState(null);
-
-    const [auto, setAuto] = React.useState(false);
-    const [executionTesting, setExecutionTesting] = React.useState(false);
-    const [executionTestResult, setExecutionTestResult] = React.useState('');
-    const [sessionResult, setSessionResult] = React.useState(null);
-    const [sessionStats, setSessionStats] = React.useState({ trades: 0, wins: 0, losses: 0, pnl: 0 });
-    const [limits, setLimits] = React.useState(DEFAULT_LIMITS);
-    const [day, setDay] = React.useState(() => loadDay('R_100'));
-    const [gate, setGate] = React.useState({ allowed: false, reason: 'Auto trade is off' });
-    const [contract_mode, setContractMode] = React.useState(loadMode);
-    const [diff_payout, setDiffPayout] = React.useState(null); // win payout / stake for DIGITDIFF
-    const mode_ref = React.useRef(contract_mode);
-    mode_ref.current = contract_mode;
-
-    const digits_ref = React.useRef([]);
-    const pending_ref = React.useRef(null);
-    const payout_ref = React.useRef(payout);
-    const auto_ref = React.useRef(auto);
-    const limits_ref = React.useRef(limits);
-    const symbol_ref = React.useRef(symbol);
-    const open_ref = React.useRef(new Set());
-    const cooldown_ref = React.useRef(0);
-    const firing_ref = React.useRef(false);
-    const trackers_ref = React.useRef([]);
-    const analysis_ref = React.useRef(null);
-    const proposals_ref = React.useRef(null);
-    const payout_by_digit_ref = React.useRef({});
-    const last_shadow_fingerprint_ref = React.useRef(null);
-    const session_stats_ref = React.useRef({ trades: 0, wins: 0, losses: 0, pnl: 0 });
-
-    payout_ref.current = payout;
-    auto_ref.current = auto;
-    limits_ref.current = limits;
-    symbol_ref.current = symbol;
-
-    const activeAccount = React.useMemo(
+    const account = React.useMemo(
         () => (accountList || []).find(a => a.loginid === activeLoginid),
         [accountList, activeLoginid]
     );
-    const currency = activeAccount?.currency || 'USD';
-    const accountBalance = Number(activeAccount?.balance);
-
+    const currency = account?.currency || 'USD';
     const is_demo = isDemoAccount(activeLoginid || '');
+    const can_trade = Boolean(isAuthorized && activeLoginid && is_demo);
+
+    const [settings, setSettings] = React.useState(loadSettings);
+    const [phase, setPhase] = React.useState('idle'); // idle | scanning | confirming | firing | settling | done
+    const [rows, setRows] = React.useState({});
+    const [leader, setLeader] = React.useState(null);
+    const [armed, setArmed] = React.useState(null);
+    const [sweep, setSweep] = React.useState(0);
+    const [feed, setFeed] = React.useState([]);
+    const [payout, setPayout] = React.useState(DEFAULT_PAYOUT);
+    const [batch, setBatch] = React.useState(null);
+    const [result, setResult] = React.useState(null);
+    const [session, setSession] = React.useState({ batches: 0, hits: 0, pnl: 0 });
+    const [notice, setNotice] = React.useState('');
+
+    const ws_ref = React.useRef(null);
+    const timer_ref = React.useRef(null);
+    const reconnect_ref = React.useRef(null);
+    const active_ref = React.useRef(false);
+    const digits_ref = React.useRef({});
+    const ticks_ref = React.useRef({});
+    const decimals_ref = React.useRef({ ...FALLBACK_DECIMALS });
+    const armed_ref = React.useRef(null);
+    const sweep_ref = React.useRef(0);
+    const track_ref = React.useRef(null);
+    const mounted_ref = React.useRef(true);
+    const cfg_ref = React.useRef({});
+    cfg_ref.current = { settings, currency, can_trade, payout };
+
+    const say = line => setFeed(prev => [{ t: Date.now() + Math.random(), line }, ...prev].slice(0, 8));
+
+    const updateSettings = patch => {
+        setSettings(prev => {
+            const next = { ...prev, ...patch };
+            saveSettings(next);
+            return next;
+        });
+    };
+
+    // ------------------------------------------------------------ socket
+    const stopSweeps = () => {
+        if (timer_ref.current) {
+            window.clearTimeout(timer_ref.current);
+            timer_ref.current = null;
+        }
+    };
+    const closeSocket = () => {
+        if (reconnect_ref.current) {
+            window.clearTimeout(reconnect_ref.current);
+            reconnect_ref.current = null;
+        }
+        const ws = ws_ref.current;
+        ws_ref.current = null;
+        if (ws) {
+            ws.onclose = null;
+            ws.onmessage = null;
+            ws.onerror = null;
+            try {
+                ws.close();
+            } catch {
+                /* noop */
+            }
+        }
+    };
+    const stopAll = () => {
+        active_ref.current = false;
+        stopSweeps();
+        closeSocket();
+    };
 
     React.useEffect(() => {
-        setLimits(loadLimits());
-    }, []);
-
-    const refreshStats = React.useCallback(sym => {
-        const state = read(sym);
-        setStats({ state, summary: summarise(state) });
-        return state;
-    }, []);
-
-    const refreshDay = React.useCallback(sym => {
-        const d = loadDay(sym);
-        setDay(d);
-        return d;
-    }, []);
-
-    const calibratePrediction = React.useCallback((raw, state) => {
-        if (!raw) return raw;
-        if (!raw.fingerprint || raw.candidateDigit === null || raw.candidateDigit === undefined) {
-            return {
-                ...raw,
-                predictedDigit: null,
-                signalQuality: 'NO SIGNAL',
-                liveCalibration: { n: 0, correct: 0, accuracy: 0, lowerBound: 0, tradeReady: false },
-            };
-        }
-
-        const setup = setupStats(state, raw.fingerprint);
-        const required = Number(raw.breakeven || 0.1) + SETUP_EDGE_MARGIN;
-        const enough = setup.n >= MIN_SETUP_EVIDENCE;
-        const tradeReady = enough && setup.lowerBound > required;
-
-        let reason = raw.reason;
-        if (!enough) {
-            reason = `Shadow testing setup: ${setup.n}/${MIN_SETUP_EVIDENCE} independent forward results collected for this exact fingerprint.`;
-        } else if (!tradeReady) {
-            reason = `No trade: this exact setup's lower-bound accuracy is ${(setup.lowerBound * 100).toFixed(2)}%; it must exceed ${(required * 100).toFixed(2)}% for this digit's current payout.`;
-        } else {
-            reason = `TRADE CANDIDATE: exact setup has ${setup.correct}/${setup.n} correct, ${(setup.accuracy * 100).toFixed(2)}% raw accuracy and ${(setup.lowerBound * 100).toFixed(2)}% lower-bound accuracy versus ${(required * 100).toFixed(2)}% required.`;
-        }
-
-        return {
-            ...raw,
-            predictedDigit: tradeReady ? raw.candidateDigit : null,
-            signalQuality: tradeReady ? 'STRONG' : 'NO SIGNAL',
-            reason,
-            liveCalibration: { ...setup, required, tradeReady },
+        mounted_ref.current = true;
+        return () => {
+            mounted_ref.current = false;
+            stopAll();
+            track_ref.current?.cancel?.();
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    const resetV2Evidence = React.useCallback(() => {
-        // Only reset measured prediction/analyse evidence for the selected
-        // market. Trading limits and account settings are intentionally kept.
-        reset(symbol);
-        resetAnalyse(symbol);
-        pending_ref.current = null;
-        last_shadow_fingerprint_ref.current = null;
-        analysis_ref.current = null;
-        setFeed([]);
-        setAnalysis(null);
-        setPrediction(null);
-        const clean = refreshStats(symbol);
-        setAnalyseStats(summariseAnalyse(readAnalyse(symbol)));
-
-        // Seed a fresh next-tick prediction from the currently visible history.
-        // It is not counted until a future real tick arrives.
-        if (digits_ref.current.length) {
-            const raw = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
-            const seeded = calibratePrediction(raw, clean);
-            setPrediction(seeded);
-            if (seeded.fingerprint && seeded.candidateDigit !== null) {
-                last_shadow_fingerprint_ref.current = seeded.fingerprint;
-                pending_ref.current = {
-                    symbol,
-                    predicted: seeded.candidateDigit,
-                    quality: seeded.signalQuality,
-                    score: seeded.score,
-                    model: seeded.selectedModel,
-                    engineVersion: seeded.engineVersion,
-                    tradable: seeded.predictedDigit !== null,
-                    fingerprint: seeded.fingerprint,
-                    agreementTier: seeded.agreementTier,
-                    agreementModels: seeded.agreementModels,
-                };
-            }
-
-        }
-
-        setError('');
-        return clean;
-    }, [symbol, refreshStats, calibratePrediction]);
-
-    // ------------------------------------------------------------- execution
-    const fireTrade = React.useCallback(
-        async (sym, digit) => {
-            if (firing_ref.current || open_ref.current.size > 0) return;
-            if (!api_base?.api) {
-                setError('Deriv trading connection is not ready yet.');
-                return;
-            }
-
-            const mode = mode_ref.current;
-            const contract_type = mode === 'DIFF' ? 'DIGITDIFF' : 'DIGITMATCH';
-            const stake = Math.max(0.35, Number(limits_ref.current.stake) || 0.35);
-            if (mode === 'DIFF' && stake < DIFF_MIN_STAKE) {
-                auto_ref.current = false;
-                setAuto(false);
-                setGate({
-                    allowed: false,
-                    reason: `Differs needs a stake of at least ${DIFF_MIN_STAKE} ${currency} — below that Deriv cuts the payout to ~6%.`,
-                });
-                return;
-            }
-
-            firing_ref.current = true;
-            setError('');
-
+    // Live payout quote for the current stake (public socket, no login needed).
+    React.useEffect(() => {
+        const stake = Number(settings.stake);
+        if (!(stake >= 0.35)) return undefined;
+        let ws;
+        let done = false;
+        const t = window.setTimeout(() => {
             try {
-                let bought = null;
-                let win_payout = 0;
-                let lastError = null;
-
-                // Attempt 1 uses the live subscribed quote for speed.
-                // Attempt 2 always requests a fresh proposal so an expired
-                // stream proposal can never leave the auto trader stuck.
-                for (let attempt = 1; attempt <= 2 && !bought?.buy?.contract_id; attempt += 1) {
-                    try {
-                        let live = null;
-
-                        // The pre-priced stream only holds MATCH proposals.
-                        if (attempt === 1 && mode === 'MATCH') {
-                            try {
-                                live = proposals_ref.current?.get?.(digit) || null;
-                            } catch {
-                                live = null;
-                            }
-                        }
-
-                        if (!live) {
-                            const proposalResponse = await api_base.api.send({
-                                proposal: 1,
-                                amount: stake,
-                                basis: 'stake',
-                                contract_type,
-                                currency,
-                                duration: 1,
-                                duration_unit: 't',
-                                underlying_symbol: sym,
-                                barrier: String(digit),
-                            });
-
-                            if (proposalResponse?.error) {
-                                throw new Error(
-                                    proposalResponse.error.message ||
-                                        proposalResponse.error.code ||
-                                        'Proposal rejected'
-                                );
-                            }
-
-                            const proposal = proposalResponse?.proposal;
-                            if (!proposal?.id) throw new Error('No proposal returned');
-
-                            live = {
-                                id: proposal.id,
-                                ask: Number(proposal.ask_price),
-                                payout: Number(proposal.payout),
-                            };
-                        }
-
-                        const ask = Number(live.ask);
-                        win_payout = Number(live.payout);
-                        if (!(ask > 0)) throw new Error('Invalid proposal price');
-
-                        if (ask > 0 && win_payout > 0) {
-                            if (mode === 'MATCH') setPayout(Number((win_payout / ask).toFixed(3)));
-                            else setDiffPayout(Number((win_payout / ask).toFixed(4)));
-                        }
-
-                        const response = await api_base.api.send({
-                            buy: live.id,
-                            price: ask,
-                            passthrough: {
-                                nolimitz_source: 'matches-pro',
-                                contract_type,
-                                predicted_digit: digit,
-                            },
-                        });
-
-                        if (response?.error) {
-                            throw new Error(response.error.message || response.error.code || 'Buy rejected');
-                        }
-
-                        if (!response?.buy?.contract_id) {
-                            throw new Error('Buy did not return a contract');
-                        }
-
-                        bought = response;
-                    } catch (attemptError) {
-                        lastError = attemptError;
-                        if (attempt < 2) await new Promise(resolve => window.setTimeout(resolve, 120));
-                    }
-                }
-
-                const contract_id = bought?.buy?.contract_id;
-                if (!contract_id) throw lastError || new Error(`Unable to buy ${contractLabel(mode)} contract`);
-
-                open_ref.current.add(contract_id);
-                cooldown_ref.current = 0;
-
-                try {
-                    run_panel?.setIsRunning?.(true);
-                    run_panel?.setHasOpenContract?.(true);
-                    run_panel?.toggleDrawer?.(true);
-                } catch {
-                    /* Bot Builder mirror is best-effort only */
-                }
-
-                setGate({
-                    allowed: true,
-                    reason: `Bought ${contractLabel(mode)} ${digit} · contract ${contract_id} · waiting for settlement`,
-                });
-
-                const tracker = trackContracts([contract_id], {
-                    timeoutMs: 60000,
-                    onContract: contract => {
-                        try {
-                            transactions?.onBotContractEvent?.(contract);
-                            summary_card?.onBotContractEvent?.(contract);
-                            run_panel?.onBotContractEvent?.(contract);
-                        } catch {
-                            /* display mirroring must never interrupt execution */
-                        }
-                    },
-                    onDone: ({ profits }) => {
-                        const profit = Number(Object.values(profits)[0] ?? 0);
-                        open_ref.current.delete(contract_id);
-
-                        try {
-                            run_panel?.setHasOpenContract?.(open_ref.current.size > 0);
-                        } catch {
-                            /* noop */
-                        }
-
-                        const updatedDay = recordTrade(sym, {
-                            t: Date.now(),
-                            contract_id,
-                            symbol: sym,
-                            predicted: digit,
-                            contract_type,
-                            stake,
-                            payout: win_payout,
-                            profit,
-                        });
-                        setDay(updatedDay);
-
-                        const s = session_stats_ref.current;
-                        s.trades += 1;
-                        s.pnl = Number((s.pnl + profit).toFixed(4));
-                        if (profit > 0) s.wins += 1;
-                        else s.losses += 1;
-                        setSessionStats({ ...s });
-
-                        const tp = Math.abs(Number(limits_ref.current.daily_profit_target) || 0);
-                        const sl = Math.abs(Number(limits_ref.current.daily_loss_limit) || 0);
-                        const hitTp = tp > 0 && s.pnl >= tp;
-                        const hitSl = sl > 0 && s.pnl <= -sl;
-
-                        if (auto_ref.current && (hitTp || hitSl)) {
-                            auto_ref.current = false;
-                            setAuto(false);
-                            setGate({
-                                allowed: false,
-                                reason: hitTp ? 'Take profit reached' : 'Stop loss reached',
-                            });
-                            setSessionResult({
-                                type: hitTp ? 'tp' : 'sl',
-                                pnl: s.pnl,
-                                trades: s.trades,
-                                wins: s.wins,
-                                losses: s.losses,
-                                target: hitTp ? tp : sl,
-                            });
-                        } else if (auto_ref.current) {
-                            setGate({
-                                allowed: true,
-                                reason:
-                                    mode === 'DIFF'
-                                        ? 'Contract settled. Placing the next Differs contract…'
-                                        : 'Contract settled. Waiting for the next live model consensus…',
-                            });
-                        }
-                    },
-                });
-                trackers_ref.current.push(tracker);
-            } catch (e) {
-                const message = describeError(e);
-                setError(message);
-                setGate({ allowed: false, reason: `Buy failed: ${message}` });
-                cooldown_ref.current = Math.max(cooldown_ref.current, 1);
-            } finally {
-                firing_ref.current = false;
-            }
-        },
-        [currency, transactions, summary_card, run_panel]
-    );
-
-
-    const testDemoExecution = React.useCallback(async () => {
-        if (executionTesting) return;
-
-        if (!isAuthorized) {
-            setExecutionTestResult('TEST FAILED — Deriv trading connection is not authorized.');
-            return;
-        }
-        if (!is_demo) {
-            setExecutionTestResult('TEST BLOCKED — switch to a Deriv demo account.');
-            return;
-        }
-        if (!api_base?.api) {
-            setExecutionTestResult('TEST FAILED — trading connection is not ready yet.');
-            return;
-        }
-
-        const testDigit =
-            prediction?.candidateDigit ??
-            (digits_ref.current.length ? digits_ref.current[digits_ref.current.length - 1] : null);
-
-        if (testDigit === null || testDigit === undefined) {
-            setExecutionTestResult('TEST FAILED — waiting for a live digit first.');
-            return;
-        }
-
-        const stake = Math.max(0.35, Number(limits_ref.current.stake) || 0.35);
-        setExecutionTesting(true);
-        setExecutionTestResult('Preparing one live demo DIGITMATCH proposal…');
-        setError('');
-
-        try {
-            run_panel.run_id = 'matches-pro-test-' + Date.now();
-            summary_card?.clear?.();
-            run_panel?.setIsRunning?.(true);
-            run_panel?.toggleDrawer?.(true);
-
-            const response = await api_base.api.send({
-                proposal: 1,
-                amount: stake,
-                basis: 'stake',
-                contract_type: 'DIGITMATCH',
-                currency,
-                duration: 1,
-                duration_unit: 't',
-                underlying_symbol: symbol,
-                barrier: String(testDigit),
-            });
-
-            const proposal = response?.proposal;
-            if (!proposal?.id) throw new Error('No proposal returned');
-
-            setExecutionTestResult('Proposal accepted. Sending one demo buy…');
-
-            const bought = await api_base.api.send({
-                buy: proposal.id,
-                price: Number(proposal.ask_price),
-            });
-
-            const contract_id = bought?.buy?.contract_id;
-            if (!contract_id) throw new Error('Buy did not return a contract');
-
-            setExecutionTestResult('BOUGHT demo contract ' + contract_id + ' · waiting for settlement.');
-
-            const tracker = trackContracts([contract_id], {
-                timeoutMs: 60000,
-                onContract: contract => {
-                    try {
-                        transactions?.onBotContractEvent?.(contract);
-                        summary_card?.onBotContractEvent?.(contract);
-                        run_panel?.onBotContractEvent?.(contract);
-                    } catch {
-                        /* display mirroring must never interrupt execution */
-                    }
-                },
-                onDone: ({ profits, settled }) => {
-                    const profit = Number(Object.values(profits)[0] ?? 0);
-                    setExecutionTestResult(
-                        settled > 0
-                            ? 'TEST PASSED — contract settled ' +
-                              (profit >= 0 ? '+' : '') +
-                              profit.toFixed(2) +
-                              ' ' +
-                              currency +
-                              '. Normal Matches Pro evidence gates remain unchanged.'
-                            : 'TEST FAILED — contract did not settle before timeout.'
+                ws = new WebSocket(isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING);
+                ws.onopen = () =>
+                    ws.send(
+                        JSON.stringify({
+                            proposal: 1,
+                            amount: stake,
+                            basis: 'stake',
+                            contract_type: 'DIGITMATCH',
+                            currency,
+                            duration: 1,
+                            duration_unit: 't',
+                            underlying_symbol: 'R_100',
+                            barrier: '5',
+                        })
                     );
-                    setExecutionTesting(false);
+                ws.onmessage = m => {
                     try {
-                        run_panel?.setIsRunning?.(false);
+                        const d = JSON.parse(m.data);
+                        const ask = Number(d?.proposal?.ask_price);
+                        const win = Number(d?.proposal?.payout);
+                        if (!done && ask > 0 && win > 0 && mounted_ref.current) setPayout(win / ask);
                     } catch {
                         /* noop */
                     }
-                },
-            });
-
-            trackers_ref.current.push(tracker);
-        } catch (e) {
-            const message = describeError(e);
-            setExecutionTestResult('TEST FAILED — ' + message);
-            setError(message);
-            setExecutionTesting(false);
-            try {
-                run_panel?.setIsRunning?.(false);
-            } catch {
-                /* noop */
-            }
-        }
-    }, [
-        executionTesting,
-        isAuthorized,
-        is_demo,
-        prediction,
-        currency,
-        symbol,
-        run_panel,
-        transactions,
-        summary_card,
-    ]);
-
-    // ------------------------------------------------------------- per tick
-    const step = React.useCallback(
-        (sym, actual_digit, ts, already_graded = false) => {
-            if (cooldown_ref.current > 0) cooldown_ref.current -= 1;
-
-            const pending = pending_ref.current;
-            if (!already_graded && pending && pending.predicted !== null && pending.symbol === sym) {
-                record(sym, {
-                    t: ts,
-                    predicted: pending.predicted,
-                    actual: actual_digit,
-                    quality: pending.quality,
-                    score: pending.score,
-                    model: pending.model,
-                    engineVersion: pending.engineVersion,
-                    tradable: pending.tradable,
-                    fingerprint: pending.fingerprint,
-                    agreementTier: pending.agreementTier,
-                    agreementModels: pending.agreementModels,
-                });
-                setFeed(prev =>
-                    [
-                        {
-                            t: ts,
-                            predicted: pending.predicted,
-                            actual: actual_digit,
-                            hit: pending.predicted === actual_digit,
-                            quality: pending.quality,
-                        },
-                        ...prev,
-                    ].slice(0, 12)
-                );
-            }
-
-            // A live analysis window scores itself against the ticks that
-            // arrive inside it.
-            const open = analysis_ref.current;
-            if (open && !open.done && open.symbol === sym && Date.now() < open.ends) {
-                open.ticks.push(actual_digit);
-                if (actual_digit === open.digit) open.hits += 1;
-                setAnalysis({ ...open });
-            }
-
-            const rawNext = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
-            const state = refreshStats(sym);
-            const next = calibratePrediction(rawNext, state);
-            setPrediction(next);
-
-            // Count a fingerprint only once while it remains unchanged.
-            // A materially different setup (digit/models/tier/strength/previous digit)
-            // can create a new independent shadow observation.
-            if (next.fingerprint && next.candidateDigit !== null) {
-                if (next.fingerprint !== last_shadow_fingerprint_ref.current) {
-                    last_shadow_fingerprint_ref.current = next.fingerprint;
-                    pending_ref.current = {
-                        symbol: sym,
-                        predicted: next.candidateDigit,
-                        quality: next.signalQuality,
-                        score: next.score,
-                        model: next.selectedModel,
-                        engineVersion: next.engineVersion,
-                        tradable: next.predictedDigit !== null,
-                        fingerprint: next.fingerprint,
-                        agreementTier: next.agreementTier,
-                        agreementModels: next.agreementModels,
-                    };
-                } else {
-                    pending_ref.current = null;
-                }
-            } else {
-                last_shadow_fingerprint_ref.current = null;
-                pending_ref.current = null;
-            }
-
-            const current_day = loadDay(sym);
-            setDay(current_day);
-
-            const liveDigit = pickForMode(mode_ref.current, next, digits_ref.current);
-            const autoQuality = liveDigit !== null ? 'MEDIUM' : 'NO SIGNAL';
-
-            const decision = evaluate({
-                limits: limits_ref.current,
-                day: current_day,
-                quality: autoQuality,
-                is_authorized: isAuthorized,
-                loginid: activeLoginid,
-                open_count: open_ref.current.size,
-                cooldown_remaining: cooldown_ref.current,
-                evidence: state.total,
-                min_evidence: auto_ref.current ? 0 : MIN_EVIDENCE,
-                auto_on: auto_ref.current,
-                session_pl: session_stats_ref.current.pnl,
-                stop_mode: 'targets',
-            });
-
-            if (auto_ref.current && liveDigit === null) {
-                setGate({
-                    allowed: false,
-                    reason:
-                        mode_ref.current === 'DIFF'
-                            ? 'Loading at least 250 ticks before the first Differs contract…'
-                            : 'Waiting for at least two independent Matches models to agree on one digit…',
-                });
-            } else {
-                setGate(decision);
-            }
-
-            if (decision.allowed && liveDigit !== null) {
-                fireTrade(sym, liveDigit);
-            }
-        },
-        [refreshStats, isAuthorized, activeLoginid, fireTrade, calibratePrediction]
-    );
-
-    React.useEffect(() => {
-        digits_ref.current = [];
-        pending_ref.current = null;
-        last_shadow_fingerprint_ref.current = null;
-        open_ref.current = new Set();
-        cooldown_ref.current = 0;
-        setDigits([]);
-        setQuote(null);
-        setError('');
-        setFeed([]);
-        setPrediction(null);
-        refreshStats(symbol);
-        refreshDay(symbol);
-
-        const unsubscribe = subscribeTicks({
-            symbol,
-            count: HISTORY,
-            onStatus: setStatus,
-            onError: message => setError(message),
-            onSymbols: list => {
-                if (!list?.length) return;
-                const known = Object.fromEntries(DEFAULT_SYMBOLS.map(s => [s.code, s.label]));
-                setSymbols(
-                    list.map(s => ({
-                        code: s.code,
-                        label: s.label && s.label !== s.code ? s.label : known[s.code] || s.code,
-                    }))
-                );
-            },
-            onHistory: ({ digits: d, quote: q, decimals: dec }) => {
-                digits_ref.current = [...d];
-                setDigits(d);
-                setQuote(q);
-                setDecimals(dec);
-                const rawSeeded = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
-                const currentState = read(symbol);
-                const seeded = calibratePrediction(rawSeeded, currentState);
-                setPrediction(seeded);
-                if (seeded.fingerprint && seeded.candidateDigit !== null) {
-                    last_shadow_fingerprint_ref.current = seeded.fingerprint;
-                    pending_ref.current = {
-                        symbol,
-                        predicted: seeded.candidateDigit,
-                        quality: seeded.signalQuality,
-                        score: seeded.score,
-                        model: seeded.selectedModel,
-                        engineVersion: seeded.engineVersion,
-                        tradable: seeded.predictedDigit !== null,
-                        fingerprint: seeded.fingerprint,
-                        agreementTier: seeded.agreementTier,
-                        agreementModels: seeded.agreementModels,
-                    };
-                }
-            },
-            onTick: ({ digit, quote: q, decimals: dec }) => {
-                setDecimals(dec);
-                setQuote(q);
-
-                // The pending prediction was created before this tick, so it is
-                // safe to grade it against the arriving digit. Then include the
-                // now-known tick in history before creating the prediction for
-                // the NEXT tick. That is the correct boundary for a 1-tick contract.
-                const pendingBeforeTick = pending_ref.current;
-                if (pendingBeforeTick && pendingBeforeTick.predicted !== null && pendingBeforeTick.symbol === symbol) {
-                    record(symbol, {
-                        t: Date.now(),
-                        predicted: pendingBeforeTick.predicted,
-                        actual: digit,
-                        quality: pendingBeforeTick.quality,
-                        score: pendingBeforeTick.score,
-                        model: pendingBeforeTick.model,
-                        engineVersion: pendingBeforeTick.engineVersion,
-                        tradable: pendingBeforeTick.tradable,
-                        fingerprint: pendingBeforeTick.fingerprint,
-                        agreementTier: pendingBeforeTick.agreementTier,
-                        agreementModels: pendingBeforeTick.agreementModels,
-                    });
-                }
-                pending_ref.current = null;
-
-                digits_ref.current = [...digits_ref.current, digit].slice(-HISTORY);
-                setDigits(digits_ref.current);
-                step(symbol, digit, Date.now(), true);
-            },
-        });
-
-        return () => {
-            unsubscribe();
-            trackers_ref.current.forEach(t => {
-                try {
-                    t.cancel();
-                } catch {
-                    /* noop */
-                }
-            });
-            trackers_ref.current = [];
-        };
-    }, [symbol, step, refreshStats, refreshDay, calibratePrediction]);
-
-    // Switching market stops auto trading. Limits are per day, per market.
-    React.useEffect(() => {
-        setAuto(false);
-    }, [symbol]);
-
-    React.useEffect(() => {
-        const id = setInterval(() => setDiag(getDiagnostics()), 1000);
-        return () => clearInterval(id);
-    }, []);
-
-    // Pre-priced proposals for all ten digits. Gives instant buys and a real
-    // payout multiplier instead of a typed-in one.
-    React.useEffect(() => {
-        proposals_ref.current?.stop?.();
-        proposals_ref.current = null;
-        setLivePricing(false);
-        payout_by_digit_ref.current = {};
-
-        if (!isAuthorized || !activeLoginid) return undefined;
-        const stake = Number(limits.stake);
-        if (!(stake > 0)) return undefined;
-
-        let handle = null;
-        try {
-            handle = startProposals({
-                symbol,
-                currency,
-                amount: stake,
-                onUpdate: ({ multiplier, latest }) => {
-                    if (latest) {
-                        const exact = {};
-                        Object.entries(latest).forEach(([digit, proposal]) => {
-                            const ask = Number(proposal?.ask);
-                            const winPayout = Number(proposal?.payout);
-                            if (ask > 0 && winPayout > 0) exact[Number(digit)] = winPayout / ask;
-                        });
-                        payout_by_digit_ref.current = exact;
+                    done = true;
+                    try {
+                        ws.close();
+                    } catch {
+                        /* noop */
                     }
-                    if (!multiplier || !Number.isFinite(multiplier)) return;
-                    setLivePricing(true);
-                    setPayout(prev => (Math.abs(prev - multiplier) > 0.005 ? Number(multiplier.toFixed(3)) : prev));
-                },
-                onError: e => setError(describeError(e)),
-            });
-            proposals_ref.current = handle;
-        } catch (e) {
-            // Live pricing is an optimisation. If it cannot start, trading
-            // still works through the ordinary proposal-then-buy path.
-            setError(describeError(e));
-        }
-
+                };
+            } catch {
+                /* keep the default estimate */
+            }
+        }, 400);
         return () => {
+            window.clearTimeout(t);
             try {
-                handle?.stop();
+                ws?.close();
             } catch {
                 /* noop */
             }
-            proposals_ref.current = null;
-            setLivePricing(false);
         };
-    }, [symbol, currency, limits.stake, isAuthorized, activeLoginid]);
+    }, [settings.stake, currency]);
 
-    React.useEffect(() => {
-        if (!isAuthorized || !activeLoginid || !api_base?.api) return undefined;
-        const stake = Number(limits.stake);
-        if (!(stake >= 0.35)) return undefined;
-        let alive = true;
-        const t = window.setTimeout(async () => {
-            try {
-                const r = await api_base.api.send({
-                    proposal: 1,
-                    amount: stake,
-                    basis: 'stake',
-                    contract_type: 'DIGITDIFF',
-                    currency,
-                    duration: 1,
-                    duration_unit: 't',
-                    underlying_symbol: symbol,
-                    barrier: '5',
-                });
-                const ask = Number(r?.proposal?.ask_price);
-                const win = Number(r?.proposal?.payout);
-                if (alive && ask > 0 && win > 0) setDiffPayout(Number((win / ask).toFixed(4)));
-            } catch {
-                /* display only */
-            }
-        }, 500);
-        return () => {
-            alive = false;
-            window.clearTimeout(t);
-        };
-    }, [symbol, currency, limits.stake, isAuthorized, activeLoginid]);
+    // ------------------------------------------------------------ execution
+    const fire = async (code, digit, edge) => {
+        const { settings: s, currency: cur, can_trade: allowed } = cfg_ref.current;
+        const n = Math.min(MAX_CONTRACTS, Math.max(1, parseInt(s.count, 10) || 1));
+        const amount = Math.max(0.35, Number(s.stake) || 0.35);
 
-    const refreshAnalyseStats = React.useCallback(sym => {
-        const state = readAnalyse(sym);
-        setAnalyseStats({ state, summary: summariseAnalyse(state) });
-    }, []);
-
-    React.useEffect(() => {
-        refreshAnalyseStats(symbol);
-        analysis_ref.current = null;
-        setAnalysis(null);
-        setRemaining(0);
-    }, [symbol, refreshAnalyseStats]);
-
-    const startAnalysis = () => {
-        const next = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
-        if (next.predictedDigit === null) return;
-        const open = {
-            symbol,
-            digit: next.predictedDigit,
-            quality: next.signalQuality,
-            probability: next.probabilityEstimate,
-            breakeven: next.breakeven,
-            score: next.score,
-            started: Date.now(),
-            ends: Date.now() + window_seconds * 1000,
-            ticks: [],
-            hits: 0,
-            done: false,
-        };
-        analysis_ref.current = open;
-        setAnalysis({ ...open });
-        setRemaining(window_seconds);
-    };
-
-    // Countdown, and settle the window once it expires.
-    React.useEffect(() => {
-        if (!analysis || analysis.done) return undefined;
-        const id = setInterval(() => {
-            const open = analysis_ref.current;
-            if (!open || open.done) return;
-            const left = Math.max(0, Math.ceil((open.ends - Date.now()) / 1000));
-            setRemaining(left);
-            if (left === 0) {
-                open.done = true;
-                recordAnalyse(open.symbol, {
-                    t: open.started,
-                    digit: open.digit,
-                    ticks: open.ticks.length,
-                    hits: open.hits,
-                });
-                setAnalysis({ ...open });
-                refreshAnalyseStats(open.symbol);
-            }
-        }, 250);
-        return () => clearInterval(id);
-    }, [analysis, refreshAnalyseStats]);
-
-    // Give a Matches Auto Trader session the same run identity/state as Bot Builder.
-    // Contracts themselves are mirrored into its Summary/Transactions stores above.
-    React.useEffect(() => {
-        try {
-            if (auto) {
-                run_panel.run_id = `matches-pro-${Date.now()}`;
-                run_panel?.setIsRunning?.(true);
-                run_panel?.setHasOpenContract?.(open_ref.current.size > 0);
-                run_panel?.toggleDrawer?.(true);
-            } else {
-                run_panel?.setIsRunning?.(false);
-                if (open_ref.current.size === 0) run_panel?.setHasOpenContract?.(false);
-            }
-        } catch {
-            /* run panel unavailable - trading still works */
+        if (!allowed) {
+            setPhase('done');
+            setNotice('Entry found. Sign in with a Deriv demo account to open contracts.');
+            say(`Entry found on ${code}: digit ${digit}. Not traded (demo account required).`);
+            return;
         }
-        return () => {
-            if (auto) {
+
+        setPhase('firing');
+        setBatch({ code, digit, opened: 0, settled: 0, requested: n });
+        say(`Opening ${n} × MATCH ${digit} on ${code}…`);
+        unlockAudio();
+        try {
+            run_panel.run_id = `matches-pro-${Date.now()}`;
+            run_panel?.setIsRunning?.(true);
+            run_panel?.toggleDrawer?.(true);
+        } catch {
+            /* run panel is a mirror only */
+        }
+
+        const parameters = {
+            amount,
+            basis: 'stake',
+            contract_type: 'DIGITMATCH',
+            currency: cur,
+            duration: 1,
+            duration_unit: 't',
+            underlying_symbol: code,
+            barrier: String(digit),
+        };
+        const HARD = /Insufficient balance|Market closed|Session expired/;
+        const openOne = async slot => {
+            try {
+                const r = await withTimeout(
+                    api_base.api.send({
+                        buy: '1',
+                        price: amount,
+                        parameters,
+                        passthrough: { nolimitz_source: 'matches-pro', slot },
+                    }),
+                    5000,
+                    `Buy #${slot}`
+                );
+                if (r?.error) throw r;
+                if (r?.buy?.contract_id) return r.buy.contract_id;
+            } catch (e) {
+                if (HARD.test(describeError(e))) {
+                    say(`Contract ${slot} not opened: ${describeError(e)}`);
+                    return null;
+                }
+            }
+            for (let attempt = 1; attempt <= 3; attempt += 1) {
+                try {
+                    const p = await withTimeout(api_base.api.send({ proposal: 1, ...parameters }), 5000, 'Proposal');
+                    if (p?.error) throw new Error(p.error.message);
+                    const b = await withTimeout(
+                        api_base.api.send({
+                            buy: p.proposal.id,
+                            price: Number(p.proposal.ask_price ?? amount),
+                            passthrough: { nolimitz_source: 'matches-pro', slot },
+                        }),
+                        5000,
+                        'Buy'
+                    );
+                    if (b?.error) throw new Error(b.error.message);
+                    if (b?.buy?.contract_id) return b.buy.contract_id;
+                } catch (e) {
+                    if (attempt === 3 || HARD.test(describeError(e))) {
+                        say(`Contract ${slot} not opened: ${describeError(e)}`);
+                        return null;
+                    }
+                    await sleep(120 + slot * 40);
+                }
+            }
+            return null;
+        };
+
+        const t0 = performance.now();
+        const ids = (await Promise.all(Array.from({ length: n }, (_, i) => openOne(i + 1)))).filter(Boolean);
+        const ms = Math.round(performance.now() - t0);
+        if (!mounted_ref.current) return;
+
+        if (!ids.length) {
+            try {
+                run_panel?.setIsRunning?.(false);
+            } catch {
+                /* noop */
+            }
+            setPhase('done');
+            setNotice('No contracts were accepted. Check your balance and try again.');
+            return;
+        }
+
+        say(`${ids.length}/${n} contracts opened together in ${ms}ms.`);
+        setBatch(b => ({ ...b, opened: ids.length }));
+        setPhase('settling');
+
+        let exitDigit = null;
+        track_ref.current = trackContracts(ids, {
+            timeoutMs: 60000,
+            onUpdate: ({ settled }) => mounted_ref.current && setBatch(b => (b ? { ...b, settled } : b)),
+            onContract: c => {
+                try {
+                    transactions?.onBotContractEvent?.(c);
+                    summary_card?.onBotContractEvent?.(c);
+                    run_panel?.onBotContractEvent?.(c);
+                } catch {
+                    /* mirror only */
+                }
+                const shown = c?.exit_tick_display_value ?? c?.exit_spot_display_value;
+                if (c?.is_sold && shown !== undefined && shown !== null) {
+                    const ch = String(shown).slice(-1);
+                    if (/\d/.test(ch)) exitDigit = Number(ch);
+                }
+            },
+            onDone: ({ total, wins, count }) => {
                 try {
                     run_panel?.setIsRunning?.(false);
                 } catch {
                     /* noop */
                 }
+                track_ref.current = null;
+                if (!mounted_ref.current) return;
+                const hit = total > 0;
+                if (hit) playWin();
+                else playLoss();
+                setSession(prev => ({
+                    batches: prev.batches + 1,
+                    hits: prev.hits + (hit ? 1 : 0),
+                    pnl: Number((prev.pnl + total).toFixed(2)),
+                }));
+                setResult({ code, digit, edge, total, wins, count, exitDigit, currency: cur });
+                say(hit ? `HIT on ${code}: digit ${digit}. +${money(total)} ${cur}` : `Missed on ${code}. ${money(total)} ${cur}`);
+                setPhase('done');
+            },
+        });
+    };
+
+    // ------------------------------------------------------------ scanning
+    const runSweep = () => {
+        if (!active_ref.current) return;
+        sweep_ref.current += 1;
+        setSweep(sweep_ref.current);
+
+        const next = {};
+        let best = null;
+        MARKETS.forEach(m => {
+            const r = bestMatch(digits_ref.current[m.code]);
+            if (!r) return;
+            next[m.code] = r;
+            if (!best || r.edge > best.edge) best = { code: m.code, ...r };
+        });
+        setRows(next);
+        setLeader(best);
+
+        if (!best) {
+            timer_ref.current = window.setTimeout(runSweep, SWEEP_MS);
+            return;
+        }
+
+        const a = armed_ref.current;
+        if (a) {
+            const fresh = (ticks_ref.current[a.code] || 0) - a.at;
+            const again = next[a.code];
+            if (fresh < CONFIRM_TICKS) {
+                timer_ref.current = window.setTimeout(runSweep, 800);
+                return;
+            }
+            if (again && again.digit === a.digit && again.edge >= EDGE_BAR) {
+                stopAll();
+                armed_ref.current = null;
+                setArmed({ ...a, confirmed: true });
+                say(`Locked: ${a.code} digit ${a.digit} held the bar (${signedPct(again.edge)}).`);
+                fire(a.code, a.digit, again.edge);
+                return;
+            }
+            say(`${a.code} digit ${a.digit} faded. Back to scanning.`);
+            armed_ref.current = null;
+            setArmed(null);
+            setPhase('scanning');
+        }
+
+        if (best.edge >= EDGE_BAR) {
+            armed_ref.current = { code: best.code, digit: best.digit, at: ticks_ref.current[best.code] || 0 };
+            setArmed({ ...armed_ref.current, confirmed: false });
+            setPhase('confirming');
+            say(`${best.code} digit ${best.digit} cleared the bar (${signedPct(best.edge)}). Confirming…`);
+        }
+        timer_ref.current = window.setTimeout(runSweep, SWEEP_MS);
+    };
+
+    const openSocket = () => {
+        const ws = new WebSocket(isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING);
+        ws_ref.current = ws;
+        ws.onopen = () => {
+            ws.send(JSON.stringify({ active_symbols: 'brief' }));
+            MARKETS.forEach(m =>
+                ws.send(JSON.stringify({ ticks_history: m.code, count: HISTORY, end: 'latest', style: 'ticks', subscribe: 1 }))
+            );
+        };
+        ws.onmessage = ev => {
+            if (!active_ref.current) return;
+            let d;
+            try {
+                d = JSON.parse(ev.data);
+            } catch {
+                return;
+            }
+            if (d.msg_type === 'active_symbols' && Array.isArray(d.active_symbols)) {
+                d.active_symbols.forEach(s => {
+                    const c = s.symbol || s.underlying_symbol;
+                    if (c && typeof s.pip_size === 'number') decimals_ref.current[c] = s.pip_size;
+                    else if (c && typeof s.pip === 'number') decimals_ref.current[c] = `${s.pip}`.split('.')[1]?.length ?? 0;
+                });
+                return;
+            }
+            if (d.msg_type === 'history' && d.echo_req?.ticks_history) {
+                const c = d.echo_req.ticks_history;
+                if (typeof d.pip_size === 'number') decimals_ref.current[c] = d.pip_size;
+                const dec = decimals_ref.current[c] ?? 2;
+                digits_ref.current[c] = (d.history?.prices || []).map(p => lastDigit(p, dec)).slice(-HISTORY);
+                return;
+            }
+            if (d.msg_type === 'tick' && d.tick?.symbol) {
+                const c = d.tick.symbol;
+                if (typeof d.tick.pip_size === 'number') decimals_ref.current[c] = d.tick.pip_size;
+                const dec = decimals_ref.current[c] ?? 2;
+                digits_ref.current[c] = [...(digits_ref.current[c] || []), lastDigit(d.tick.quote, dec)].slice(-HISTORY);
+                ticks_ref.current[c] = (ticks_ref.current[c] || 0) + 1;
             }
         };
-    }, [auto, run_panel]);
-
-    const sample = React.useMemo(() => digits.slice(-window_size), [digits, window_size]);
-
-    const distribution = React.useMemo(() => {
-        const counts = new Array(10).fill(0);
-        sample.forEach(d => {
-            counts[d] += 1;
-        });
-        const total = sample.length || 1;
-        return counts.map((c, d) => ({ digit: d, count: c, p: (c / total) * 100 }));
-    }, [sample]);
-
-    const max_pct = Math.max(10, ...distribution.map(d => d.p));
-    const current_digit = digits.length ? digits[digits.length - 1] : null;
-    const status_text = STATUS_TEXT[status] || STATUS_TEXT[TICK_STATUS.DISCONNECTED];
-    const liveAutoPick = pickForMode(contract_mode, prediction, digits);
-    const is_diff = contract_mode === 'DIFF';
-    const stake_num = Number(limits.stake) || 0;
-    const diff_stake_low = is_diff && stake_num < DIFF_MIN_STAKE;
-    const match_profit_pct = payout > 1 ? (payout - 1) * 100 : null;
-    const diff_profit_pct = diff_payout > 1 ? (diff_payout - 1) * 100 : null;
-    const changeMode = mode => {
-        if (auto || mode === contract_mode) return;
-        setContractMode(mode);
-        saveMode(mode);
-        setGate({ allowed: false, reason: `${contractLabel(mode)} mode selected. Auto trade is off.` });
-    };
-    const predicted =
-        prediction?.predictedDigit ??
-        (Number(prediction?.agreementTier || 0) >= 2 ? prediction?.candidateDigit : null);
-    const quality =
-        prediction?.predictedDigit !== null && prediction?.predictedDigit !== undefined
-            ? prediction?.signalQuality || 'STRONG'
-            : liveAutoPick !== null
-              ? `${prediction?.agreementTier || 2}-MODEL CONSENSUS`
-              : 'NO SIGNAL';
-    const evidence = stats?.summary?.n || 0;
-    const unlocked = digits.length >= 250;
-    const can_arm = isAuthorized && is_demo && unlocked;
-
-    const setLimit = (key, value) => {
-        const next = { ...limits_ref.current, [key]: key === 'min_quality' ? value : Number(value) };
-        setLimits(next);
-        saveLimits(next);
+        ws.onclose = () => {
+            if (!active_ref.current || ws_ref.current !== ws) return;
+            say('Market stream dropped. Reconnecting…');
+            reconnect_ref.current = window.setTimeout(() => {
+                if (active_ref.current) openSocket();
+            }, 1000);
+        };
+        ws.onerror = () => {
+            /* onclose handles recovery */
+        };
     };
 
-    const toggleAutoSession = () => {
-        if (auto) {
-            auto_ref.current = false;
-            setAuto(false);
-            setGate({ allowed: false, reason: 'Auto trade stopped by user' });
-            return;
-        }
-
-        if (mode_ref.current === 'DIFF' && (Number(limits_ref.current.stake) || 0) < DIFF_MIN_STAKE) {
-            setGate({
-                allowed: false,
-                reason: `Set stake to at least ${DIFF_MIN_STAKE} ${currency} for Differs — below that Deriv cuts the payout to ~6%.`,
-            });
-            return;
-        }
-
-        const fresh = { trades: 0, wins: 0, losses: 0, pnl: 0 };
-        session_stats_ref.current = fresh;
-        setSessionStats(fresh);
-        setSessionResult(null);
-        setExecutionTestResult('');
-        cooldown_ref.current = 0;
-        auto_ref.current = true;
-        setAuto(true);
-
-        const livePrediction = predict(digits_ref.current, {
-            payout: payout_ref.current,
-            payoutByDigit: payout_by_digit_ref.current,
-        });
-        const firstDigit = pickForMode(mode_ref.current, livePrediction, digits_ref.current);
-
-        if (firstDigit !== null) {
-            setGate({
-                allowed: true,
-                reason: `Starting auto trader · buying ${contractLabel(mode_ref.current)} ${firstDigit}…`,
-            });
-            fireTrade(symbol_ref.current, firstDigit);
-        } else {
-            setGate({
-                allowed: false,
-                reason: 'Auto trader started. Waiting for at least two independent Matches models to agree…',
-            });
-        }
+    const startScan = () => {
+        stopAll();
+        track_ref.current?.cancel?.();
+        track_ref.current = null;
+        digits_ref.current = {};
+        ticks_ref.current = {};
+        armed_ref.current = null;
+        sweep_ref.current = 0;
+        setRows({});
+        setLeader(null);
+        setArmed(null);
+        setSweep(0);
+        setBatch(null);
+        setResult(null);
+        setNotice('');
+        setPhase('scanning');
+        active_ref.current = true;
+        say(`Scanning ${MARKETS.length} markets for the strongest Matches digit…`);
+        openSocket();
+        timer_ref.current = window.setTimeout(runSweep, 1200);
     };
 
-    const marketLabel = React.useMemo(
-        () => symbols.find(s => s.code === symbol)?.label || symbol,
-        [symbols, symbol]
-    );
-
-    const runAnalysis = () => {
-        const rawNext = predict(digits_ref.current, { payout: payout_ref.current, payoutByDigit: payout_by_digit_ref.current });
-        const next = calibratePrediction(rawNext, read(symbol));
-        setPrediction(next);
-        if (next?.predictedDigit === null || next?.predictedDigit === undefined) {
-            setAnalysis(null);
-            setError(next?.reason || 'NO PREDICTION — no validated edge detected.');
-            return;
-        }
-        setError('');
-        setAnalysis({
-            symbol,
-            digit: next.predictedDigit,
-            sampleSize: next.sampleSize,
-            createdAt: Date.now(),
-        });
+    const stopScan = () => {
+        stopAll();
+        armed_ref.current = null;
+        setArmed(null);
+        setPhase('idle');
+        say('Scan stopped.');
     };
 
-    const predictionHistory = stats?.state?.recent?.slice(-10).reverse() || [];
-    const predictionDistribution = React.useMemo(
-        () => (stats?.state?.by_digit || []).map((row, digit) => ({ digit, n: row?.n || 0, correct: row?.correct || 0 })),
-        [stats]
-    );
-    const modelUsage = React.useMemo(
-        () => Object.entries(stats?.state?.by_model || {}).map(([model, row]) => ({
-            model,
-            n: row?.n || 0,
-            correct: row?.correct || 0,
-        })),
-        [stats]
-    );
-    const setupLeaderboard = React.useMemo(() => topSetups(stats?.state, 8), [stats]);
-    const tierStats = React.useMemo(
-        () => Object.entries(stats?.state?.by_tier || {}).map(([tier, row]) => ({
-            tier: Number(tier),
-            n: row?.n || 0,
-            correct: row?.correct || 0,
-            accuracy: row?.n ? row.correct / row.n : 0,
-        })).sort((a, b) => b.tier - a.tier),
-        [stats]
-    );
+    // ------------------------------------------------------------ view
+    const stake = Number(settings.stake) || 0;
+    const count = settings.count;
+    const win_amount = stake * count * (payout - 1);
+    const breakeven = 1 / payout;
+    const busy = phase === 'firing' || phase === 'settling';
+    const scanning = phase === 'scanning' || phase === 'confirming';
+    const stepIndex = { idle: -1, scanning: 0, confirming: 1, firing: 2, settling: 2, done: 3 }[phase];
+    const focus = armed || (leader ? { code: leader.code, digit: leader.digit } : null);
+    const focusScores = focus ? rows[focus.code]?.scores : null;
+    const ranked = MARKETS.map(m => ({ ...m, r: rows[m.code] }))
+        .filter(m => m.r)
+        .sort((a, b) => b.r.edge - a.r.edge);
+
+    const coreLabel = (() => {
+        if (phase === 'idle') return { big: 'SCAN', small: 'tap to find an entry' };
+        if (phase === 'scanning')
+            return {
+                big: leader ? leader.digit : '…',
+                small: sweep ? `sweep ${sweep} · ${leader?.code || 'loading'}` : 'loading ticks',
+            };
+        if (phase === 'confirming') return { big: armed?.digit ?? '…', small: `confirming ${armed?.code || ''}` };
+        if (phase === 'firing') return { big: batch?.digit ?? '…', small: 'opening contracts' };
+        if (phase === 'settling') return { big: batch?.digit ?? '…', small: `settling ${batch?.settled || 0}/${batch?.opened || 0}` };
+        return { big: result ? result.digit : (batch?.digit ?? '—'), small: 'tap to scan again' };
+    })();
+
+    const onCore = () => {
+        if (busy) return;
+        if (scanning) stopScan();
+        else startScan();
+    };
 
     return (
-        <div className='matches-pro matches-pro--v2'>
-            <div className='matches-pro__panel matches-pro__panel--v2'>
-                <div className='matches-pro__v2-head'>
-                    <div>
-                        <div className='matches-pro__eyebrow'>NOLIMITZ AI</div>
-                        <div className='matches-pro__title'>MATCHES PRO V2</div>
-                        <div className='matches-pro__subtitle'>
-                            Live last-digit prediction analysis for Deriv Matches contracts.
-                        </div>
-                    </div>
-                    <div className={`matches-pro__status matches-pro__status--${status}`}>
-                        <i className='matches-pro__dot' />
-                        {status_text}
+        <div className='mpro'>
+            <header className='mpro__head'>
+                <div>
+                    <div className='mpro__eyebrow'>MATCHES PRO</div>
+                    <h1 className='mpro__title'>Digit Hunter</h1>
+                    <p className='mpro__lede'>
+                        One tap scans every volatility market for the strongest digit, confirms it, then opens your
+                        contracts on it together.
+                    </p>
+                </div>
+                <span className={`mpro__acct ${can_trade ? 'ok' : 'bad'}`}>
+                    {!activeLoginid ? 'NOT SIGNED IN' : is_demo ? 'DEMO' : 'REAL · SCAN ONLY'}
+                </span>
+            </header>
+
+            <section className='mpro__setup' aria-label='Trade settings'>
+                <div className='mpro__stepper'>
+                    <span className='mpro__label'>Stake per contract</span>
+                    <div className='mpro__stepper-row'>
+                        <button
+                            type='button'
+                            disabled={scanning || busy}
+                            onClick={() => updateSettings({ stake: Math.max(0.35, Number((stake - 0.5).toFixed(2))) })}
+                            aria-label='Lower stake'
+                        >
+                            −
+                        </button>
+                        <input
+                            type='number'
+                            inputMode='decimal'
+                            min='0.35'
+                            step='0.5'
+                            value={settings.stake}
+                            disabled={scanning || busy}
+                            onChange={e => updateSettings({ stake: e.target.value })}
+                            onBlur={e => updateSettings({ stake: Math.max(0.35, Number(e.target.value) || 0.35) })}
+                        />
+                        <button
+                            type='button'
+                            disabled={scanning || busy}
+                            onClick={() => updateSettings({ stake: Number((stake + 0.5).toFixed(2)) })}
+                            aria-label='Raise stake'
+                        >
+                            +
+                        </button>
                     </div>
                 </div>
-
-                {error && <div className='matches-pro__warn'>{error}</div>}
-
-                <section className='matches-pro__v2-card matches-pro__v2-card--analyser'>
-                    <div className='matches-pro__v2-section-head'>
-                        <div>
-                            <span className='matches-pro__v2-step'>01</span>
-                            <h2>Prediction Analyzer</h2>
-                            <p>Uses real Deriv tick history. Tap Analyze to generate one last-digit prediction.</p>
-                        </div>
-                    </div>
-
-                    <div className='matches-pro__v2-controls'>
-                        <label className='matches-pro__field'>
-                            <span>Market</span>
-                            <select value={symbol} onChange={e => setSymbol(e.target.value)}>
-                                {symbols.map(s => (
-                                    <option key={s.code} value={s.code}>{s.label}</option>
-                                ))}
-                            </select>
-                        </label>
-                        <div className='matches-pro__v2-live'>
-                            <span>Live tick</span>
-                            <strong>{quote ?? '-'}</strong>
-                            <small>Last digit {current_digit ?? '-'}</small>
-                        </div>
-                        <div className='matches-pro__v2-live'>
-                            <span>Real tick history</span>
-                            <strong>{digits.length}</strong>
-                            <small>{marketLabel}</small>
-                        </div>
-                    </div>
-
-                    <button
-                        type='button'
-                        className='matches-pro__analyse-btn matches-pro__analyse-btn--primary'
-                        disabled={status !== TICK_STATUS.LIVE || digits.length < 100}
-                        onClick={runAnalysis}
-                    >
-                        ANALYZE LAST DIGIT
-                    </button>
-
-                    <div className='matches-pro__prediction-result'>
-                        <span className='matches-pro__prediction-label'>PREDICTED LAST DIGIT</span>
-                        <strong>{analysis?.digit ?? '-'}</strong>
-                        <p>
-                            {analysis
-                                ? `Prediction generated from ${analysis.sampleSize} real Deriv ticks. This is a model prediction, not a guaranteed outcome.`
-                                : status === TICK_STATUS.LIVE
-                                  ? 'Ready. Tap Analyze when you want a new prediction.'
-                                  : 'Connecting to the Deriv tick stream...'}
-                        </p>
-                    </div>
-
-                    <div className='matches-pro__truth-grid'>
-                        <div><span>Verified predictions</span><strong>{stats?.summary?.n ?? 0}</strong></div>
-                        <div><span>Correct</span><strong>{stats?.summary?.k ?? 0}</strong></div>
-                        <div>
-                            <span>Measured accuracy</span>
-                            <strong>{stats?.summary?.n ? pct(stats.summary.accuracy) : '-'}</strong>
-                        </div>
-                        <div><span>Random baseline</span><strong>10.00%</strong></div>
-                        <div><span>Engine</span><strong>{prediction?.engineVersion || '-'}</strong></div>
-                        <div><span>Consensus rate</span><strong>{prediction?.consensus?.trials ? pct(prediction.consensus.accuracy) : '-'}</strong></div>
-                        <div><span>Lower bound</span><strong>{prediction?.consensus?.trials ? pct(prediction.consensus.lowerBound) : '-'}</strong></div>
-                        <div><span>Exact digit break-even</span><strong>{prediction?.breakeven ? pct(prediction.breakeven) : '-'}</strong></div>
-                        <div><span>Consensus trials</span><strong>{prediction?.consensus?.trials ?? 0}</strong></div>
-                        <div><span>Consensus coverage</span><strong>{prediction?.consensus ? pct(prediction.consensus.coverage) : '-'}</strong></div>
-                        <div><span>Candidate digit</span><strong>{prediction?.candidateDigit ?? '-'}</strong></div>
-                        <div><span>Agreement tier</span><strong>{prediction?.agreementTier ? `${prediction.agreementTier}-model` : '-'}</strong></div>
-                        <div><span>Exact setup sample</span><strong>{prediction?.liveCalibration?.n ?? 0}/{MIN_SETUP_EVIDENCE}</strong></div>
-                        <div><span>Setup lower bound</span><strong>{prediction?.liveCalibration?.n ? pct(prediction.liveCalibration.lowerBound) : '-'}</strong></div>
-                        <div><span>Decision</span><strong>{prediction?.liveCalibration?.tradeReady ? 'TRADE CANDIDATE' : 'SHADOW ONLY'}</strong></div>
-                    </div>
-
-                    <div className='matches-pro__verification'>
-                        <div className='matches-pro__v2-subtitle'>Walk-forward model comparison</div>
-                        {prediction?.modelResults?.map(model => (
-                            <div key={model.id} className='matches-pro__verify-row'>
-                                <span><b>{model.id}</b></span>
-                                <span>{model.hits}/{model.trials} correct</span>
-                                <strong>{model.trials ? pct(model.accuracy) : '-'}</strong>
-                            </div>
-                        ))}
-                    </div>
-
-                    <div className='matches-pro__verification'>
-                        <div className='matches-pro__v2-subtitle'>Evidence controls</div>
-                        <div className='matches-pro__verify-row'>
-                            <span>Clear current engine evidence for this market and begin a fresh forward test.</span>
-                            <span>Trading limits are kept.</span>
-                            <button type='button' className='matches-pro__secondary' onClick={resetV2Evidence}>
-                                RESET FRESH EVIDENCE
-                            </button>
-                        </div>
-                    </div>
-
-                    <div className='matches-pro__verification'>
-                        <div className='matches-pro__v2-subtitle'>Live Matches model votes</div>
-                        {prediction?.liveVotes?.length ? prediction.liveVotes.map(vote => (
-                            <div key={vote.model} className={`matches-pro__verify-row ${vote.agrees ? 'hit' : ''}`}>
-                                <span><b>{vote.model}</b></span>
-                                <span>Next digit <b>{vote.digit ?? '-'}</b></span>
-                                <strong>{vote.agrees ? 'AGREES' : '—'}</strong>
-                            </div>
-                        )) : <div className='matches-pro__muted'>Waiting for model votes...</div>}
-                    </div>
-
-                    <div className='matches-pro__verification'>
-                        <div className='matches-pro__v2-subtitle'>Agreement-tier forward results</div>
-                        {tierStats.length ? tierStats.map(row => (
-                            <div key={row.tier} className='matches-pro__verify-row'>
-                                <span><b>{row.tier}-model agreement</b></span>
-                                <span>{row.correct}/{row.n} correct</span>
-                                <strong>{row.n ? pct(row.accuracy) : '-'}</strong>
-                            </div>
-                        )) : <div className='matches-pro__muted'>Collecting independent agreement-tier evidence...</div>}
-                    </div>
-
-                    <div className='matches-pro__verification'>
-                        <div className='matches-pro__v2-subtitle'>Exact setup calibration</div>
-                        {setupLeaderboard.length ? setupLeaderboard.map(row => (
-                            <div key={row.fingerprint} className='matches-pro__setup-row'>
-                                <div>
-                                    <strong>Digit {row.digit} · {row.tier}-model</strong>
-                                    <small>{(row.models || []).join(' + ') || 'unknown models'}</small>
-                                </div>
-                                <span>{row.correct}/{row.n}</span>
-                                <span>{pct(row.accuracy)}</span>
-                                <span>LB {pct(row.lowerBound)}</span>
-                            </div>
-                        )) : <div className='matches-pro__muted'>No independent setup fingerprints graded yet.</div>}
-                    </div>
-
-                    <div className='matches-pro__verification'>
-                        <div className='matches-pro__v2-subtitle'>Fresh prediction distribution</div>
-                        <div className='matches-pro__digit-diagnostics'>
-                            {predictionDistribution.map(row => (
-                                <div key={row.digit} className='matches-pro__digit-diagnostic'>
-                                    <strong>{row.digit}</strong>
-                                    <span>{row.n} picks</span>
-                                    <small>{row.n ? `${((row.correct / row.n) * 100).toFixed(1)}% hit` : '—'}</small>
-                                </div>
-                            ))}
-                        </div>
-                        {modelUsage.length > 0 && (
-                            <div className='matches-pro__model-usage'>
-                                {modelUsage.map(row => (
-                                    <span key={row.model}>{row.model}: {row.n} emitted / {row.correct} correct</span>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-
-                    <div className='matches-pro__verification'>
-                        <div className='matches-pro__v2-subtitle'>Recent verified predictions</div>
-                        {predictionHistory.length ? predictionHistory.map((item, i) => (
-                            <div key={`${item.t}-${i}`} className={`matches-pro__verify-row ${item.hit ? 'hit' : 'miss'}`}>
-                                <span>Predicted <b>{item.predicted}</b></span>
-                                <span>Actual <b>{item.actual}</b></span>
-                                <strong>{item.hit ? 'CORRECT' : 'MISS'}</strong>
-                            </div>
-                        )) : <div className='matches-pro__muted'>Waiting for verified live predictions...</div>}
-                    </div>
-                </section>
-
-                <section className='matches-pro__v2-card'>
-                    <div className='matches-pro__v2-section-head'>
-                        <div>
-                            <span className='matches-pro__v2-step'>02</span>
-                            <h2>{is_diff ? 'Differs Auto Trader' : 'Matches Auto Trader'}</h2>
-                            <p>
-                                {is_diff
-                                    ? 'Buys one 1-tick DIGITDIFF contract at a time: wins when the next digit is anything except the pick.'
-                                    : 'Buys one 1-tick DIGITMATCH contract at a time: wins only when the next digit equals the pick.'}
-                            </p>
-                        </div>
-                        <div className={`matches-pro__account-pill ${is_demo ? 'demo' : 'blocked'}`}>
-                            {activeLoginid ? (is_demo ? 'DEMO ACCOUNT' : 'REAL BLOCKED') : 'NOT SIGNED IN'}
-                        </div>
-                    </div>
-
-                    <div className='matches-pro__mode' role='radiogroup' aria-label='Contract type'>
+                <div className='mpro__stepper'>
+                    <span className='mpro__label'>Contracts per entry</span>
+                    <div className='mpro__stepper-row'>
                         <button
                             type='button'
-                            role='radio'
-                            aria-checked={!is_diff}
-                            disabled={auto}
-                            className={`matches-pro__mode-btn ${!is_diff ? 'on' : ''}`}
-                            onClick={() => changeMode('MATCH')}
+                            disabled={scanning || busy || count <= 1}
+                            onClick={() => updateSettings({ count: count - 1 })}
+                            aria-label='Fewer contracts'
                         >
-                            <b>Matches</b>
-                            <span>
-                                Pays {match_profit_pct ? `+${match_profit_pct.toFixed(0)}%` : '~+790%'} · wins ~1 in 10
-                            </span>
+                            −
                         </button>
+                        <output>{count}</output>
                         <button
                             type='button'
-                            role='radio'
-                            aria-checked={is_diff}
-                            disabled={auto}
-                            className={`matches-pro__mode-btn ${is_diff ? 'on' : ''}`}
-                            onClick={() => changeMode('DIFF')}
+                            disabled={scanning || busy || count >= MAX_CONTRACTS}
+                            onClick={() => updateSettings({ count: count + 1 })}
+                            aria-label='More contracts'
                         >
-                            <b>Differs</b>
-                            <span>
-                                Pays {diff_profit_pct ? `+${diff_profit_pct.toFixed(1)}%` : '~+9.6%'} · wins ~9 in 10
-                            </span>
+                            +
                         </button>
                     </div>
-                    <div className='matches-pro__mode-note'>
-                        {is_diff
-                            ? `Differs: break-even is ${diff_payout ? ((1 / diff_payout) * 100).toFixed(1) : '91.2'}% wins. Use a stake of ${DIFF_MIN_STAKE} ${currency} or more — at 0.35 Deriv pays only ~5.7%.`
-                            : `Matches: break-even is ${payout ? ((1 / payout) * 100).toFixed(1) : '11.2'}% wins. Expect long losing runs between wins — size your stop-loss for 20+ misses in a row.`}
-                    </div>
+                </div>
+                <div className='mpro__payline'>
+                    <span>
+                        Risk <b>{money(stake * count)} {currency}</b>
+                    </span>
+                    <span>
+                        If it hits <b className='gold'>+{money(win_amount)} {currency}</b>
+                    </span>
+                    <span>
+                        Break-even <b>{pct(breakeven)}</b> hits
+                    </span>
+                </div>
+            </section>
 
-                    <div className='matches-pro__v2-controls matches-pro__v2-controls--trade'>
-                        <label className={`matches-pro__field ${diff_stake_low ? 'warn' : ''}`}>
-                            <span>Stake ({currency}){is_diff ? ` · min ${DIFF_MIN_STAKE}` : ''}</span>
-                            <input
-                                type='number'
-                                step='0.05'
-                                min={is_diff ? DIFF_MIN_STAKE : 0.35}
-                                value={limits.stake}
-                                onChange={e => setLimit('stake', e.target.value)}
-                            />
-                        </label>
-                        <label className='matches-pro__field'>
-                            <span>Stop after profit</span>
-                            <input
-                                type='number'
-                                step='0.5'
-                                min='0.5'
-                                value={limits.daily_profit_target}
-                                onChange={e => setLimit('daily_profit_target', e.target.value)}
-                            />
-                        </label>
-                        <label className='matches-pro__field'>
-                            <span>Stop after loss</span>
-                            <input
-                                type='number'
-                                step='0.5'
-                                min='0.5'
-                                value={limits.daily_loss_limit}
-                                onChange={e => setLimit('daily_loss_limit', e.target.value)}
-                            />
-                        </label>
-                    </div>
+            <ol className='mpro__steps'>
+                {STEPS.map((s, i) => (
+                    <li key={s} className={i < stepIndex ? 'done' : i === stepIndex ? 'now' : ''}>
+                        <i>{i + 1}</i>
+                        {s}
+                    </li>
+                ))}
+            </ol>
 
-                    <div className='matches-pro__auto-pick'>
-                        <span>{is_diff ? 'Digit to avoid' : 'Current model pick'}</span>
-                        <strong>{(is_diff ? liveAutoPick : predicted) ?? '-'}</strong>
-                        <small>
-                            {liveAutoPick === null
-                                ? is_diff
-                                    ? 'Loading 250 ticks'
-                                    : 'Waiting for at least two independent models to agree'
-                                : is_diff
-                                  ? `DIFFERS ${liveAutoPick} · least seen in last 250 ticks`
-                                  : `MATCH ${liveAutoPick} · ${quality}`}
-                        </small>
-                    </div>
-
-                    <div className='matches-pro__locks'>
-                        <div className={`matches-pro__lock ${isAuthorized ? 'ok' : 'bad'}`}>
-                            {isAuthorized ? 'Deriv connected' : 'Connect Deriv'}
-                        </div>
-                        <div className={`matches-pro__lock ${is_demo ? 'ok' : 'bad'}`}>
-                            {is_demo ? 'Demo execution enabled' : 'Demo account required'}
-                        </div>
-                        <div className={`matches-pro__lock ${unlocked ? 'ok' : 'bad'}`}>
-                            {unlocked ? `Live model ready · ${digits.length} ticks` : `Loading model · ${digits.length}/250 ticks`}
-                        </div>
-                    </div>
-
+            <section className={`mpro__radar mpro__radar--${phase}`}>
+                <div className='mpro__ring'>
+                    {Array.from({ length: 10 }, (_, d) => {
+                        const angle = (d / 10) * Math.PI * 2 - Math.PI / 2;
+                        const score = focusScores ? focusScores[d] : null;
+                        const heat = score === null ? 0 : Math.max(0, Math.min(1, (score - 0.06) / 0.1));
+                        const isPick = focus && focus.digit === d;
+                        const isExit = result && result.exitDigit === d;
+                        return (
+                            <div
+                                key={d}
+                                className={`mpro__node ${isPick ? 'pick' : ''} ${isExit ? 'exit' : ''}`}
+                                style={{
+                                    left: `${50 + 41 * Math.cos(angle)}%`,
+                                    top: `${50 + 41 * Math.sin(angle)}%`,
+                                    '--heat': heat,
+                                }}
+                            >
+                                <b>{d}</b>
+                                <small>{score === null ? '' : pct(score)}</small>
+                            </div>
+                        );
+                    })}
                     <button
                         type='button'
-                        className='matches-pro__auto matches-pro__auto--v2 matches-pro__auto--test'
-                        disabled={!isAuthorized || !is_demo || executionTesting || auto}
-                        onClick={testDemoExecution}
+                        className='mpro__core'
+                        onClick={onCore}
+                        disabled={busy}
+                        aria-label={scanning ? 'Stop scanning' : 'Start scan'}
                     >
-                        {executionTesting ? 'TESTING DEMO EXECUTION…' : 'TEST 1 DEMO MATCH CONTRACT'}
+                        <span className='mpro__core-big'>{coreLabel.big}</span>
+                        <span className='mpro__core-small'>{coreLabel.small}</span>
+                        {scanning && <span className='mpro__core-stop'>tap to stop</span>}
                     </button>
-                    {executionTestResult && (
-                        <div className='matches-pro__gate'>{executionTestResult}</div>
+                </div>
+                <div className='mpro__focus'>
+                    {focus ? (
+                        <>
+                            <span>{armed ? (armed.confirmed ? 'Locked entry' : 'Confirming') : 'Strongest right now'}</span>
+                            <b>
+                                {focus.code} · digit {focus.digit}
+                            </b>
+                            <small>
+                                edge {signedPct(rows[focus.code]?.edge ?? 0)} · bar {signedPct(EDGE_BAR)} · seen{' '}
+                                {pct(rows[focus.code]?.hitRate ?? NULL_P)} of last 200
+                            </small>
+                        </>
+                    ) : (
+                        <>
+                            <span>Ready</span>
+                            <b>{MARKETS.length} markets · Digit Match · 1 tick</b>
+                            <small>Needs {MIN_TICKS}+ ticks per market before scoring</small>
+                        </>
                     )}
+                </div>
+                {notice && <div className='mpro__notice'>{notice}</div>}
+            </section>
 
-                    <button
-                        type='button'
-                        className={`matches-pro__auto matches-pro__auto--v2 ${auto ? 'on' : ''}`}
-                        disabled={!can_arm || executionTesting || (!auto && diff_stake_low)}
-                        onClick={toggleAutoSession}
-                    >
-                        {auto ? 'STOP AUTO TRADER' : 'START AUTO TRADER'}
-                    </button>
-                    <div className={`matches-pro__gate ${gate.allowed ? 'ok' : ''}`}>{gate.reason}</div>
+            <section className='mpro__board' aria-label='Market board'>
+                <div className='mpro__board-head'>
+                    <span>Market</span>
+                    <span>Digit</span>
+                    <span>Edge</span>
+                    <span>Last 4</span>
+                </div>
+                {(ranked.length ? ranked : MARKETS.map(m => ({ ...m, r: null }))).map((m, i) => {
+                    const r = m.r;
+                    const isArmed = armed?.code === m.code;
+                    const width = r ? Math.max(4, Math.min(100, (r.edge / (EDGE_BAR * 1.5)) * 100)) : 0;
+                    return (
+                        <div key={m.code} className={`mpro__row ${i === 0 && r ? 'lead' : ''} ${isArmed ? 'armed' : ''}`}>
+                            <span className='mpro__mkt'>
+                                <b>{m.code}</b>
+                                <small>{m.name}</small>
+                            </span>
+                            <span className='mpro__digit'>{r ? r.digit : '·'}</span>
+                            <span className='mpro__edge'>
+                                <span className='mpro__track'>
+                                    <i style={{ width: `${width}%` }} className={r && r.edge >= EDGE_BAR ? 'over' : ''} />
+                                </span>
+                                <em>{r ? signedPct(r.edge) : '—'}</em>
+                            </span>
+                            <span className='mpro__last'>{r ? r.recent.join(' ') : '— — — —'}</span>
+                        </div>
+                    );
+                })}
+            </section>
 
-                    <div className='matches-pro__truth-grid matches-pro__truth-grid--trading'>
-                        <div><span>Session trades</span><strong>{sessionStats.trades}</strong></div>
-                        <div><span>Wins / losses</span><strong>{sessionStats.wins}/{sessionStats.losses}</strong></div>
-                        <div>
-                            <span>Trade hit rate</span>
-                            <strong>{sessionStats.trades ? `${((sessionStats.wins / sessionStats.trades) * 100).toFixed(1)}%` : '-'}</strong>
-                        </div>
-                        <div>
-                            <span>Session P/L</span>
-                            <strong className={sessionStats.pnl >= 0 ? 'pos' : 'neg'}>{sessionStats.pnl >= 0 ? '+' : ''}{sessionStats.pnl.toFixed(2)} {currency}</strong>
-                        </div>
+            <section className='mpro__bottom'>
+                <div className='mpro__session'>
+                    <div>
+                        <span>Entries</span>
+                        <b>{session.batches}</b>
                     </div>
-
-                    <div className='matches-pro__v2-safety'>
-                        Demo only. Keeps one 1-tick {is_diff ? 'DIGITDIFF' : 'DIGITMATCH'} contract open at a time and stops at your profit or loss target. Tested on 100,000 real Deriv ticks: Matches wins about 10% and Differs about 90% whichever digit is picked — both sit just under break-even, so the targets are what protect the balance.
+                    <div>
+                        <span>Hits</span>
+                        <b>{session.hits}</b>
                     </div>
-                </section>
-            </div>
+                    <div>
+                        <span>Session P/L</span>
+                        <b className={session.pnl >= 0 ? 'pos' : 'neg'}>
+                            {session.pnl >= 0 ? '+' : ''}
+                            {money(session.pnl)}
+                        </b>
+                    </div>
+                </div>
+                <ul className='mpro__feed'>
+                    {feed.length ? (
+                        feed.map(f => <li key={f.t}>{f.line}</li>)
+                    ) : (
+                        <li className='muted'>Activity shows here once you scan.</li>
+                    )}
+                </ul>
+                <p className='mpro__fine'>
+                    Demo accounts only. A Matches contract wins only if the next digit equals the pick, about 1 in 10.
+                    In tests on 100,000+ real Deriv ticks the scan&apos;s picks hit about 10%, the same as any digit,
+                    and break-even is {pct(breakeven)}. Expect long runs of misses.
+                </p>
+            </section>
 
-            {sessionResult && (
-                <div className='matches-pro__target-overlay' role='dialog' aria-modal='true'>
-                    <div className={`matches-pro__target-popup ${sessionResult.type}`}>
-                        <button type='button' onClick={() => setSessionResult(null)}>×</button>
-                        <div className='matches-pro__target-kicker'>
-                            {sessionResult.type === 'tp' ? 'TAKE PROFIT REACHED' : 'STOP LOSS REACHED'}
+            {result && (
+                <div className='mpro__sheet-wrap' role='dialog' aria-modal='true' onClick={() => setResult(null)}>
+                    <div className={`mpro__sheet ${result.total > 0 ? 'hit' : 'miss'}`} onClick={e => e.stopPropagation()}>
+                        <div className='mpro__sheet-tag'>{result.total > 0 ? 'HIT' : 'MISSED'}</div>
+                        <div className='mpro__sheet-amt'>
+                            {result.total >= 0 ? '+' : ''}
+                            {money(result.total)} <small>{result.currency}</small>
                         </div>
-                        <h3>
-                            {sessionResult.pnl >= 0 ? '+' : ''}{sessionResult.pnl.toFixed(2)} {currency}
-                        </h3>
-                        <p>
-                            {sessionResult.type === 'tp'
-                                ? `Profit target of ${sessionResult.target.toFixed(2)} ${currency} reached. Auto trading stopped.`
-                                : `Stop loss of ${sessionResult.target.toFixed(2)} ${currency} reached. Auto trading stopped.`}
-                        </p>
-                        <div className='matches-pro__target-stats'>
-                            <span>Trades <b>{sessionResult.trades}</b></span>
-                            <span>Wins <b>{sessionResult.wins}</b></span>
-                            <span>Losses <b>{sessionResult.losses}</b></span>
+                        <div className='mpro__sheet-digits'>
+                            <div>
+                                <span>Picked</span>
+                                <b>{result.digit}</b>
+                            </div>
+                            <div>
+                                <span>Landed</span>
+                                <b>{result.exitDigit ?? '?'}</b>
+                            </div>
+                            <div>
+                                <span>Market</span>
+                                <b className='sm'>{result.code}</b>
+                            </div>
+                        </div>
+                        <div className='mpro__sheet-sub'>
+                            {result.wins}/{result.count} contracts won
+                        </div>
+                        <div className='mpro__sheet-actions'>
+                            <button type='button' className='ghost' onClick={() => setResult(null)}>
+                                Close
+                            </button>
+                            <button
+                                type='button'
+                                onClick={() => {
+                                    setResult(null);
+                                    startScan();
+                                }}
+                            >
+                                Scan again
+                            </button>
                         </div>
                     </div>
                 </div>
