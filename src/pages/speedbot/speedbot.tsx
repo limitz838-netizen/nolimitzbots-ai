@@ -1,32 +1,39 @@
-// @ts-nocheck — Nolimitz AI replaces the legacy Speedbot UI while preserving
-// the proven Deriv execution / settlement plumbing underneath.
+// @ts-nocheck — Nolimitz AI · High-Win Engine.
+//
+// Trades contracts that win about 9 ticks in 10 (Differs / Over 0 / Under 9),
+// one contract at a time, back to back, until the session profit target or
+// stop-loss is reached. Measured on 195,000 real Deriv ticks: 90.0% win rate.
+// Break-even on Deriv's payout is ~91.2%, so the page shows the session odds
+// and the real maths up front. Demo and real accounts (real needs a one-time
+// confirmation per login).
 import React from 'react';
 import { observer } from 'mobx-react-lite';
-import { api_base, MessageTypes } from '@/external/bot-skeleton';
+import { api_base } from '@/external/bot-skeleton';
 import { useStore } from '@/hooks/useStore';
 import { isProduction, WS_SERVERS } from '@/components/shared/utils/config/config';
 import { playLoss, playWin, unlockAudio } from '@/components/shared/nlb/trade-sounds';
 import { trackContracts, describeError } from '@/components/shared/nlb/settlement';
-import { contract_stages } from '@/constants/contract-stage';
 import {
-    analyzeDigitMarket,
-    candidateToContract,
-    NOLIMITZ_AI_ENGINE_VERSION,
-} from '@/components/shared/nlb/nolimitz-ai-engine';
-import {
-    readAiEvidence,
-    recordAiEvidence,
-    setupEvidence,
-    topAiSetups,
-} from '@/components/shared/nlb/nolimitz-ai-evidence';
+    HW_CONTRACTS,
+    MIN_FULL_PAYOUT_STAKE,
+    differsPick,
+    digitShares,
+    lastDigit,
+    losingDigit,
+    sessionOdds,
+    ticksSince,
+} from '@/components/shared/nlb/high-win-engine';
 import Guide, { GuideButton } from '@/components/shared/nlb/guide';
 import './speedbot.scss';
 
 const MARKETS = [
     { code: '1HZ100V', label: 'Vol 100 (1s)' },
+    { code: '1HZ90V', label: 'Vol 90 (1s)' },
     { code: '1HZ75V', label: 'Vol 75 (1s)' },
     { code: '1HZ50V', label: 'Vol 50 (1s)' },
+    { code: '1HZ30V', label: 'Vol 30 (1s)' },
     { code: '1HZ25V', label: 'Vol 25 (1s)' },
+    { code: '1HZ15V', label: 'Vol 15 (1s)' },
     { code: '1HZ10V', label: 'Vol 10 (1s)' },
     { code: 'R_100', label: 'Vol 100' },
     { code: 'R_75', label: 'Vol 75' },
@@ -34,1001 +41,384 @@ const MARKETS = [
     { code: 'R_25', label: 'Vol 25' },
     { code: 'R_10', label: 'Vol 10' },
 ];
-
 const FALLBACK_DECIMALS = {
     R_10: 3, R_25: 3, R_50: 4, R_75: 4, R_100: 2,
-    '1HZ10V': 2, '1HZ25V': 2, '1HZ50V': 2, '1HZ75V': 2, '1HZ100V': 2,
+    '1HZ10V': 2, '1HZ15V': 3, '1HZ25V': 2, '1HZ30V': 3, '1HZ50V': 2, '1HZ75V': 2, '1HZ90V': 3, '1HZ100V': 2,
 };
+const HISTORY = 500;
+const DEFAULT_PAYOUT = 1.096;
+const MEASURED = { DIFF: 0.9005, OVER0: 0.9006, UNDER9: 0.8999 };
 
-const STRATEGIES = [
-    { id: 'alpha', label: 'Alpha', note: 'Demo execution test — one controlled contract' },
-    { id: 'quantum', label: 'Quantum', note: '2-model consensus + fresh forward evidence' },
-    { id: 'apex', label: 'Apex', note: '3-model consensus + stricter evidence gate' },
-];
+const money = v => (Math.round(v * 100) / 100).toFixed(2);
+const pct = (v, d = 1) => `${(v * 100).toFixed(d)}%`;
+const sleep = ms => new Promise(r => window.setTimeout(r, ms));
+const withTimeout = (p, ms, label) =>
+    Promise.race([
+        Promise.resolve(p),
+        new Promise((_, rej) => window.setTimeout(() => rej(new Error(`${label} timed out`)), ms)),
+    ]);
 
-const AI_RULES = {
-    quantum: { minTier: 2, minEvidence: 20, margin: 0.005 },
-    apex: { minTier: 3, minEvidence: 35, margin: 0.01 },
+const Sparkline = ({ points }) => {
+    if (points.length < 2) return <div className='nolimitz-ai__spark nolimitz-ai__spark--empty'>Session curve appears after 2 trades</div>;
+    const w = 300;
+    const h = 64;
+    const min = Math.min(0, ...points);
+    const max = Math.max(0, ...points);
+    const span = max - min || 1;
+    const x = i => (i / (points.length - 1)) * w;
+    const y = v => h - ((v - min) / span) * (h - 8) - 4;
+    const d = points.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+    const last = points[points.length - 1];
+    return (
+        <svg className='nolimitz-ai__spark' viewBox={`0 0 ${w} ${h}`} preserveAspectRatio='none' role='img' aria-label='Session profit curve'>
+            <line x1='0' x2={w} y1={y(0)} y2={y(0)} className='zero' />
+            <path d={d} className={last >= 0 ? 'up' : 'down'} />
+        </svg>
+    );
 };
-
-const familyForContract = contract =>
-    contract === 'even_odd' ? 'even_odd' : contract === 'over_under' ? 'over_under' : null;
-
-const CONTRACTS = [
-    { id: 'rise_fall', label: 'Rise/Fall', symbol: '↕', available: true },
-    { id: 'even_odd', label: 'Even/Odd', symbol: '#', available: true },
-    { id: 'match', label: 'Match', symbol: '=', available: false, note: 'Matches Pro' },
-    { id: 'over_under', label: 'Over/Under', symbol: '⌃', available: true, recommended: true },
-    { id: 'differ', label: 'Differ', symbol: '/', available: false, note: 'Coming next' },
-    { id: 'mix', label: 'Mix', symbol: '⌁', available: false, note: 'Coming next' },
-];
-
-const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
-const maxMartingaleSteps = risk => (risk === 'high' ? 4 : risk === 'medium' ? 2 : 0);
 
 const NolimitzAI = observer(() => {
-    const { client, run_panel, transactions, summary_card, journal } = useStore();
+    const { client, run_panel, transactions, summary_card } = useStore();
     const is_logged_in = !!client?.is_logged_in;
     const loginid = client?.loginid || 'NOT CONNECTED';
     const currency = client?.currency || 'USD';
     const balance = Number(client?.balance ?? 0);
-    const is_demo = !!client?.is_virtual || loginid.startsWith('VRT') || loginid.startsWith('VRTC');
+    const is_demo = !!client?.is_virtual || loginid.startsWith('VRT');
     const account_mode = !is_logged_in ? 'offline' : is_demo ? 'demo' : 'real';
 
+    const [guide_open, setGuideOpen] = React.useState(false);
     const [symbol, setSymbol] = React.useState('1HZ100V');
-    const [strategy, setStrategy] = React.useState('quantum');
-    const [contract, setContract] = React.useState('over_under');
-    const [direction, setDirection] = React.useState('over');
-    const [risk, setRisk] = React.useState('low');
-    const [duration, setDuration] = React.useState(1);
-    const [stake, setStake] = React.useState('0.5');
-    const [tp, setTp] = React.useState('10');
-    const [sl, setSl] = React.useState('5');
-    const [optimization, setOptimization] = React.useState(true);
-    const [martingale, setMartingale] = React.useState(false);
-    const [mult, setMult] = React.useState('1.5');
-
+    const [contractId, setContractId] = React.useState('OVER0');
+    const [stake, setStake] = React.useState('2');
+    const [tp, setTp] = React.useState('5');
+    const [sl, setSl] = React.useState('20');
     const [digits, setDigits] = React.useState([]);
     const [quote, setQuote] = React.useState(null);
     const [feedStatus, setFeedStatus] = React.useState('CONNECTING');
+    const [payout, setPayout] = React.useState(DEFAULT_PAYOUT);
     const [running, setRunning] = React.useState(false);
-    const [engineAnalysis, setEngineAnalysis] = React.useState(null);
-    const [evidenceState, setEvidenceState] = React.useState(() => readAiEvidence('1HZ100V', 'over_under'));
-    const [gateInfo, setGateInfo] = React.useState({
-        status: 'SHADOW',
-        reason: 'Collecting measured setup evidence.',
-        breakeven: null,
-        required: null,
-    });
-    const [stats, setStats] = React.useState({
-        ticks: 0,
-        last_digit: null,
-        pnl: 0,
-        trades: 0,
-        wins: 0,
-        losses: 0,
-        cur_stake: 0,
-    });
+    const [stats, setStats] = React.useState({ trades: 0, wins: 0, losses: 0, pnl: 0, curve: [0] });
     const [logs, setLogs] = React.useState([]);
     const [result, setResult] = React.useState(null);
-    const [executionTesting, setExecutionTesting] = React.useState(false);
-    const [guide_open, setGuideOpen] = React.useState(false);
+    const [real_ok, setRealOk] = React.useState(false);
+    const [notice, setNotice] = React.useState('');
 
-    const run_ref = React.useRef(null);
-    const settle_handles_ref = React.useRef(new Set());
+    React.useEffect(() => setRealOk(false), [loginid]);
+
+    const contract = HW_CONTRACTS.find(c => c.id === contractId) || HW_CONTRACTS[1];
+    const stake_num = parseFloat(stake) || 0;
+    const tp_num = Math.abs(parseFloat(tp) || 0);
+    const sl_num = Math.abs(parseFloat(sl) || 0);
+    const needs_real_ack = is_logged_in && !is_demo && !real_ok;
+
     const ws_ref = React.useRef(null);
-    const decimals_ref = React.useRef({ ...FALLBACK_DECIMALS });
-    const sym_ref = React.useRef(symbol);
-    const contract_ref = React.useRef(contract);
     const digits_ref = React.useRef([]);
-    const engine_ref = React.useRef(null);
-    const pending_shadow_ref = React.useRef(null);
-    const last_shadow_fingerprint_ref = React.useRef(null);
-    const last_traded_fingerprint_ref = React.useRef(null);
-    const last_gate_reason_ref = React.useRef('');
-    sym_ref.current = symbol;
-    contract_ref.current = contract;
+    const decimals_ref = React.useRef({ ...FALLBACK_DECIMALS });
+    const running_ref = React.useRef(false);
+    const stats_ref = React.useRef(stats);
+    stats_ref.current = stats;
+    const cfg_ref = React.useRef({});
+    cfg_ref.current = { symbol, contract, stake_num, tp_num, sl_num, currency };
+    const track_ref = React.useRef(null);
+    const mounted_ref = React.useRef(true);
 
     const log = line =>
-        setLogs(prev => [`${new Date().toLocaleTimeString()}  ${line}`, ...prev].slice(0, 50));
+        setLogs(prev => [`${new Date().toLocaleTimeString('en-GB')} · ${line}`, ...prev].slice(0, 12));
 
-    const journalLog = (message, type = MessageTypes.SUCCESS) => {
-        try {
-            journal?.pushMessage?.(message, type, 'journal__text');
-        } catch {
-            /* journal mirroring must not interrupt execution */
-        }
-    };
-
-    const publishAnalysis = (history, family) => {
-        if (!family) {
-            engine_ref.current = null;
-            setEngineAnalysis(null);
-            return null;
-        }
-        const next = analyzeDigitMarket(history, family);
-        engine_ref.current = next;
-        setEngineAnalysis(next);
-        return next;
-    };
-
+    // ------------------------------------------------------------ live ticks (selected market)
     React.useEffect(() => {
+        mounted_ref.current = true;
         let alive = true;
-        let reconnect_timer = null;
-        let reconnect_attempt = 0;
-
-        const subscribe = () => {
-            const socket = ws_ref.current;
-            if (!socket || socket.readyState !== WebSocket.OPEN) return;
-
-            setDigits([]);
-            socket.send(JSON.stringify({ forget_all: 'ticks' }));
-            socket.send(
-                JSON.stringify({
-                    ticks_history: sym_ref.current,
-                    count: 1000,
-                    end: 'latest',
-                    style: 'ticks',
-                    subscribe: 1,
-                })
-            );
-        };
-
-        const scheduleReconnect = () => {
-            if (!alive || reconnect_timer) return;
-            setFeedStatus('RECONNECTING');
-            const delay = Math.min(10000, 1200 * Math.max(1, reconnect_attempt + 1));
-            reconnect_timer = window.setTimeout(() => {
-                reconnect_timer = null;
-                reconnect_attempt += 1;
-                connect();
-            }, delay);
-        };
-
-        const handleMessage = msg => {
-            if (!alive) return;
-
-            let data;
-            try {
-                data = JSON.parse(msg.data);
-            } catch {
-                return;
-            }
-
-            if (data.msg_type === 'active_symbols' && Array.isArray(data.active_symbols)) {
-                data.active_symbols.forEach(s => {
-                    const code = s.symbol || s.underlying_symbol;
-                    if (code && typeof s.pip === 'number') {
-                        decimals_ref.current[code] = `${s.pip}`.split('.')[1]?.length ?? 0;
-                    }
-                });
-                return;
-            }
-
-            if (data.msg_type === 'history' && data.echo_req?.ticks_history === sym_ref.current) {
-                const dec = decimals_ref.current[sym_ref.current] ?? 2;
-                const prices = data.history?.prices || [];
-                const ds = prices.map(pr => Number(Number(pr).toFixed(dec).slice(-1))).slice(-1000);
-                digits_ref.current = ds;
-                setDigits(ds);
-                if (prices.length) setQuote(Number(prices[prices.length - 1]).toFixed(dec));
-
-                const family = familyForContract(contract_ref.current);
-                const analysis = publishAnalysis(ds, family);
-                if (family && analysis?.candidate && analysis?.fingerprint) {
-                    last_shadow_fingerprint_ref.current = analysis.fingerprint;
-                    pending_shadow_ref.current = {
-                        symbol: sym_ref.current,
-                        family,
-                        fingerprint: analysis.fingerprint,
-                        side: analysis.candidate,
-                        tier: analysis.agreementTier,
-                        models: analysis.agreementModels || [],
-                        estimate: analysis.estimate,
-                    };
-                }
-                return;
-            }
-
-            if (data.msg_type === 'tick' && data.tick?.symbol === sym_ref.current) {
-                setFeedStatus('LIVE');
-                const dec = decimals_ref.current[sym_ref.current] ?? 2;
-                const q = Number(data.tick.quote).toFixed(dec);
-                const d = Number(q.slice(-1));
-                setQuote(q);
-
-                const pending = pending_shadow_ref.current;
-                if (pending && pending.symbol === sym_ref.current) {
-                    const updatedEvidence = recordAiEvidence(pending.symbol, pending.family, {
-                        ...pending,
-                        actual: d,
-                        t: Date.now(),
-                    });
-                    setEvidenceState(updatedEvidence);
-                }
-                pending_shadow_ref.current = null;
-
-                const nextDigits = [...digits_ref.current, d].slice(-1000);
-                digits_ref.current = nextDigits;
-                setDigits(nextDigits);
-                setStats(prev => ({ ...prev, ticks: prev.ticks + 1, last_digit: d }));
-
-                const family = familyForContract(contract_ref.current);
-                const analysis = publishAnalysis(nextDigits, family);
-
-                if (analysis?.candidate && analysis?.fingerprint) {
-                    if (analysis.fingerprint !== last_shadow_fingerprint_ref.current) {
-                        last_shadow_fingerprint_ref.current = analysis.fingerprint;
-                        pending_shadow_ref.current = {
-                            symbol: sym_ref.current,
-                            family,
-                            fingerprint: analysis.fingerprint,
-                            side: analysis.candidate,
-                            tier: analysis.agreementTier,
-                            models: analysis.agreementModels || [],
-                            estimate: analysis.estimate,
-                        };
-                    }
-                } else {
-                    last_shadow_fingerprint_ref.current = null;
-                }
-            }
-        };
-
-        const connect = () => {
-            if (!alive) return;
-
-            const current = ws_ref.current;
-            if (current && (current.readyState === WebSocket.OPEN || current.readyState === WebSocket.CONNECTING)) {
-                return;
-            }
-
-            setFeedStatus(reconnect_attempt ? 'RECONNECTING' : 'CONNECTING');
-            const socket = new WebSocket(isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING);
-            ws_ref.current = socket;
-
-            socket.onopen = () => {
-                if (!alive || ws_ref.current !== socket) return;
-                reconnect_attempt = 0;
-                setFeedStatus('LIVE');
-                socket.send(JSON.stringify({ active_symbols: 'brief' }));
-                subscribe();
+        let reconnect = null;
+        const open = () => {
+            const ws = new WebSocket(isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING);
+            ws_ref.current = ws;
+            setFeedStatus('CONNECTING');
+            ws.onopen = () => {
+                ws.send(JSON.stringify({ ticks_history: symbol, count: HISTORY, end: 'latest', style: 'ticks', subscribe: 1 }));
             };
-
-            socket.onmessage = handleMessage;
-
-            socket.onerror = () => {
-                if (!alive || ws_ref.current !== socket) return;
-                setFeedStatus('RECONNECTING');
+            ws.onmessage = ev => {
+                if (!alive) return;
+                let d;
                 try {
-                    socket.close();
+                    d = JSON.parse(ev.data);
                 } catch {
-                    scheduleReconnect();
+                    return;
+                }
+                if (d.msg_type === 'history' && d.echo_req?.ticks_history === symbol) {
+                    if (typeof d.pip_size === 'number') decimals_ref.current[symbol] = d.pip_size;
+                    const dec = decimals_ref.current[symbol] ?? 2;
+                    const prices = d.history?.prices || [];
+                    digits_ref.current = prices.map(p => lastDigit(p, dec)).slice(-HISTORY);
+                    setDigits(digits_ref.current);
+                    if (prices.length) setQuote(Number(prices[prices.length - 1]).toFixed(dec));
+                    setFeedStatus('LIVE');
+                    return;
+                }
+                if (d.msg_type === 'tick' && d.tick?.symbol === symbol) {
+                    if (typeof d.tick.pip_size === 'number') decimals_ref.current[symbol] = d.tick.pip_size;
+                    const dec = decimals_ref.current[symbol] ?? 2;
+                    digits_ref.current = [...digits_ref.current, lastDigit(d.tick.quote, dec)].slice(-HISTORY);
+                    setDigits(digits_ref.current);
+                    setQuote(Number(d.tick.quote).toFixed(dec));
+                    setFeedStatus('LIVE');
                 }
             };
-
-            socket.onclose = () => {
-                if (!alive || ws_ref.current !== socket) return;
-                ws_ref.current = null;
-                scheduleReconnect();
+            ws.onclose = () => {
+                if (!alive) return;
+                setFeedStatus('RECONNECTING');
+                reconnect = window.setTimeout(open, 1200);
+            };
+            ws.onerror = () => {
+                /* onclose handles recovery */
             };
         };
-
-        const resub = () => {
-            const socket = ws_ref.current;
-            if (socket?.readyState === WebSocket.OPEN) subscribe();
-            else connect();
-        };
-
-        const onVisibility = () => {
-            if (document.visibilityState !== 'visible') return;
-            const socket = ws_ref.current;
-            if (socket?.readyState === WebSocket.OPEN) subscribe();
-            else connect();
-        };
-
-        window.addEventListener('nlb-ai-symbol', resub);
-        document.addEventListener('visibilitychange', onVisibility);
-        connect();
-
+        digits_ref.current = [];
+        setDigits([]);
+        setQuote(null);
+        open();
         return () => {
             alive = false;
-            window.removeEventListener('nlb-ai-symbol', resub);
-            document.removeEventListener('visibilitychange', onVisibility);
-
-            if (reconnect_timer) {
-                window.clearTimeout(reconnect_timer);
-                reconnect_timer = null;
-            }
-
-            if (run_ref.current) run_ref.current.active = false;
-            settle_handles_ref.current.forEach(h => h.cancel());
-            settle_handles_ref.current.clear();
-
-            const socket = ws_ref.current;
-            ws_ref.current = null;
-            try {
-                socket?.close();
-            } catch {
-                /* noop */
+            if (reconnect) window.clearTimeout(reconnect);
+            const ws = ws_ref.current;
+            if (ws) {
+                ws.onclose = null;
+                try {
+                    ws.close();
+                } catch {
+                    /* noop */
+                }
             }
         };
-    }, []);
+    }, [symbol]);
 
-    const selectedFamily = familyForContract(contract);
+    React.useEffect(
+        () => () => {
+            mounted_ref.current = false;
+            running_ref.current = false;
+            track_ref.current?.cancel?.();
+        },
+        []
+    );
 
+    // ------------------------------------------------------------ live payout quote
     React.useEffect(() => {
-        pending_shadow_ref.current = null;
-        last_shadow_fingerprint_ref.current = null;
-        last_traded_fingerprint_ref.current = null;
-        last_gate_reason_ref.current = '';
-        const family = familyForContract(contract);
-        if (family) {
-            setEvidenceState(readAiEvidence(symbol, family));
-            publishAnalysis(digits_ref.current, family);
-        } else {
-            setEvidenceState({ total: 0, correct: 0, by_setup: {}, by_tier: {}, recent: [] });
-            engine_ref.current = null;
-            setEngineAnalysis(null);
-        }
-    }, [symbol, contract]);
-
-    const evenCount = digits.filter(d => d % 2 === 0).length;
-    const evenPct = digits.length ? (100 * evenCount) / digits.length : 50;
-    const over2Pct = digits.length ? (100 * digits.filter(d => d > 2).length) / digits.length : 70;
-    const under7Pct = digits.length ? (100 * digits.filter(d => d < 7).length) / digits.length : 70;
-
-    const manualContractSpec = React.useMemo(() => {
-        if (contract === 'rise_fall') {
-            return direction === 'fall' ? { type: 'PUT', label: 'Fall' } : { type: 'CALL', label: 'Rise' };
-        }
-        if (contract === 'even_odd') {
-            return direction === 'odd'
-                ? { type: 'DIGITODD', label: 'Odd' }
-                : { type: 'DIGITEVEN', label: 'Even' };
-        }
-        if (contract === 'over_under') {
-            return direction === 'under'
-                ? { type: 'DIGITUNDER', label: 'Under 7', barrier: 7 }
-                : { type: 'DIGITOVER', label: 'Over 2', barrier: 2 };
-        }
-        return null;
-    }, [contract, direction]);
-
-    const aiContractSpec = React.useMemo(
-        () => (selectedFamily && engineAnalysis?.candidate
-            ? candidateToContract(selectedFamily, engineAnalysis.candidate)
-            : null),
-        [selectedFamily, engineAnalysis]
-    );
-
-    const contractSpec = strategy === 'alpha' ? manualContractSpec : aiContractSpec;
-    const exactSetupEvidence = React.useMemo(
-        () => setupEvidence(evidenceState, engineAnalysis?.fingerprint),
-        [evidenceState, engineAnalysis?.fingerprint]
-    );
-    const bestSetups = React.useMemo(() => topAiSetups(evidenceState, 5), [evidenceState]);
-
-    const settleContract = (contract_id, durationTicks = 1) =>
-        new Promise(resolve => {
-            const handle = trackContracts([contract_id], {
-                timeoutMs: (durationTicks + 30) * 1000,
-                onContract: contractUpdate => {
+        if (!(stake_num >= 0.35)) return undefined;
+        let ws;
+        const t = window.setTimeout(() => {
+            try {
+                ws = new WebSocket(isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING);
+                ws.onopen = () =>
+                    ws.send(
+                        JSON.stringify({
+                            proposal: 1,
+                            amount: stake_num,
+                            basis: 'stake',
+                            contract_type: contract.type,
+                            currency,
+                            duration: 1,
+                            duration_unit: 't',
+                            underlying_symbol: symbol,
+                            barrier: String(contract.barrier ?? 5),
+                        })
+                    );
+                ws.onmessage = m => {
                     try {
-                        transactions?.onBotContractEvent?.(contractUpdate);
-                        summary_card?.onBotContractEvent?.(contractUpdate);
-                        run_panel?.onBotContractEvent?.(contractUpdate);
-                    } catch {
-                        /* Bot Builder mirroring must never interrupt settlement */
-                    }
-                },
-                onDone: ({ profits, settled }) => {
-                    settle_handles_ref.current.delete(handle);
-                    try {
-                        run_panel?.setHasOpenContract?.(false);
-                        run_panel?.setContractStage?.(contract_stages.CONTRACT_CLOSED);
+                        const d = JSON.parse(m.data);
+                        const ask = Number(d?.proposal?.ask_price);
+                        const win = Number(d?.proposal?.payout);
+                        if (ask > 0 && win > 0 && mounted_ref.current) setPayout(win / ask);
                     } catch {
                         /* noop */
                     }
-                    const values = Object.values(profits);
-                    resolve(settled > 0 ? values[0] : null);
-                },
-            });
-            settle_handles_ref.current.add(handle);
-        });
-
-    const prepareProposal = async (spec, amount, durationTicks = 1) => {
-        const req = {
-            proposal: 1,
-            amount,
-            basis: 'stake',
-            contract_type: spec.type,
-            currency,
-            duration: durationTicks,
-            duration_unit: 't',
-            underlying_symbol: symbol,
-            ...(spec.barrier !== undefined ? { barrier: String(spec.barrier) } : {}),
-        };
-        const response = await api_base.api.send(req);
-        const proposal = response?.proposal;
-        const ask = Number(proposal?.ask_price ?? amount);
-        const payout = Number(proposal?.payout ?? 0);
-        if (!proposal?.id || !(ask > 0) || !(payout > 0)) throw new Error('Invalid live proposal');
-        return {
-            id: proposal.id,
-            ask,
-            payout,
-            breakeven: ask / payout,
-            proposal,
-        };
-    };
-
-    const buyPrepared = async prepared => {
-        try {
-            run_panel?.setContractStage?.(contract_stages.PURCHASE_SENT);
-        } catch {
-            /* noop */
-        }
-        const res = await api_base.api.send({ buy: prepared.id, price: prepared.ask });
-        const contractId = res?.buy?.contract_id;
-        if (!contractId) throw new Error('No contract id returned');
-        try {
-            run_panel?.setHasOpenContract?.(true);
-            run_panel?.setContractStage?.(contract_stages.PURCHASE_RECEIVED);
-        } catch {
-            /* noop */
-        }
-        return contractId;
-    };
-
-
-    const testDemoExecution = async () => {
-        if (running || executionTesting) return;
-
-        if (!is_logged_in) {
-            reportGate({
-                status: 'BLOCKED',
-                reason: 'Connect Deriv before testing execution.',
-                breakeven: null,
-                required: null,
-            });
-            return;
-        }
-
-        if (!is_demo) {
-            reportGate({
-                status: 'BLOCKED',
-                reason: 'Execution test is demo-only. Switch to your Deriv demo account.',
-                breakeven: null,
-                required: null,
-            });
-            return;
-        }
-
-        if (!api_base?.api) {
-            reportGate({
-                status: 'BLOCKED',
-                reason: 'Trading connection is not ready yet. Wait a moment and try again.',
-                breakeven: null,
-                required: null,
-            });
-            return;
-        }
-
-        const spec = aiContractSpec || manualContractSpec;
-        if (!spec) {
-            reportGate({
-                status: 'BLOCKED',
-                reason: 'No supported contract is selected for the execution test.',
-                breakeven: null,
-                required: null,
-            });
-            return;
-        }
-
-        const amount = Math.max(0.35, parseFloat(stake) || 0.35);
-        setExecutionTesting(true);
-        setResult(null);
-
-        try {
-            run_panel.run_id = 'nolimitz-ai-test-' + Date.now();
-            summary_card?.clear?.();
-            run_panel?.setIsRunning?.(true);
-            run_panel?.toggleDrawer?.(true);
-
-            reportGate({
-                status: 'TEST',
-                reason: 'Preparing one real Deriv demo proposal to verify execution.',
-                breakeven: null,
-                required: null,
-            });
-
-            const prepared = await prepareProposal(spec, amount, 1);
-            setGateInfo({
-                status: 'TEST',
-                reason: 'Proposal accepted. Sending one demo buy now.',
-                breakeven: prepared.breakeven,
-                required: prepared.breakeven,
-            });
-
-            const cid = await buyPrepared(prepared);
-            log('DEMO TEST BOUGHT · ' + spec.label + ' · contract ' + cid);
-            journalLog('Nolimitz AI demo execution test · contract ' + cid);
-
-            const profit = await settleContract(cid, 1);
-            if (profit === null) throw new Error('Settlement timeout');
-
-            setResult({
-                reason: 'Demo execution test complete',
-                pnl: profit,
-                trades: 1,
-                wins: profit > 0 ? 1 : 0,
-                losses: profit > 0 ? 0 : 1,
-            });
-
-            setGateInfo({
-                status: 'TEST PASSED',
-                reason: 'Execution pipeline verified. Normal AI evidence rules remain unchanged.',
-                breakeven: prepared.breakeven,
-                required: prepared.breakeven,
-            });
-        } catch (e) {
-            const message = describeError(e);
-            setGateInfo({
-                status: 'TEST FAILED',
-                reason: message,
-                breakeven: null,
-                required: null,
-            });
-            log('DEMO TEST FAILED · ' + message);
-            journalLog('Nolimitz AI demo execution test failed · ' + message, MessageTypes.ERROR);
-        } finally {
-            setExecutionTesting(false);
+                    try {
+                        ws.close();
+                    } catch {
+                        /* noop */
+                    }
+                };
+            } catch {
+                /* keep estimate */
+            }
+        }, 400);
+        return () => {
+            window.clearTimeout(t);
             try {
-                run_panel?.setIsRunning?.(false);
+                ws?.close();
             } catch {
                 /* noop */
             }
+        };
+    }, [stake_num, contract.type, contract.barrier, currency, symbol]);
+
+    // ------------------------------------------------------------ execution loop
+    const buyOne = async (c, barrier, amount, sym, cur) => {
+        const parameters = {
+            amount,
+            basis: 'stake',
+            contract_type: c.type,
+            currency: cur,
+            duration: 1,
+            duration_unit: 't',
+            underlying_symbol: sym,
+            barrier: String(barrier),
+        };
+        const HARD = /Insufficient balance|Market closed|Session expired/;
+        try {
+            const r = await withTimeout(
+                api_base.api.send({ buy: '1', price: amount, parameters, passthrough: { nolimitz_source: 'nolimitz-ai' } }),
+                5000,
+                'Buy'
+            );
+            if (r?.error) throw r;
+            if (r?.buy?.contract_id) return r.buy.contract_id;
+        } catch (e) {
+            if (HARD.test(describeError(e))) throw e;
         }
-    };
-
-    const reportGate = next => {
-        setGateInfo(next);
-        if (next?.reason && next.reason !== last_gate_reason_ref.current) {
-            last_gate_reason_ref.current = next.reason;
-            log(next.reason);
-        }
-    };
-
-    const applyTradeResult = (r, profit, baseStake, multiplier, maxSteps) => {
-        const won = profit > 0;
-        r.trades += 1;
-        r.pnl += profit;
-
-        if (won) {
-            r.wins += 1;
-            r.steps = 0;
-            r.curStake = baseStake;
-        } else {
-            r.losses += 1;
-            if (martingale && maxSteps > 0) {
-                r.steps += 1;
-                if (r.steps > maxSteps) {
-                    r.steps = 0;
-                    r.curStake = baseStake;
-                } else {
-                    r.curStake = Math.min(r.curStake * multiplier, baseStake * 10);
-                }
-            } else {
-                r.curStake = baseStake;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                const p = await withTimeout(api_base.api.send({ proposal: 1, ...parameters }), 5000, 'Proposal');
+                if (p?.error) throw new Error(p.error.message);
+                const b = await withTimeout(
+                    api_base.api.send({
+                        buy: p.proposal.id,
+                        price: Number(p.proposal.ask_price ?? amount),
+                        passthrough: { nolimitz_source: 'nolimitz-ai' },
+                    }),
+                    5000,
+                    'Buy'
+                );
+                if (b?.error) throw new Error(b.error.message);
+                if (b?.buy?.contract_id) return b.buy.contract_id;
+            } catch (e) {
+                if (attempt === 3 || HARD.test(describeError(e))) throw e;
+                await sleep(150 * attempt);
             }
         }
-
-        setStats(prev => ({
-            ...prev,
-            pnl: r.pnl,
-            trades: r.trades,
-            wins: r.wins,
-            losses: r.losses,
-            cur_stake: r.curStake,
-        }));
-
-        const resultLine =
-            (won ? 'WIN ' : 'LOSS ') +
-            (profit >= 0 ? '+' : '') +
-            profit.toFixed(2) +
-            ' · P/L ' +
-            r.pnl.toFixed(2);
-
-        log(resultLine);
-        journalLog(
-            'Nolimitz AI · ' +
-                (won ? 'WIN' : 'LOSS') +
-                ' · ' +
-                (profit >= 0 ? '+' : '') +
-                profit.toFixed(2) +
-                ' ' +
-                currency,
-            MessageTypes.SUCCESS
-        );
-        return won;
+        throw new Error('Buy failed');
     };
 
-    const stopRun = (reason, r, stopType = null) => {
-        if (!r) return;
-        r.active = false;
-        run_ref.current = null;
+    const finish = (type, reason) => {
+        running_ref.current = false;
         setRunning(false);
-
         try {
             run_panel?.setIsRunning?.(false);
-            if (!run_panel?.has_open_contract) {
-                run_panel?.setContractStage?.(contract_stages.NOT_RUNNING);
-            }
         } catch {
             /* noop */
         }
-
-        if (reason) {
-            const won = r.pnl >= 0;
-            if (won) playWin();
-            else playLoss();
-            setResult({ reason, type: stopType, pnl: r.pnl, trades: r.trades, wins: r.wins, losses: r.losses });
-            journalLog(
-                'Nolimitz AI stopped · ' +
-                    reason +
-                    ' · session P/L ' +
-                    r.pnl.toFixed(2) +
-                    ' ' +
-                    currency
-            );
-        }
+        const s = stats_ref.current;
+        setResult({ type, reason, pnl: s.pnl, trades: s.trades, wins: s.wins, losses: s.losses });
+        log(reason);
     };
 
-    const start = async () => {
-        if (running || !is_logged_in || !api_base?.api) return;
-
-        if (strategy !== 'alpha' && !selectedFamily) {
-            reportGate({
-                status: 'BLOCKED',
-                reason: 'Quantum/Apex currently validate Even/Odd and Over/Under only. Use Alpha for a Rise/Fall execution test.',
-                breakeven: null,
-                required: null,
-            });
+    const nextTrade = async () => {
+        if (!running_ref.current || !mounted_ref.current) return;
+        const { symbol: sym, contract: c, stake_num: amount, tp_num: TP, sl_num: SL, currency: cur } = cfg_ref.current;
+        const s = stats_ref.current;
+        if (s.pnl >= TP) return finish('tp', `Profit target reached: +${money(s.pnl)} ${cur}`);
+        if (s.pnl <= -SL) return finish('sl', `Stop-loss reached: ${money(s.pnl)} ${cur}`);
+        if (digits_ref.current.length < 50) {
+            window.setTimeout(nextTrade, 800);
             return;
         }
-
-        const executionAllowed = is_demo;
-        const baseStake = Math.max(0.35, parseFloat(stake) || 0.5);
-        const tpValue = Math.max(0, parseFloat(tp) || 0);
-        const slValue = Math.max(0, parseFloat(sl) || 0);
-        const multiplier = clamp(parseFloat(mult) || 1.5, 1, 3);
-        const maxSteps = maxMartingaleSteps(risk);
-
-        unlockAudio();
-        setResult(null);
-        setLogs([]);
-        last_traded_fingerprint_ref.current = null;
-        last_gate_reason_ref.current = '';
-
-        const r = {
-            active: true,
-            pnl: 0,
-            trades: 0,
-            wins: 0,
-            losses: 0,
-            curStake: baseStake,
-            steps: 0,
-        };
-
-        run_ref.current = r;
-        setRunning(true);
-
+        const barrier = c.id === 'DIFF' ? differsPick(digits_ref.current) : c.barrier;
+        let id;
         try {
-            run_panel.run_id = 'nolimitz-ai-' + Date.now();
-            summary_card?.clear?.();
-            run_panel?.setContractStage?.(contract_stages.STARTING);
+            id = await buyOne(c, barrier, amount, sym, cur);
+        } catch (e) {
+            return finish('error', `Stopped: ${describeError(e)}`);
+        }
+        if (!running_ref.current) {
+            // stopped while buying: still track so the result is recorded
+        }
+        track_ref.current = trackContracts([id], {
+            timeoutMs: 30000,
+            onContract: ct => {
+                try {
+                    transactions?.onBotContractEvent?.(ct);
+                    summary_card?.onBotContractEvent?.(ct);
+                    run_panel?.onBotContractEvent?.(ct);
+                } catch {
+                    /* mirror only */
+                }
+            },
+            onDone: ({ total }) => {
+                track_ref.current = null;
+                if (!mounted_ref.current) return;
+                const win = total > 0;
+                if (win) playWin();
+                else playLoss();
+                setStats(prev => {
+                    const next = {
+                        trades: prev.trades + 1,
+                        wins: prev.wins + (win ? 1 : 0),
+                        losses: prev.losses + (win ? 0 : 1),
+                        pnl: Number((prev.pnl + total).toFixed(2)),
+                        curve: [...prev.curve, Number((prev.pnl + total).toFixed(2))].slice(-200),
+                    };
+                    stats_ref.current = next;
+                    return next;
+                });
+                log(`${win ? 'WIN' : 'LOSS'} ${c.short}${c.id === 'DIFF' ? ` ${barrier}` : ''} on ${sym} · ${total >= 0 ? '+' : ''}${money(total)} ${cur}`);
+                if (running_ref.current) window.setTimeout(nextTrade, 150);
+            },
+        });
+    };
+
+    const start = () => {
+        if (!is_logged_in) return;
+        if (needs_real_ack) {
+            setNotice('Confirm the real-money notice above to start.');
+            return;
+        }
+        if (stake_num < MIN_FULL_PAYOUT_STAKE) {
+            setNotice(`Use a stake of at least ${MIN_FULL_PAYOUT_STAKE} ${currency}: below that Deriv cuts the payout on these contracts to about 6%.`);
+            return;
+        }
+        if (!(tp_num > 0) || !(sl_num > 0)) {
+            setNotice('Set both a profit target and a maximum loss.');
+            return;
+        }
+        setNotice('');
+        unlockAudio();
+        const fresh = { trades: 0, wins: 0, losses: 0, pnl: 0, curve: [0] };
+        stats_ref.current = fresh;
+        setStats(fresh);
+        setResult(null);
+        running_ref.current = true;
+        setRunning(true);
+        try {
+            run_panel.run_id = `nolimitz-ai-${Date.now()}`;
             run_panel?.setIsRunning?.(true);
             run_panel?.toggleDrawer?.(true);
         } catch {
             /* noop */
         }
-
-        log(
-            'Nolimitz AI started · ' +
-                STRATEGIES.find(x => x.id === strategy)?.label +
-                ' · ' +
-                symbol
-        );
-        journalLog(
-            'Nolimitz AI started · ' +
-                STRATEGIES.find(x => x.id === strategy)?.label +
-                ' · ' +
-                symbol +
-                ' · ' +
-                (executionAllowed ? 'DEMO EXECUTION' : 'REAL SHADOW')
-        );
-
-        if (strategy === 'alpha') {
-            if (!executionAllowed) {
-                reportGate({
-                    status: 'REAL SHADOW',
-                    reason: 'Alpha is the execution-verification mode. Analysis is available on this real account, but Alpha contract execution remains demo-only while validation is active.',
-                    breakeven: null,
-                    required: null,
-                });
-                stopRun(null, r);
-                return;
-            }
-
-            if (!manualContractSpec) {
-                stopRun('No supported Alpha contract selected', r);
-                return;
-            }
-
-            try {
-                reportGate({
-                    status: 'TEST',
-                    reason: 'Alpha demo execution test: preparing one real Deriv proposal.',
-                    breakeven: null,
-                    required: null,
-                });
-
-                const prepared = await prepareProposal(manualContractSpec, baseStake, duration);
-                setGateInfo({
-                    status: 'TEST',
-                    reason:
-                        'Live proposal ready · break-even ' +
-                        (prepared.breakeven * 100).toFixed(2) +
-                        '%',
-                    breakeven: prepared.breakeven,
-                    required: prepared.breakeven,
-                });
-
-                const cid = await buyPrepared(prepared);
-                journalLog(
-                    'Alpha demo test bought ' +
-                        manualContractSpec.label +
-                        ' · contract ' +
-                        cid
-                );
-
-                const profit = await settleContract(cid, duration);
-                if (profit === null) {
-                    stopRun('Alpha demo execution test settlement timeout', r);
-                    return;
-                }
-
-                applyTradeResult(r, profit, baseStake, multiplier, maxSteps);
-                stopRun('Alpha demo execution test complete', r);
-            } catch (e) {
-                const message = describeError(e);
-                journalLog('Nolimitz AI Alpha error · ' + message, MessageTypes.ERROR);
-                stopRun('Alpha test failed: ' + message, r);
-            }
-            return;
-        }
-
-        const rules = AI_RULES[strategy];
-
-        while (r.active) {
-            if (tpValue > 0 && r.pnl >= tpValue) {
-                stopRun('Take profit reached', r, 'tp');
-                return;
-            }
-
-            if (slValue > 0 && r.pnl <= -slValue) {
-                stopRun('Stop loss reached', r, 'sl');
-                return;
-            }
-
-            const analysis = engine_ref.current;
-
-            if (!analysis?.candidate || !analysis?.fingerprint) {
-                reportGate({
-                    status: 'SHADOW',
-                    reason: analysis?.reason || 'Waiting for measured model consensus.',
-                    breakeven: null,
-                    required: null,
-                });
-                await new Promise(res => setTimeout(res, 250));
-                continue;
-            }
-
-            if (analysis.agreementTier < rules.minTier) {
-                reportGate({
-                    status: 'SHADOW',
-                    reason:
-                        strategy.toUpperCase() +
-                        ' needs ' +
-                        rules.minTier +
-                        ' agreeing models; current setup has ' +
-                        analysis.agreementTier +
-                        '.',
-                    breakeven: null,
-                    required: null,
-                });
-                await new Promise(res => setTimeout(res, 250));
-                continue;
-            }
-
-            const latestEvidence = readAiEvidence(symbol, selectedFamily);
-            setEvidenceState(latestEvidence);
-            const exact = setupEvidence(latestEvidence, analysis.fingerprint);
-
-            if (exact.n < rules.minEvidence) {
-                reportGate({
-                    status: 'SHADOW',
-                    reason:
-                        'Shadow validating exact setup: ' +
-                        exact.n +
-                        '/' +
-                        rules.minEvidence +
-                        ' independent forward results.',
-                    breakeven: null,
-                    required: null,
-                });
-                await new Promise(res => setTimeout(res, 250));
-                continue;
-            }
-
-            if (last_traded_fingerprint_ref.current === analysis.fingerprint) {
-                reportGate({
-                    status: 'COOLDOWN',
-                    reason: 'This fingerprint has already been traded. Waiting for the market state to change.',
-                    breakeven: null,
-                    required: null,
-                });
-                await new Promise(res => setTimeout(res, 250));
-                continue;
-            }
-
-            const liveSpec = candidateToContract(selectedFamily, analysis.candidate);
-
-            try {
-                const prepared = await prepareProposal(liveSpec, Number(r.curStake.toFixed(2)), 1);
-                const required = prepared.breakeven + rules.margin;
-
-                if (!(exact.lowerBound > required)) {
-                    reportGate({
-                        status: 'SHADOW',
-                        reason:
-                            'No trade · exact setup lower bound ' +
-                            (exact.lowerBound * 100).toFixed(2) +
-                            '% must beat live break-even + margin ' +
-                            (required * 100).toFixed(2) +
-                            '%.',
-                        breakeven: prepared.breakeven,
-                        required,
-                    });
-                    await new Promise(res => setTimeout(res, 500));
-                    continue;
-                }
-
-                if (!executionAllowed) {
-                    last_traded_fingerprint_ref.current = analysis.fingerprint;
-                    reportGate({
-                        status: 'REAL SHADOW',
-                        reason:
-                            'VALIDATED SETUP · ' +
-                            analysis.agreementTier +
-                            '-model consensus · ' +
-                            exact.correct +
-                            '/' +
-                            exact.n +
-                            ' fresh correct · LB ' +
-                            (exact.lowerBound * 100).toFixed(2) +
-                            '% > ' +
-                            (required * 100).toFixed(2) +
-                            '% required. Real execution remains locked during validation.',
-                        breakeven: prepared.breakeven,
-                        required,
-                    });
-                    journalLog(
-                        'Nolimitz AI real-shadow setup qualified · ' +
-                        liveSpec.label +
-                        ' · no real contract executed.'
-                    );
-                    await new Promise(res => setTimeout(res, 350));
-                    continue;
-                }
-
-                setGateInfo({
-                    status: 'TRADE READY',
-                    reason:
-                        analysis.agreementTier +
-                        '-model consensus · ' +
-                        exact.correct +
-                        '/' +
-                        exact.n +
-                        ' fresh correct · LB ' +
-                        (exact.lowerBound * 100).toFixed(2) +
-                        '% > ' +
-                        (required * 100).toFixed(2) +
-                        '% required.',
-                    breakeven: prepared.breakeven,
-                    required,
-                });
-
-                last_traded_fingerprint_ref.current = analysis.fingerprint;
-                setStats(prev => ({ ...prev, cur_stake: r.curStake }));
-
-                const cid = await buyPrepared(prepared);
-
-                log(
-                    'AI TRADE · ' +
-                        liveSpec.label +
-                        ' · ' +
-                        currency +
-                        ' ' +
-                        r.curStake.toFixed(2) +
-                        ' · LB ' +
-                        (exact.lowerBound * 100).toFixed(2) +
-                        '%'
-                );
-
-                journalLog(
-                    'Nolimitz AI trade · ' +
-                        liveSpec.label +
-                        ' · ' +
-                        currency +
-                        ' ' +
-                        r.curStake.toFixed(2) +
-                        ' · contract ' +
-                        cid
-                );
-
-                const profit = await settleContract(cid, 1);
-                if (profit === null) {
-                    journalLog('Nolimitz AI settlement timeout.', MessageTypes.ERROR);
-                    continue;
-                }
-
-                applyTradeResult(r, profit, baseStake, multiplier, maxSteps);
-
-                if (tpValue > 0 && r.pnl >= tpValue) {
-                    stopRun('Take profit reached', r, 'tp');
-                    return;
-                }
-                if (slValue > 0 && r.pnl <= -slValue) {
-                    stopRun('Stop loss reached', r, 'sl');
-                    return;
-                }
-            } catch (e) {
-                const message = describeError(e);
-                log('Trade error · ' + message);
-                journalLog('Nolimitz AI trade error · ' + message, MessageTypes.ERROR);
-                await new Promise(res => setTimeout(res, 600));
-            }
-
-            // Contract duration is already the minimum 1 tick. Re-check the
-            // next eligible setup almost immediately after settlement instead of
-            // sleeping for up to 1.2s.
-            await new Promise(res => setTimeout(res, risk === 'low' ? 220 : 120));
-        }
+        log(`Started ${contract.short} on ${symbol} · stake ${money(stake_num)} · target +${money(tp_num)} / stop −${money(sl_num)}`);
+        nextTrade();
     };
 
     const stop = () => {
-        log('Stopped by user');
-        const r = run_ref.current;
-        if (r) r.active = false;
-        run_ref.current = null;
+        running_ref.current = false;
         setRunning(false);
-
         try {
             run_panel?.setIsRunning?.(false);
-            if (!run_panel?.has_open_contract) {
-                run_panel?.setContractStage?.(contract_stages.NOT_RUNNING);
-            }
         } catch {
             /* noop */
         }
-
-        journalLog('Nolimitz AI stopped by user.');
+        log('Stopped by user.');
     };
 
-    const currentStrategy = STRATEGIES.find(x => x.id === strategy);
-    const winRate = stats.trades ? (100 * stats.wins) / stats.trades : 0;
+    // ------------------------------------------------------------ analysis view
+    const shares = React.useMemo(() => digitShares(digits, HISTORY), [digits]);
+    const lose = losingDigit(contract, digits);
+    const since = ticksSince(digits, lose);
+    const recent = digits.slice(-24);
+    const breakeven = 1 / payout;
+    const measured = MEASURED[contract.id];
+    const odds = React.useMemo(() => sessionOdds(0.9, stake_num, payout, tp_num, sl_num), [stake_num, payout, tp_num, sl_num]);
+    const winRate = stats.trades ? stats.wins / stats.trades : 0;
+    const low_stake = stake_num > 0 && stake_num < MIN_FULL_PAYOUT_STAKE;
 
     return (
         <div className='nolimitz-ai'>
@@ -1036,8 +426,13 @@ const NolimitzAI = observer(() => {
                 <div className='nolimitz-ai__hero'>
                     <div>
                         <span className='nolimitz-ai__eyebrow'>NOLIMITZBOTS</span>
-                        <h1><span>Nolimitz AI</span> Trading Dashboard</h1>
-                        <p>Automated Deriv execution with live controls, strategy filters and session risk limits.</p>
+                        <h1>
+                            <span>Nolimitz AI</span> High-Win Engine
+                        </h1>
+                        <p>
+                            Trades the digit contracts that win about 9 ticks in 10, one after another, until your profit
+                            target or maximum loss ends the session.
+                        </p>
                     </div>
                     <GuideButton onClick={() => setGuideOpen(true)} />
                 </div>
@@ -1058,17 +453,27 @@ const NolimitzAI = observer(() => {
                     </div>
                     <div className='nolimitz-ai__balance'>
                         <small>LIVE BALANCE</small>
-                        <strong>{balance.toFixed(2)} <span>{currency}</span></strong>
-                        <div className={`nolimitz-ai__live-dot ${feedStatus.toLowerCase()}`}>● <span>{feedStatus}</span></div>
+                        <strong>
+                            {balance.toFixed(2)} <span>{currency}</span>
+                        </strong>
+                        <div className={`nolimitz-ai__live-dot ${feedStatus.toLowerCase()}`}>
+                            ● <span>{feedStatus}</span>
+                        </div>
                     </div>
                 </section>
 
-                {!is_logged_in && (
-                    <div className='nolimitz-ai__warning'>Connect your Deriv account before starting Nolimitz AI.</div>
-                )}
-                {is_logged_in && !is_demo && (
-                    <div className='nolimitz-ai__warning nolimitz-ai__warning--real'>
-                        REAL ACCOUNT ACTIVE — Nolimitz AI analysis and shadow validation are available automatically. Contract execution remains demo-only during validation.
+                {!is_logged_in && <div className='nolimitz-ai__warning'>Connect your Deriv account to run Nolimitz AI.</div>}
+                {needs_real_ack && (
+                    <div className='nolimitz-ai__warning nolimitz-ai__warning--real nolimitz-ai__ack'>
+                        <b>REAL-MONEY ACCOUNT</b>
+                        <span>
+                            These contracts win about 90% of the time but pay about 9.6%, so one loss cancels about ten
+                            wins. Over many trades they lose about 1.3% of what is staked. Your maximum loss setting is
+                            what protects the balance.
+                        </span>
+                        <button type='button' onClick={() => setRealOk(true)}>
+                            I understand — enable real trading
+                        </button>
                     </div>
                 )}
 
@@ -1077,22 +482,19 @@ const NolimitzAI = observer(() => {
                         <div className='nolimitz-ai__brand-icon'>✦</div>
                         <div>
                             <span className='nolimitz-ai__tag'>NOLIMITZ AI</span>
-                            <h2>Automated Trading Engine</h2>
+                            <h2>High-Win Digit Engine</h2>
                         </div>
                         <span className='nolimitz-ai__mode-badge'>{running ? 'RUNNING' : 'READY'}</span>
                     </div>
 
                     <div className='nolimitz-ai__field-label'>MARKET</div>
                     <div className='nolimitz-ai__market-row'>
-                        <select
-                            value={symbol}
-                            disabled={running}
-                            onChange={e => {
-                                setSymbol(e.target.value);
-                                setTimeout(() => window.dispatchEvent(new Event('nlb-ai-symbol')), 0);
-                            }}
-                        >
-                            {MARKETS.map(m => <option key={m.code} value={m.code}>{m.label}</option>)}
+                        <select value={symbol} disabled={running} onChange={e => setSymbol(e.target.value)}>
+                            {MARKETS.map(m => (
+                                <option key={m.code} value={m.code}>
+                                    {m.label}
+                                </option>
+                            ))}
                         </select>
                         <div className='nolimitz-ai__quote'>
                             <small>LIVE TICK</small>
@@ -1100,201 +502,132 @@ const NolimitzAI = observer(() => {
                         </div>
                     </div>
 
-                    <div className='nolimitz-ai__field-label'>TRADING STRATEGY</div>
+                    <div className='nolimitz-ai__field-label'>CONTRACT</div>
                     <div className='nolimitz-ai__segmented'>
-                        {STRATEGIES.map(s => (
+                        {HW_CONTRACTS.map(c => (
                             <button
-                                key={s.id}
+                                key={c.id}
                                 disabled={running}
-                                className={strategy === s.id ? 'active' : ''}
-                                onClick={() => setStrategy(s.id)}
+                                className={contractId === c.id ? 'active' : ''}
+                                onClick={() => setContractId(c.id)}
                             >
-                                {s.label}
+                                {c.label}
                             </button>
                         ))}
                     </div>
                     <div className='nolimitz-ai__strategy-note'>
-                        {currentStrategy?.note}
+                        {contract.id === 'OVER0' && 'Wins on any last digit from 1 to 9 · loses only on 0'}
+                        {contract.id === 'UNDER9' && 'Wins on any last digit from 0 to 8 · loses only on 9'}
+                        {contract.id === 'DIFF' && `Wins unless the next digit is the pick${lose !== null ? ` (${lose})` : ''}`}
                     </div>
 
                     <div className='nolimitz-ai__engine-panel'>
                         <div>
-                            <span>ENGINE</span>
-                            <strong>{NOLIMITZ_AI_ENGINE_VERSION}</strong>
+                            <span>MEASURED WIN RATE</span>
+                            <strong>{pct(measured, 2)}</strong>
                         </div>
                         <div>
-                            <span>TICK FEED</span>
-                            <strong>{feedStatus}</strong>
+                            <span>LIVE PAYOUT</span>
+                            <strong>+{pct(payout - 1)}</strong>
                         </div>
                         <div>
-                            <span>STATUS</span>
-                            <strong>{strategy === 'alpha' ? 'EXECUTION TEST' : gateInfo.status}</strong>
+                            <span>BREAK-EVEN</span>
+                            <strong>{pct(breakeven, 2)}</strong>
                         </div>
                         <div>
-                            <span>CANDIDATE</span>
-                            <strong>{engineAnalysis?.candidate ? engineAnalysis.candidate.toUpperCase() : '—'}</strong>
+                            <span>LOSING DIGIT</span>
+                            <strong>{lose ?? '—'}</strong>
                         </div>
                         <div>
-                            <span>AGREEMENT</span>
-                            <strong>{engineAnalysis?.agreementTier ? `${engineAnalysis.agreementTier} models` : '—'}</strong>
+                            <span>SEEN (LAST {HISTORY})</span>
+                            <strong>{lose !== null && digits.length ? pct(shares[lose]) : '—'}</strong>
                         </div>
                         <div>
-                            <span>FRESH EVIDENCE</span>
-                            <strong>{evidenceState?.correct || 0}/{evidenceState?.total || 0}</strong>
+                            <span>TICKS SINCE IT LANDED</span>
+                            <strong>{since ?? '—'}</strong>
                         </div>
-                        <div>
-                            <span>EXACT SETUP</span>
-                            <strong>{exactSetupEvidence.correct}/{exactSetupEvidence.n}</strong>
-                        </div>
-                        <div>
-                            <span>SETUP LOWER BOUND</span>
-                            <strong>{exactSetupEvidence.n ? `${(exactSetupEvidence.lowerBound * 100).toFixed(2)}%` : '—'}</strong>
-                        </div>
-                        <div>
-                            <span>LIVE BREAK-EVEN</span>
-                            <strong>{gateInfo.breakeven ? `${(gateInfo.breakeven * 100).toFixed(2)}%` : '—'}</strong>
-                        </div>
-                        <p>{strategy === 'alpha' ? 'Alpha places one user-selected demo contract only, to verify the full execution pipeline.' : gateInfo.reason}</p>
+                        <p>
+                            Measured on 195,000 real Deriv ticks across 13 markets. The losing digit lands about 1 tick in
+                            10 no matter how long it has been away — every tick is independent.
+                        </p>
                     </div>
 
-                    {strategy !== 'alpha' && engineAnalysis?.votes?.length > 0 && (
-                        <div className='nolimitz-ai__votes'>
-                            <span className='nolimitz-ai__votes-title'>LIVE MODEL VOTES</span>
-                            {engineAnalysis.votes.map(vote => (
-                                <div key={vote.model} className={engineAnalysis.agreementModels?.includes(vote.model) ? 'agree' : ''}>
-                                    <b>{vote.model}</b>
-                                    <span>{vote.side.toUpperCase()}</span>
-                                    <small>{(vote.probability * 100).toFixed(2)}% from {vote.samples} samples</small>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-
-                    <div className='nolimitz-ai__field-label'>CONTRACT TYPE</div>
-                    <div className='nolimitz-ai__contracts'>
-                        {CONTRACTS.map(item => (
-                            <button
-                                key={item.id}
-                                disabled={running || !item.available || (strategy !== 'alpha' && item.id === 'rise_fall')}
-                                className={`${contract === item.id ? 'active' : ''} ${item.recommended ? 'recommended' : ''}`}
-                                onClick={() => item.available && setContract(item.id)}
-                            >
-                                <b>{item.symbol}</b>
-                                <span>{item.label}</span>
-                                {item.recommended && <small>RECOMMENDED</small>}
-                                {!item.available && <small>{item.note}</small>}
-                            </button>
+                    <div className='nolimitz-ai__field-label'>DIGIT HEAT · LAST {HISTORY} TICKS</div>
+                    <div className='nolimitz-ai__heat'>
+                        {shares.map((v, d) => (
+                            <div key={d} className={d === lose ? 'lose' : ''}>
+                                <i style={{ height: `${Math.min(100, (v / 0.15) * 100)}%` }} />
+                                <b>{d}</b>
+                                <small>{digits.length ? pct(v, 0) : ''}</small>
+                            </div>
+                        ))}
+                    </div>
+                    <div className='nolimitz-ai__ribbon' aria-label='Recent digits'>
+                        {recent.map((d, i) => (
+                            <span key={i} className={d === lose ? 'lose' : ''}>
+                                {d}
+                            </span>
                         ))}
                     </div>
 
-                    {strategy === 'alpha' && contract === 'rise_fall' && (
-                        <div className='nolimitz-ai__choice-row'>
-                            <button className={direction === 'rise' ? 'active' : ''} onClick={() => setDirection('rise')} disabled={running}>RISE</button>
-                            <button className={direction === 'fall' ? 'active' : ''} onClick={() => setDirection('fall')} disabled={running}>FALL</button>
-                        </div>
-                    )}
-                    {strategy === 'alpha' && contract === 'even_odd' && (
-                        <div className='nolimitz-ai__choice-row'>
-                            <button className={direction === 'even' ? 'active' : ''} onClick={() => setDirection('even')} disabled={running}>EVEN</button>
-                            <button className={direction === 'odd' ? 'active' : ''} onClick={() => setDirection('odd')} disabled={running}>ODD</button>
-                        </div>
-                    )}
-                    {strategy === 'alpha' && contract === 'over_under' && (
-                        <div className='nolimitz-ai__choice-row'>
-                            <button className={direction === 'over' ? 'active' : ''} onClick={() => setDirection('over')} disabled={running}>OVER 2</button>
-                            <button className={direction === 'under' ? 'active' : ''} onClick={() => setDirection('under')} disabled={running}>UNDER 7</button>
-                        </div>
-                    )}
-
-                    <div className='nolimitz-ai__field-label'>STAKE SIZE [{currency}]</div>
+                    <div className='nolimitz-ai__field-label'>STAKE PER TRADE [{currency}]</div>
                     <div className='nolimitz-ai__stepper'>
-                        <button disabled={running} onClick={() => setStake(String(Math.max(0.35, (parseFloat(stake) || 0.5) - 0.5).toFixed(2)))}>−</button>
-                        <input value={stake} disabled={running} onChange={e => setStake(e.target.value)} />
-                        <button disabled={running} onClick={() => setStake(String(((parseFloat(stake) || 0.5) + 0.5).toFixed(2)))}>+</button>
+                        <button
+                            disabled={running}
+                            onClick={() => setStake(String(Math.max(0.35, (stake_num || 2) - 1).toFixed(2)))}
+                        >
+                            −
+                        </button>
+                        <input value={stake} disabled={running} inputMode='decimal' onChange={e => setStake(e.target.value)} />
+                        <button disabled={running} onClick={() => setStake(String(((stake_num || 0) + 1).toFixed(2)))}>
+                            +
+                        </button>
                     </div>
-
-                    <label className='nolimitz-ai__optimization'>
-                        <span>
-                            <b>MEASURED VALIDATION</b>
-                            <small>Real tick models + fresh forward evidence + live payout break-even. This safety gate cannot be bypassed in AI modes.</small>
-                        </span>
-                        <input type='checkbox' checked disabled />
-                        <i />
-                    </label>
-
-                    <div className='nolimitz-ai__field-label'>RISK LEVEL</div>
-                    <div className='nolimitz-ai__risk-tabs'>
-                        {['low', 'medium', 'high'].map(level => (
-                            <button
-                                key={level}
-                                className={risk === level ? 'active' : ''}
-                                disabled={running}
-                                onClick={() => {
-                                    setRisk(level);
-                                    if (level === 'low') setMartingale(false);
-                                }}
-                            >
-                                {level.toUpperCase()}
-                            </button>
-                        ))}
-                    </div>
+                    {low_stake && (
+                        <div className='nolimitz-ai__hint warn'>
+                            Below {MIN_FULL_PAYOUT_STAKE} {currency} Deriv rounds this payout down to about 6%. Use{' '}
+                            {MIN_FULL_PAYOUT_STAKE}+ to get the full ~9.6%.
+                        </div>
+                    )}
 
                     <div className='nolimitz-ai__targets'>
                         <label>
                             <span>PROFIT TARGET</span>
-                            <div><b>◎</b><input value={tp} disabled={running} onChange={e => setTp(e.target.value)} /><small>{currency}</small></div>
+                            <div>
+                                <b>◎</b>
+                                <input value={tp} disabled={running} inputMode='decimal' onChange={e => setTp(e.target.value)} />
+                                <small>{currency}</small>
+                            </div>
                         </label>
                         <label>
                             <span>MAXIMUM LOSS</span>
-                            <div><b>♢</b><input value={sl} disabled={running} onChange={e => setSl(e.target.value)} /><small>{currency}</small></div>
-                        </label>
-                    </div>
-
-                    <div className='nolimitz-ai__advanced'>
-                        <label>
-                            <span>Martingale</span>
-                            <input
-                                type='checkbox'
-                                checked={martingale}
-                                disabled={running || risk === 'low'}
-                                onChange={e => setMartingale(e.target.checked)}
-                            />
-                            <i />
-                        </label>
-                        {martingale && (
-                            <div className='nolimitz-ai__multiplier'>
-                                <span>Factor</span>
-                                <input value={mult} disabled={running} onChange={e => setMult(e.target.value)} />
-                                <small>Max {maxMartingaleSteps(risk)} recovery steps</small>
+                            <div>
+                                <b>♢</b>
+                                <input value={sl} disabled={running} inputMode='decimal' onChange={e => setSl(e.target.value)} />
+                                <small>{currency}</small>
                             </div>
-                        )}
-                        <div className='nolimitz-ai__duration'>
-                            <span>Contract duration</span>
-                            <select
-                                value={strategy === 'alpha' ? duration : 1}
-                                disabled={running || strategy !== 'alpha'}
-                                onChange={e => setDuration(clamp(parseInt(e.target.value || 1, 10), 1, 10))}
-                            >
-                                {[1,2,3,4,5,10].map(v => <option key={v} value={v}>{v} tick{v > 1 ? 's' : ''}</option>)}
-                            </select>
-                            <small>{strategy === 'alpha' ? 'Alpha test duration' : 'AI evidence horizon is fixed to 1 tick'}</small>
-                        </div>
+                        </label>
                     </div>
 
-                    <button
-                        className='nolimitz-ai__test'
-                        disabled={!is_logged_in || running || executionTesting}
-                        onClick={testDemoExecution}
-                    >
-                        {executionTesting ? 'TESTING DEMO EXECUTION…' : 'TEST 1 DEMO CONTRACT'}
-                    </button>
+                    <div className={`nolimitz-ai__odds ${odds === null ? '' : odds >= 0.6 ? 'good' : odds >= 0.4 ? 'mid' : 'bad'}`}>
+                        <div>
+                            <span>CHANCE TO HIT THE TARGET BEFORE THE MAXIMUM LOSS</span>
+                            <small>
+                                Each win +{money(stake_num * (payout - 1))} · each loss −{money(stake_num)} · about{' '}
+                                {Math.max(1, Math.round(tp_num / Math.max(0.01, stake_num * (payout - 1))))} wins needed
+                            </small>
+                        </div>
+                        <strong>{odds === null ? '—' : `${Math.round(odds * 100)}%`}</strong>
+                    </div>
+
+                    {notice && <div className='nolimitz-ai__hint warn'>{notice}</div>}
 
                     <button
                         className={`nolimitz-ai__run ${running ? 'stop' : ''}`}
-                        disabled={!is_logged_in || executionTesting}
+                        disabled={!is_logged_in || (!running && feedStatus !== 'LIVE')}
                         onClick={running ? stop : start}
                     >
-                        {running ? '■ STOP NOLIMITZ AI' : '⚡ RUN UNTIL TP / SL'}
+                        {running ? '■ STOP NOLIMITZ AI' : '⚡ RUN UNTIL TARGET / MAX LOSS'}
                     </button>
                 </section>
 
@@ -1305,49 +638,47 @@ const NolimitzAI = observer(() => {
                     </div>
                     <div>
                         <span>WINS / LOSSES</span>
-                        <strong>{stats.wins}/{stats.losses}</strong>
+                        <strong>
+                            {stats.wins}/{stats.losses}
+                        </strong>
                     </div>
                     <div>
-                        <span>HIT RATE</span>
-                        <strong>{stats.trades ? `${winRate.toFixed(1)}%` : '—'}</strong>
+                        <span>WIN RATE</span>
+                        <strong>{stats.trades ? pct(winRate) : '—'}</strong>
                     </div>
                     <div className={stats.pnl >= 0 ? 'positive' : 'negative'}>
                         <span>SESSION P/L</span>
-                        <strong>{stats.pnl >= 0 ? '+' : ''}{stats.pnl.toFixed(2)} {currency}</strong>
+                        <strong>
+                            {stats.pnl >= 0 ? '+' : ''}
+                            {money(stats.pnl)} {currency}
+                        </strong>
                     </div>
                 </section>
 
-                <div className='nolimitz-ai__signal'>
-                    <span>CURRENT ENGINE PICK</span>
-                    <strong>{contractSpec ? contractSpec.label : 'WAITING'}</strong>
-                    <small>
-                        {strategy === 'alpha'
-                            ? (is_demo ? 'Manual demo execution test — no AI probability claim.' : 'Alpha execution test is demo-only; real account remains analysis/shadow.')
-                            : engineAnalysis?.reason || 'Waiting for measured consensus.'}
-                    </small>
-                </div>
+                <section className='nolimitz-ai__curve'>
+                    <div className='nolimitz-ai__setups-title'>SESSION CURVE</div>
+                    <Sparkline points={stats.curve} />
+                    {stats.trades > 0 && (
+                        <div className='nolimitz-ai__curve-legend'>
+                            <span>Target +{money(tp_num)}</span>
+                            <span>Max loss −{money(sl_num)}</span>
+                        </div>
+                    )}
+                </section>
 
-                {strategy !== 'alpha' && bestSetups.length > 0 && (
-                    <section className='nolimitz-ai__setups'>
-                        <div className='nolimitz-ai__setups-title'>FRESH EXACT-SETUP CALIBRATION</div>
-                        {bestSetups.map(row => (
-                            <div key={row.fingerprint}>
-                                <span>{row.side.toUpperCase()} · {row.tier}-model</span>
-                                <strong>{row.correct}/{row.n}</strong>
-                                <small>LB {(row.lowerBound * 100).toFixed(2)}%</small>
-                            </div>
+                {logs.length > 0 && (
+                    <section className='nolimitz-ai__log'>
+                        {logs.map((line, index) => (
+                            <div key={index}>{line}</div>
                         ))}
                     </section>
                 )}
 
-                {logs.length > 0 && (
-                    <section className='nolimitz-ai__log'>
-                        {logs.map((line, index) => <div key={index}>{line}</div>)}
-                    </section>
-                )}
-
                 <div className='nolimitz-ai__disclaimer'>
-                    Nolimitz AI automates execution and risk rules. Digit/tick outcomes remain probabilistic; filters do not guarantee profit.
+                    Win rate and profit are different things. On real Deriv data these contracts won 90.0% of trades, but
+                    Deriv&apos;s payout needs about 91.2% to break even, so over many trades they lose roughly 1.3% of what
+                    is staked. Sessions end at your target or maximum loss; the chance figure above shows how often the
+                    target comes first.
                 </div>
             </div>
 
@@ -1357,23 +688,26 @@ const NolimitzAI = observer(() => {
                         <button onClick={() => setResult(null)}>×</button>
                         <small>
                             {result.type === 'tp'
-                                ? 'TAKE PROFIT REACHED'
+                                ? 'PROFIT TARGET REACHED'
                                 : result.type === 'sl'
-                                  ? 'STOP LOSS REACHED'
-                                  : result.reason}
+                                  ? 'MAXIMUM LOSS REACHED'
+                                  : 'SESSION STOPPED'}
                         </small>
-                        <h3>{result.pnl >= 0 ? '+' : ''}{result.pnl.toFixed(2)} {currency}</h3>
-                        {(result.type === 'tp' || result.type === 'sl') && (
-                            <p className='nolimitz-ai__target-message'>
-                                {result.type === 'tp'
-                                    ? 'Profit target reached. Nolimitz AI stopped the session automatically.'
-                                    : 'Stop loss reached. Nolimitz AI stopped the session automatically.'}
-                            </p>
-                        )}
+                        <h3>
+                            {result.pnl >= 0 ? '+' : ''}
+                            {money(result.pnl)} {currency}
+                        </h3>
+                        <p className='nolimitz-ai__target-message'>{result.reason}</p>
                         <div>
-                            <span>Trades <b>{result.trades}</b></span>
-                            <span>Wins <b>{result.wins}</b></span>
-                            <span>Losses <b>{result.losses}</b></span>
+                            <span>
+                                Trades <b>{result.trades}</b>
+                            </span>
+                            <span>
+                                Wins <b>{result.wins}</b>
+                            </span>
+                            <span>
+                                Losses <b>{result.losses}</b>
+                            </span>
                         </div>
                     </div>
                 </div>
