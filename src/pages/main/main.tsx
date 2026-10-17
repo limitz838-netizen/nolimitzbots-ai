@@ -44,7 +44,7 @@ import { Localize, localize } from '@deriv-com/translations';
 import { useDevice } from '@deriv-com/ui';
 import RunPanel from '../../components/run-panel';
 import BulkTrader from '../bulk-trader/bulk-trader';
-import Speedbot from '../speedbot/speedbot';
+import NolimitzAI from '../speedbot/speedbot';
 import AiSoftware from '../ai-software/ai-software';
 import FreeBots from '../dashboard/free-bots';
 import RiskDisclaimer from '../../components/risk-disclaimer/risk-disclaimer';
@@ -90,7 +90,7 @@ const AppWrapper = observer(() => {
     const { clear } = summary_card;
     const { DASHBOARD, BOT_BUILDER } = DBOT_TABS;
     const init_render = React.useRef(true);
-    const hash = ['dashboard', 'bot_builder', 'free_bots', 'bulk_trader', 'speedbot', 'ai_software', 'matches_pro', 'my_performance', 'chart', 'tutorial'];
+    const hash = ['dashboard', 'bot_builder', 'free_bots', 'bulk_trader', 'matches_pro', 'speedbot', 'ai_software', 'my_performance', 'chart', 'tutorial'];
     const { isDesktop } = useDevice();
     const location = useLocation();
     const navigate = useNavigate();
@@ -453,17 +453,32 @@ const AppWrapper = observer(() => {
                             <div
                                 label={
                                     <>
+                                        <LabelPairedGridCaptionBoldIcon
+                                            height='24px'
+                                            width='24px'
+                                            fill='var(--text-general)'
+                                        />
+                                        <Localize i18n_default_text='Matches Pro' />
+                                    </>
+                                }
+                                id='id-matches-pro'
+                            >
+                                <MatchesPro />
+                            </div>
+                            <div
+                                label={
+                                    <>
                                         <LabelPairedStopwatchCaptionBoldIcon
                                             height='24px'
                                             width='24px'
                                             fill='var(--text-general)'
                                         />
-                                        <Localize i18n_default_text='Speedbot' />
+                                        <Localize i18n_default_text='Nolimitz AI' />
                                     </>
                                 }
                                 id='id-speedbot'
                             >
-                                <Speedbot />
+                                <NolimitzAI />
                             </div>
                             <div
                                 label={
@@ -479,21 +494,6 @@ const AppWrapper = observer(() => {
                                 id='id-ai-software'
                             >
                                 <AiSoftware />
-                            </div>
-                            <div
-                                label={
-                                    <>
-                                        <LabelPairedGridCaptionBoldIcon
-                                            height='24px'
-                                            width='24px'
-                                            fill='var(--text-general)'
-                                        />
-                                        <Localize i18n_default_text='Matches Pro' />
-                                    </>
-                                }
-                                id='id-matches-pro'
-                            >
-                                <MatchesPro />
                             </div>
                             <div
                                 label={

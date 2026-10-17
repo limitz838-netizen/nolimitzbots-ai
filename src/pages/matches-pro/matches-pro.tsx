@@ -1,989 +1,1028 @@
-// @ts-nocheck -- Matches Pro (Phase 3: demo-only DIGITMATCH execution).
+// @ts-nocheck — Matches Pro v3: scan -> lock -> fire (DIGITMATCH only).
 //
-// Trading is off by default. Two hard locks sit in risk-guard.evaluate(), not
-// in this file's UI: a real login id is refused outright, and a market cannot
-// auto-trade until its backtest holds MIN_EVIDENCE graded predictions.
+// Flow: tap SCAN -> 13 volatility markets stream live -> every sweep each market's
+// strongest digit is scored (matches-scan-engine) -> the leader must clear the bar
+// and hold it on the next sweep after fresh ticks -> one MATCH contract is bought
+// on each of the market's top-K digits ("cover"), all in parallel on one tick ->
+// settlement -> result sheet.
+//
+// Cover mode, measured on 130k real ticks (495 entries): covering 1/2/3/4/5 digits
+// hit 8.7/21/30/39/50% of entries and cut the longest losing streak from 62 to
+// 23/17/11/11. Average loss stays ~10% of risk either way (Deriv's margin).
+//
+// Demo and real accounts. Real accounts must confirm a real-money notice once per
+// login before the first entry; session stop-loss / take-profit always apply.
 import React from 'react';
 import { api_base } from '@/external/bot-skeleton';
 import { useApiBase } from '@/hooks/useApiBase';
 import { useStore } from '@/hooks/useStore';
 import { isDemoAccount } from '@/utils/account-helpers';
-import { subscribeTicks, TICK_STATUS, getDiagnostics } from '@/components/shared/nlb/tick-stream';
-import { predict, Z_CRITICAL } from '@/components/shared/nlb/matches-engine';
-import { record, read, reset, summarise } from '@/components/shared/nlb/backtest-store';
-import {
-    read as readAnalyse,
-    record as recordAnalyse,
-    reset as resetAnalyse,
-    summarise as summariseAnalyse,
-} from '@/components/shared/nlb/analyse-store';
+import { isProduction, WS_SERVERS } from '@/components/shared/utils/config/config';
 import { trackContracts, describeError } from '@/components/shared/nlb/settlement';
-import { startProposals } from '@/components/shared/nlb/proposal-stream';
+import { playLoss, playWin, unlockAudio } from '@/components/shared/nlb/trade-sounds';
 import {
-    DEFAULT_LIMITS,
-    MIN_EVIDENCE,
-    QUALITY_FLOORS,
-    evaluate,
-    loadDay,
-    loadLimits,
-    recordTrade,
-    resetDay,
-    saveLimits,
-} from '@/components/shared/nlb/risk-guard';
+    bestMatch,
+    lastDigit,
+    topDigits,
+    CONFIRM_TICKS,
+    EDGE_BAR,
+    HISTORY,
+    MIN_TICKS,
+    NULL_P,
+} from '@/components/shared/nlb/matches-scan-engine';
 import PageBoundary from '@/components/shared/nlb/page-boundary';
 import './matches-pro.scss';
 
-const DEFAULT_SYMBOLS = [
-    { code: 'R_100', label: 'Volatility 100 Index' },
-    { code: 'R_75', label: 'Volatility 75 Index' },
-    { code: 'R_50', label: 'Volatility 50 Index' },
-    { code: 'R_25', label: 'Volatility 25 Index' },
-    { code: 'R_10', label: 'Volatility 10 Index' },
-    { code: '1HZ100V', label: 'Volatility 100 (1s) Index' },
-    { code: '1HZ75V', label: 'Volatility 75 (1s) Index' },
-    { code: '1HZ50V', label: 'Volatility 50 (1s) Index' },
-    { code: '1HZ25V', label: 'Volatility 25 (1s) Index' },
-    { code: '1HZ10V', label: 'Volatility 10 (1s) Index' },
+const MARKETS = [
+    { code: '1HZ10V', name: 'Vol 10 (1s)' },
+    { code: '1HZ15V', name: 'Vol 15 (1s)' },
+    { code: '1HZ25V', name: 'Vol 25 (1s)' },
+    { code: '1HZ30V', name: 'Vol 30 (1s)' },
+    { code: '1HZ50V', name: 'Vol 50 (1s)' },
+    { code: '1HZ75V', name: 'Vol 75 (1s)' },
+    { code: '1HZ90V', name: 'Vol 90 (1s)' },
+    { code: '1HZ100V', name: 'Vol 100 (1s)' },
+    { code: 'R_10', name: 'Vol 10' },
+    { code: 'R_25', name: 'Vol 25' },
+    { code: 'R_50', name: 'Vol 50' },
+    { code: 'R_75', name: 'Vol 75' },
+    { code: 'R_100', name: 'Vol 100' },
 ];
-
-const WINDOW_CHOICES = [50, 100, 250, 500, 1000];
-const HISTORY = 1000;
-
-const STATUS_TEXT = {
-    [TICK_STATUS.LIVE]: 'LIVE',
-    [TICK_STATUS.CONNECTING]: 'CONNECTING',
-    [TICK_STATUS.RECONNECTING]: 'RECONNECTING',
-    [TICK_STATUS.DISCONNECTED]: 'DISCONNECTED',
+const FALLBACK_DECIMALS = {
+    R_10: 3, R_25: 3, R_50: 4, R_75: 4, R_100: 2,
+    '1HZ10V': 2, '1HZ15V': 3, '1HZ25V': 2, '1HZ30V': 3, '1HZ50V': 2, '1HZ75V': 2, '1HZ90V': 3, '1HZ100V': 2,
 };
 
-const WINDOW_SECONDS = [5, 10, 20, 30];
+const SWEEP_MS = 2500;
+const MAX_COVER = 8;
+const AUTO_GAP_MS = 1500;
+const DEFAULT_PAYOUT = 8.93; // payout per 1 staked; replaced by a live quote
+const SETTINGS_KEY = 'nlb_matches_pro_v3';
+const STEPS = ['Scan', 'Confirm', 'Fire', 'Result'];
 
-const MAIN_FIELDS = [
-    { key: 'stake', label: 'Stake', step: 0.05, min: 0.35 },
-    { key: 'daily_loss_limit', label: 'Stop after losing', step: 0.5, min: 0.5 },
-];
-
-const ADVANCED_FIELDS = [
-    { key: 'max_trades', label: 'Max trades / day', step: 1, min: 1 },
-    { key: 'max_consecutive_losses', label: 'Max losses in a row', step: 1, min: 1 },
-    { key: 'daily_profit_target', label: 'Daily profit target', step: 0.5, min: 0.5 },
-    { key: 'cooldown_ticks', label: 'Cooldown (ticks)', step: 1, min: 0 },
-];
-
-// Roughly how often each floor fired across 200k simulated ticks. Shown so the
-// choice is made with its trade frequency visible.
-const FLOOR_RATE = {
-    STRONG: 'fires on about 0.4% of ticks - often nothing for hours',
-    MEDIUM: 'fires on about 0.5% of ticks - a few times an hour at most',
-    WEAK: 'fires on about 8% of ticks - roughly every 20 seconds',
-    ANY: 'every tick qualifies - the engine is bypassed entirely',
+const loadSettings = () => {
+    try {
+        const s = JSON.parse(window.localStorage.getItem(SETTINGS_KEY) || '{}');
+        return {
+            stake: Number(s.stake) >= 0.35 ? Number(s.stake) : 1,
+            cover: Math.min(MAX_COVER, Math.max(1, parseInt(s.cover, 10) || 3)),
+            stop_loss: Number(s.stop_loss) > 0 ? Number(s.stop_loss) : 20,
+            take_profit: Number(s.take_profit) > 0 ? Number(s.take_profit) : 10,
+        };
+    } catch {
+        return { stake: 1, cover: 3, stop_loss: 20, take_profit: 10 };
+    }
+};
+const saveSettings = s => {
+    try {
+        window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+    } catch {
+        /* per-viewer convenience only */
+    }
 };
 
-const pct = v => `${(v * 100).toFixed(2)}%`;
-const clockOf = ts => new Date(ts).toLocaleTimeString('en-GB');
+// Chance a session reaches the profit target before the stop-loss, by Monte Carlo
+// on fair odds (each covered digit = 10%, which real Deriv ticks matched).
+const sessionOdds = (cover, stake, payout, tp, sl) => {
+    if (!(stake > 0) || !(tp > 0) || !(sl > 0)) return null;
+    const p = cover / 10;
+    const win = stake * (payout - cover);
+    const loss = stake * cover;
+    let seed = 1234567;
+    const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    let reached = 0;
+    const RUNS = 2000;
+    for (let r = 0; r < RUNS; r++) {
+        let pnl = 0;
+        for (let n = 0; n < 2000 && pnl < tp && pnl > -sl; n++) pnl += rnd() < p ? win : -loss;
+        if (pnl >= tp) reached += 1;
+    }
+    return reached / RUNS;
+};
+
+const pct = v => `${(v * 100).toFixed(1)}%`;
+const signedPct = v => `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%`;
+const money = v => (Math.round(v * 100) / 100).toFixed(2);
+const sleep = ms => new Promise(r => window.setTimeout(r, ms));
+const withTimeout = (p, ms, label) =>
+    Promise.race([
+        Promise.resolve(p),
+        new Promise((_, rej) => window.setTimeout(() => rej(new Error(`${label} timed out`)), ms)),
+    ]);
 
 const MatchesPro = () => {
     const { isAuthorized, accountList, activeLoginid } = useApiBase();
-    const { run_panel } = useStore();
+    const { run_panel, transactions, summary_card } = useStore();
 
-    const [symbol, setSymbol] = React.useState('R_100');
-    const [symbols, setSymbols] = React.useState(DEFAULT_SYMBOLS);
-    const [status, setStatus] = React.useState(TICK_STATUS.CONNECTING);
-    const [quote, setQuote] = React.useState(null);
-    const [decimals, setDecimals] = React.useState(null);
-    const [digits, setDigits] = React.useState([]);
-    const [window_size, setWindowSize] = React.useState(100);
-    const [payout, setPayout] = React.useState(9.3);
-    const [error, setError] = React.useState('');
-    const [diag, setDiag] = React.useState(null);
-    const [prediction, setPrediction] = React.useState(null);
-    const [stats, setStats] = React.useState(null);
-    const [feed, setFeed] = React.useState([]);
-    const [show_why, setShowWhy] = React.useState(false);
-    const [show_advanced, setShowAdvanced] = React.useState(false);
-    const [live_pricing, setLivePricing] = React.useState(false);
-
-    const [analysis, setAnalysis] = React.useState(null);
-    const [remaining, setRemaining] = React.useState(0);
-    const [window_seconds, setWindowSeconds] = React.useState(10);
-    const [analyse_stats, setAnalyseStats] = React.useState(null);
-
-    const [auto, setAuto] = React.useState(false);
-    const [limits, setLimits] = React.useState(DEFAULT_LIMITS);
-    const [day, setDay] = React.useState(() => loadDay('R_100'));
-    const [gate, setGate] = React.useState({ allowed: false, reason: 'Auto trade is off' });
-
-    const digits_ref = React.useRef([]);
-    const pending_ref = React.useRef(null);
-    const payout_ref = React.useRef(payout);
-    const auto_ref = React.useRef(auto);
-    const limits_ref = React.useRef(limits);
-    const symbol_ref = React.useRef(symbol);
-    const open_ref = React.useRef(new Set());
-    const cooldown_ref = React.useRef(0);
-    const firing_ref = React.useRef(false);
-    const trackers_ref = React.useRef([]);
-    const analysis_ref = React.useRef(null);
-    const proposals_ref = React.useRef(null);
-
-    payout_ref.current = payout;
-    auto_ref.current = auto;
-    limits_ref.current = limits;
-    symbol_ref.current = symbol;
-
-    const currency = React.useMemo(() => {
-        const acc = (accountList || []).find(a => a.loginid === activeLoginid);
-        return acc?.currency || 'USD';
-    }, [accountList, activeLoginid]);
-
+    const account = React.useMemo(
+        () => (accountList || []).find(a => a.loginid === activeLoginid),
+        [accountList, activeLoginid]
+    );
+    const currency = account?.currency || 'USD';
     const is_demo = isDemoAccount(activeLoginid || '');
+    const [real_ok, setRealOk] = React.useState(false);
+    React.useEffect(() => setRealOk(false), [activeLoginid]);
+    const can_trade = Boolean(isAuthorized && activeLoginid && (is_demo || real_ok));
+    const needs_real_ack = Boolean(isAuthorized && activeLoginid && !is_demo && !real_ok);
 
-    React.useEffect(() => {
-        setLimits(loadLimits());
-    }, []);
+    const [settings, setSettings] = React.useState(loadSettings);
+    const [phase, setPhase] = React.useState('idle'); // idle | scanning | confirming | firing | settling | done
+    const [rows, setRows] = React.useState({});
+    const [leader, setLeader] = React.useState(null);
+    const [armed, setArmed] = React.useState(null);
+    const [sweep, setSweep] = React.useState(0);
+    const [feed, setFeed] = React.useState([]);
+    const [payout, setPayout] = React.useState(DEFAULT_PAYOUT);
+    const [batch, setBatch] = React.useState(null);
+    const [result, setResult] = React.useState(null);
+    const [session, setSession] = React.useState({ batches: 0, hits: 0, pnl: 0 });
+    const [notice, setNotice] = React.useState('');
+    const [auto, setAuto] = React.useState(false);
+    const [lastEntry, setLastEntry] = React.useState(null);
 
-    const refreshStats = React.useCallback(sym => {
-        const state = read(sym);
-        setStats({ state, summary: summarise(state) });
-        return state;
-    }, []);
+    const ws_ref = React.useRef(null);
+    const timer_ref = React.useRef(null);
+    const reconnect_ref = React.useRef(null);
+    const active_ref = React.useRef(false);
+    const digits_ref = React.useRef({});
+    const ticks_ref = React.useRef({});
+    const decimals_ref = React.useRef({ ...FALLBACK_DECIMALS });
+    const armed_ref = React.useRef(null);
+    const sweep_ref = React.useRef(0);
+    const track_ref = React.useRef(null);
+    const mounted_ref = React.useRef(true);
+    const cfg_ref = React.useRef({});
+    cfg_ref.current = { settings, currency, can_trade, payout, needs_real_ack };
+    const session_ref = React.useRef(session);
+    session_ref.current = session;
+    const auto_ref = React.useRef(auto);
+    auto_ref.current = auto;
+    const auto_timer_ref = React.useRef(null);
 
-    const refreshDay = React.useCallback(sym => {
-        const d = loadDay(sym);
-        setDay(d);
-        return d;
-    }, []);
+    const say = line => setFeed(prev => [{ t: Date.now() + Math.random(), line }, ...prev].slice(0, 8));
 
-    // ------------------------------------------------------------- execution
-    const fireTrade = React.useCallback(
-        async (sym, digit) => {
-            if (firing_ref.current) return;
-            firing_ref.current = true;
-            try {
-                const stake = Number(limits_ref.current.stake);
-
-                // Fast path: a subscribed proposal for this digit is already
-                // priced, so the buy goes out immediately.
-                let live = null;
-                try {
-                    live = proposals_ref.current?.get?.(digit) || null;
-                } catch {
-                    live = null;
-                }
-
-                if (!live) {
-                    const proposal = await api_base.api.send({
-                        proposal: 1,
-                        amount: stake,
-                        basis: 'stake',
-                        contract_type: 'DIGITMATCH',
-                        currency,
-                        duration: 1,
-                        duration_unit: 't',
-                        underlying_symbol: sym,
-                        barrier: String(digit),
-                    });
-                    if (!proposal?.proposal?.id) throw new Error('No proposal returned');
-                    live = {
-                        id: proposal.proposal.id,
-                        ask: Number(proposal.proposal.ask_price),
-                        payout: Number(proposal.proposal.payout),
-                    };
-                }
-
-                const id = live.id;
-                const ask = live.ask;
-                const win_payout = live.payout;
-                if (ask > 0 && win_payout > 0) setPayout(Number((win_payout / ask).toFixed(3)));
-
-                const bought = await api_base.api.send({ buy: id, price: ask });
-                const contract_id = bought?.buy?.contract_id;
-                if (!contract_id) throw new Error('Buy did not return a contract');
-
-                open_ref.current.add(contract_id);
-                cooldown_ref.current = Number(limits_ref.current.cooldown_ticks) || 0;
-
-                const tracker = trackContracts([contract_id], {
-                    onDone: ({ profits }) => {
-                        const profit = Number(Object.values(profits)[0] ?? 0);
-                        open_ref.current.delete(contract_id);
-                        recordTrade(sym, {
-                            t: Date.now(),
-                            contract_id,
-                            symbol: sym,
-                            predicted: digit,
-                            stake,
-                            payout: win_payout,
-                            profit,
-                        });
-                        refreshDay(sym);
-                    },
-                });
-                trackers_ref.current.push(tracker);
-            } catch (e) {
-                setError(describeError(e));
-                cooldown_ref.current = Math.max(cooldown_ref.current, 5);
-            } finally {
-                firing_ref.current = false;
-            }
-        },
-        [currency, refreshDay]
-    );
-
-    // ------------------------------------------------------------- per tick
-    const step = React.useCallback(
-        (sym, actual_digit, ts) => {
-            if (cooldown_ref.current > 0) cooldown_ref.current -= 1;
-
-            const pending = pending_ref.current;
-            if (pending && pending.predicted !== null && pending.symbol === sym) {
-                record(sym, {
-                    t: ts,
-                    predicted: pending.predicted,
-                    actual: actual_digit,
-                    quality: pending.quality,
-                    score: pending.score,
-                });
-                setFeed(prev =>
-                    [
-                        {
-                            t: ts,
-                            predicted: pending.predicted,
-                            actual: actual_digit,
-                            hit: pending.predicted === actual_digit,
-                            quality: pending.quality,
-                        },
-                        ...prev,
-                    ].slice(0, 12)
-                );
-            }
-
-            // A live analysis window scores itself against the ticks that
-            // arrive inside it.
-            const open = analysis_ref.current;
-            if (open && !open.done && open.symbol === sym && Date.now() < open.ends) {
-                open.ticks.push(actual_digit);
-                if (actual_digit === open.digit) open.hits += 1;
-                setAnalysis({ ...open });
-            }
-
-            const next = predict(digits_ref.current, { payout: payout_ref.current });
-            setPrediction(next);
-            pending_ref.current = {
-                symbol: sym,
-                predicted: next.predictedDigit,
-                quality: next.signalQuality,
-                score: next.score,
-            };
-
-            const state = refreshStats(sym);
-            const current_day = loadDay(sym);
-            setDay(current_day);
-
-            const decision = evaluate({
-                limits: limits_ref.current,
-                day: current_day,
-                quality: next.signalQuality,
-                is_authorized: isAuthorized,
-                loginid: activeLoginid,
-                open_count: open_ref.current.size,
-                cooldown_remaining: cooldown_ref.current,
-                evidence: state.total,
-                auto_on: auto_ref.current,
-            });
-            setGate(decision);
-
-            if (decision.allowed && next.predictedDigit !== null) {
-                fireTrade(sym, next.predictedDigit);
-            }
-        },
-        [refreshStats, isAuthorized, activeLoginid, fireTrade]
-    );
-
-    React.useEffect(() => {
-        digits_ref.current = [];
-        pending_ref.current = null;
-        open_ref.current = new Set();
-        cooldown_ref.current = 0;
-        setDigits([]);
-        setQuote(null);
-        setError('');
-        setFeed([]);
-        setPrediction(null);
-        refreshStats(symbol);
-        refreshDay(symbol);
-
-        const unsubscribe = subscribeTicks({
-            symbol,
-            count: HISTORY,
-            onStatus: setStatus,
-            onError: message => setError(message),
-            onSymbols: list => {
-                if (!list?.length) return;
-                const known = Object.fromEntries(DEFAULT_SYMBOLS.map(s => [s.code, s.label]));
-                setSymbols(
-                    list.map(s => ({
-                        code: s.code,
-                        label: s.label && s.label !== s.code ? s.label : known[s.code] || s.code,
-                    }))
-                );
-            },
-            onHistory: ({ digits: d, quote: q, decimals: dec }) => {
-                digits_ref.current = [...d];
-                setDigits(d);
-                setQuote(q);
-                setDecimals(dec);
-                const seeded = predict(digits_ref.current, { payout: payout_ref.current });
-                setPrediction(seeded);
-                pending_ref.current = {
-                    symbol,
-                    predicted: seeded.predictedDigit,
-                    quality: seeded.signalQuality,
-                    score: seeded.score,
-                };
-            },
-            onTick: ({ digit, quote: q, decimals: dec }) => {
-                setDecimals(dec);
-                setQuote(q);
-                digits_ref.current = [...digits_ref.current, digit].slice(-HISTORY);
-                setDigits(digits_ref.current);
-                step(symbol, digit, Date.now());
-            },
+    const updateSettings = patch => {
+        setSettings(prev => {
+            const next = { ...prev, ...patch };
+            saveSettings(next);
+            return next;
         });
+    };
 
-        return () => {
-            unsubscribe();
-            trackers_ref.current.forEach(t => {
-                try {
-                    t.cancel();
-                } catch {
-                    /* noop */
-                }
-            });
-            trackers_ref.current = [];
-        };
-    }, [symbol, step, refreshStats, refreshDay]);
-
-    // Switching market stops auto trading. Limits are per day, per market.
-    React.useEffect(() => {
-        setAuto(false);
-    }, [symbol]);
-
-    React.useEffect(() => {
-        const id = setInterval(() => setDiag(getDiagnostics()), 1000);
-        return () => clearInterval(id);
-    }, []);
-
-    // Pre-priced proposals for all ten digits. Gives instant buys and a real
-    // payout multiplier instead of a typed-in one.
-    React.useEffect(() => {
-        proposals_ref.current?.stop?.();
-        proposals_ref.current = null;
-        setLivePricing(false);
-
-        if (!isAuthorized || !activeLoginid) return undefined;
-        const stake = Number(limits.stake);
-        if (!(stake > 0)) return undefined;
-
-        let handle = null;
-        try {
-            handle = startProposals({
-                symbol,
-                currency,
-                amount: stake,
-                onUpdate: ({ multiplier }) => {
-                    if (!multiplier || !Number.isFinite(multiplier)) return;
-                    setLivePricing(true);
-                    setPayout(prev => (Math.abs(prev - multiplier) > 0.005 ? Number(multiplier.toFixed(3)) : prev));
-                },
-                onError: e => setError(describeError(e)),
-            });
-            proposals_ref.current = handle;
-        } catch (e) {
-            // Live pricing is an optimisation. If it cannot start, trading
-            // still works through the ordinary proposal-then-buy path.
-            setError(describeError(e));
+    // ------------------------------------------------------------ socket
+    const stopSweeps = () => {
+        if (timer_ref.current) {
+            window.clearTimeout(timer_ref.current);
+            timer_ref.current = null;
         }
-
-        return () => {
+    };
+    const closeSocket = () => {
+        if (reconnect_ref.current) {
+            window.clearTimeout(reconnect_ref.current);
+            reconnect_ref.current = null;
+        }
+        const ws = ws_ref.current;
+        ws_ref.current = null;
+        if (ws) {
+            ws.onclose = null;
+            ws.onmessage = null;
+            ws.onerror = null;
             try {
-                handle?.stop();
+                ws.close();
             } catch {
                 /* noop */
             }
-            proposals_ref.current = null;
-            setLivePricing(false);
-        };
-    }, [symbol, currency, limits.stake, isAuthorized, activeLoginid]);
-
-    const refreshAnalyseStats = React.useCallback(sym => {
-        const state = readAnalyse(sym);
-        setAnalyseStats({ state, summary: summariseAnalyse(state) });
-    }, []);
-
-    React.useEffect(() => {
-        refreshAnalyseStats(symbol);
-        analysis_ref.current = null;
-        setAnalysis(null);
-        setRemaining(0);
-    }, [symbol, refreshAnalyseStats]);
-
-    const startAnalysis = () => {
-        const next = predict(digits_ref.current, { payout: payout_ref.current });
-        if (next.predictedDigit === null) return;
-        const open = {
-            symbol,
-            digit: next.predictedDigit,
-            quality: next.signalQuality,
-            probability: next.probabilityEstimate,
-            breakeven: next.breakeven,
-            score: next.score,
-            started: Date.now(),
-            ends: Date.now() + window_seconds * 1000,
-            ticks: [],
-            hits: 0,
-            done: false,
-        };
-        analysis_ref.current = open;
-        setAnalysis({ ...open });
-        setRemaining(window_seconds);
+        }
+    };
+    const stopAll = () => {
+        active_ref.current = false;
+        stopSweeps();
+        closeSocket();
     };
 
-    // Countdown, and settle the window once it expires.
     React.useEffect(() => {
-        if (!analysis || analysis.done) return undefined;
-        const id = setInterval(() => {
-            const open = analysis_ref.current;
-            if (!open || open.done) return;
-            const left = Math.max(0, Math.ceil((open.ends - Date.now()) / 1000));
-            setRemaining(left);
-            if (left === 0) {
-                open.done = true;
-                recordAnalyse(open.symbol, {
-                    t: open.started,
-                    digit: open.digit,
-                    ticks: open.ticks.length,
-                    hits: open.hits,
-                });
-                setAnalysis({ ...open });
-                refreshAnalyseStats(open.symbol);
-            }
-        }, 250);
-        return () => clearInterval(id);
-    }, [analysis, refreshAnalyseStats]);
-
-    // Arming auto trade opens the run panel drawer, so Summary, Transactions
-    // and Journal are on screen as contracts settle. Disarming closes it.
-    React.useEffect(() => {
-        try {
-            run_panel?.setIsRunning?.(auto);
-        } catch {
-            /* run panel unavailable - trading still works */
-        }
+        mounted_ref.current = true;
         return () => {
-            if (auto) {
+            mounted_ref.current = false;
+            if (auto_timer_ref.current) window.clearTimeout(auto_timer_ref.current);
+            stopAll();
+            track_ref.current?.cancel?.();
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // Live payout quote for the current stake (public socket, no login needed).
+    React.useEffect(() => {
+        const stake = Number(settings.stake);
+        if (!(stake >= 0.35)) return undefined;
+        let ws;
+        let done = false;
+        const t = window.setTimeout(() => {
+            try {
+                ws = new WebSocket(isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING);
+                ws.onopen = () =>
+                    ws.send(
+                        JSON.stringify({
+                            proposal: 1,
+                            amount: stake,
+                            basis: 'stake',
+                            contract_type: 'DIGITMATCH',
+                            currency,
+                            duration: 1,
+                            duration_unit: 't',
+                            underlying_symbol: 'R_100',
+                            barrier: '5',
+                        })
+                    );
+                ws.onmessage = m => {
+                    try {
+                        const d = JSON.parse(m.data);
+                        const ask = Number(d?.proposal?.ask_price);
+                        const win = Number(d?.proposal?.payout);
+                        if (!done && ask > 0 && win > 0 && mounted_ref.current) setPayout(win / ask);
+                    } catch {
+                        /* noop */
+                    }
+                    done = true;
+                    try {
+                        ws.close();
+                    } catch {
+                        /* noop */
+                    }
+                };
+            } catch {
+                /* keep the default estimate */
+            }
+        }, 400);
+        return () => {
+            window.clearTimeout(t);
+            try {
+                ws?.close();
+            } catch {
+                /* noop */
+            }
+        };
+    }, [settings.stake, currency]);
+
+    // ------------------------------------------------------------ execution
+    const fire = async (code, digits, edge) => {
+        const { settings: s, currency: cur, can_trade: allowed } = cfg_ref.current;
+        const n = digits.length;
+        const digit = digits[0];
+        const amount = Math.max(0.35, Number(s.stake) || 0.35);
+        const list = digits.join(', ');
+
+        if (!allowed) {
+            setPhase('done');
+            setNotice('Entry found. Sign in with Deriv (and confirm the real-money notice on a real account) to open contracts.');
+            say(`Entry found on ${code}: digits ${list}. Not traded (not signed in or not confirmed).`);
+            return;
+        }
+
+        setPhase('firing');
+        setBatch({ code, digit, digits, opened: 0, settled: 0, requested: n });
+        say(`Opening MATCH on ${code} for digit${n > 1 ? 's' : ''} ${list}…`);
+        unlockAudio();
+        try {
+            run_panel.run_id = `matches-pro-${Date.now()}`;
+            run_panel?.setIsRunning?.(true);
+            run_panel?.toggleDrawer?.(true);
+        } catch {
+            /* run panel is a mirror only */
+        }
+
+        const paramsFor = d => ({
+            amount,
+            basis: 'stake',
+            contract_type: 'DIGITMATCH',
+            currency: cur,
+            duration: 1,
+            duration_unit: 't',
+            underlying_symbol: code,
+            barrier: String(d),
+        });
+        const HARD = /Insufficient balance|Market closed|Session expired/;
+        const openOne = async slot => {
+            const parameters = paramsFor(digits[slot - 1]);
+            try {
+                const r = await withTimeout(
+                    api_base.api.send({
+                        buy: '1',
+                        price: amount,
+                        parameters,
+                        passthrough: { nolimitz_source: 'matches-pro', slot },
+                    }),
+                    5000,
+                    `Buy #${slot}`
+                );
+                if (r?.error) throw r;
+                if (r?.buy?.contract_id) return r.buy.contract_id;
+            } catch (e) {
+                if (HARD.test(describeError(e))) {
+                    say(`Contract ${slot} not opened: ${describeError(e)}`);
+                    return null;
+                }
+            }
+            for (let attempt = 1; attempt <= 3; attempt += 1) {
+                try {
+                    const p = await withTimeout(api_base.api.send({ proposal: 1, ...parameters }), 5000, 'Proposal');
+                    if (p?.error) throw new Error(p.error.message);
+                    const b = await withTimeout(
+                        api_base.api.send({
+                            buy: p.proposal.id,
+                            price: Number(p.proposal.ask_price ?? amount),
+                            passthrough: { nolimitz_source: 'matches-pro', slot },
+                        }),
+                        5000,
+                        'Buy'
+                    );
+                    if (b?.error) throw new Error(b.error.message);
+                    if (b?.buy?.contract_id) return b.buy.contract_id;
+                } catch (e) {
+                    if (attempt === 3 || HARD.test(describeError(e))) {
+                        say(`Contract ${slot} not opened: ${describeError(e)}`);
+                        return null;
+                    }
+                    await sleep(120 + slot * 40);
+                }
+            }
+            return null;
+        };
+
+        const t0 = performance.now();
+        const ids = (await Promise.all(Array.from({ length: n }, (_, i) => openOne(i + 1)))).filter(Boolean);
+        const ms = Math.round(performance.now() - t0);
+        if (!mounted_ref.current) return;
+
+        if (!ids.length) {
+            try {
+                run_panel?.setIsRunning?.(false);
+            } catch {
+                /* noop */
+            }
+            setPhase('done');
+            setNotice('No contracts were accepted. Check your balance and try again.');
+            return;
+        }
+
+        say(`${ids.length}/${n} contract${n > 1 ? 's' : ''} opened together in ${ms}ms.`);
+        setBatch(b => ({ ...b, opened: ids.length }));
+        setPhase('settling');
+
+        let exitDigit = null;
+        track_ref.current = trackContracts(ids, {
+            timeoutMs: 60000,
+            onUpdate: ({ settled }) => mounted_ref.current && setBatch(b => (b ? { ...b, settled } : b)),
+            onContract: c => {
+                try {
+                    transactions?.onBotContractEvent?.(c);
+                    summary_card?.onBotContractEvent?.(c);
+                    run_panel?.onBotContractEvent?.(c);
+                } catch {
+                    /* mirror only */
+                }
+                if (!c?.is_sold) return;
+                // A winning MATCH contract's barrier IS the landed digit.
+                if (Number(c.profit) > 0 && c.barrier !== undefined && c.barrier !== null) {
+                    exitDigit = Number(c.barrier);
+                    return;
+                }
+                if (exitDigit !== null) return;
+                const shown =
+                    c.exit_tick_display_value ?? c.exit_spot_display_value ?? c.exit_tick ?? c.exit_spot ?? c.current_spot;
+                if (shown === undefined || shown === null) return;
+                const dec = decimals_ref.current[code] ?? 2;
+                const str = typeof shown === 'number' ? shown.toFixed(dec) : String(shown);
+                const ch = str.slice(-1);
+                if (/\d/.test(ch)) exitDigit = Number(ch);
+            },
+            onDone: ({ total, wins, count }) => {
                 try {
                     run_panel?.setIsRunning?.(false);
                 } catch {
                     /* noop */
                 }
-            }
-        };
-    }, [auto, run_panel]);
-
-    const sample = React.useMemo(() => digits.slice(-window_size), [digits, window_size]);
-
-    const distribution = React.useMemo(() => {
-        const counts = new Array(10).fill(0);
-        sample.forEach(d => {
-            counts[d] += 1;
+                track_ref.current = null;
+                if (!mounted_ref.current) return;
+                const hit = total > 0;
+                if (hit) playWin();
+                else playLoss();
+                setSession(prev => ({
+                    batches: prev.batches + 1,
+                    hits: prev.hits + (hit ? 1 : 0),
+                    pnl: Number((prev.pnl + total).toFixed(2)),
+                }));
+                const entry = { code, digit, digits, edge, total, wins, count, exitDigit, currency: cur };
+                const lim = cfg_ref.current.settings;
+                const nextPnl = session_ref.current.pnl + total;
+                const willStop =
+                    nextPnl <= -Math.abs(Number(lim.stop_loss) || Infinity) ||
+                    nextPnl >= Math.abs(Number(lim.take_profit) || Infinity);
+                setLastEntry(entry);
+                if (auto_ref.current && !willStop) {
+                    // Auto mode: no sheet, short pause, then hunt the next entry.
+                    auto_timer_ref.current = window.setTimeout(() => {
+                        auto_timer_ref.current = null;
+                        if (auto_ref.current && mounted_ref.current) startScan();
+                    }, AUTO_GAP_MS);
+                } else {
+                    if (willStop && auto_ref.current) {
+                        setAuto(false);
+                        auto_ref.current = false;
+                    }
+                    setResult(entry);
+                }
+                say(
+                    hit
+                        ? `HIT on ${code}: digit ${exitDigit ?? '?'} landed in ${list}. +${money(total)} ${cur}`
+                        : `Missed on ${code} (landed ${exitDigit ?? '?'}). ${money(total)} ${cur}`
+                );
+                setPhase('done');
+            },
         });
-        const total = sample.length || 1;
-        return counts.map((c, d) => ({ digit: d, count: c, p: (c / total) * 100 }));
-    }, [sample]);
-
-    const max_pct = Math.max(10, ...distribution.map(d => d.p));
-    const current_digit = digits.length ? digits[digits.length - 1] : null;
-    const status_text = STATUS_TEXT[status] || STATUS_TEXT[TICK_STATUS.DISCONNECTED];
-    const predicted = prediction?.predictedDigit;
-    const quality = prediction?.signalQuality || 'NO SIGNAL';
-    const evidence = stats?.summary?.n || 0;
-    const unlocked = evidence >= MIN_EVIDENCE;
-    const can_arm = isAuthorized && is_demo && unlocked;
-
-    const setLimit = (key, value) => {
-        const next = { ...limits_ref.current, [key]: key === 'min_quality' ? value : Number(value) };
-        setLimits(next);
-        saveLimits(next);
     };
 
-    const marketLabel = React.useMemo(
-        () => symbols.find(s => s.code === symbol)?.label || symbol,
-        [symbols, symbol]
-    );
+    // ------------------------------------------------------------ scanning
+    const runSweep = () => {
+        if (!active_ref.current) return;
+        sweep_ref.current += 1;
+        setSweep(sweep_ref.current);
 
-    // Same numbers as the panel above, said in a sentence.
-    const plainRead = React.useMemo(() => {
-        if (!prediction || prediction.predictedDigit === null) return '';
-        const lead = `Digit ${prediction.predictedDigit} is leading on ${marketLabel}`;
-        if (prediction.signalQuality === 'NO SIGNAL') {
-            return `${lead}, but the lead is within normal variation - nothing decisive.`;
+        const next = {};
+        let best = null;
+        MARKETS.forEach(m => {
+            const r = bestMatch(digits_ref.current[m.code]);
+            if (!r) return;
+            next[m.code] = r;
+            if (!best || r.edge > best.edge) best = { code: m.code, ...r };
+        });
+        setRows(next);
+        setLeader(best);
+
+        if (!best) {
+            timer_ref.current = window.setTimeout(runSweep, SWEEP_MS);
+            return;
         }
-        if (prediction.signalQuality === 'WEAK') {
-            return `${lead} and the lead is building, but it has not cleared the significance bar.`;
+
+        const a = armed_ref.current;
+        if (a) {
+            const fresh = (ticks_ref.current[a.code] || 0) - a.at;
+            const again = next[a.code];
+            if (fresh < CONFIRM_TICKS) {
+                timer_ref.current = window.setTimeout(runSweep, 800);
+                return;
+            }
+            if (again && again.digit === a.digit && again.edge >= EDGE_BAR) {
+                stopAll();
+                armed_ref.current = null;
+                setArmed({ ...a, confirmed: true });
+                const cover = topDigits(again.scores, cfg_ref.current.settings.cover);
+                setArmed({ ...a, confirmed: true, digits: cover });
+                say(`Locked: ${a.code} digit ${a.digit} held the bar (${signedPct(again.edge)}).`);
+                fire(a.code, cover, again.edge);
+                return;
+            }
+            say(`${a.code} digit ${a.digit} faded. Back to scanning.`);
+            armed_ref.current = null;
+            setArmed(null);
+            setPhase('scanning');
         }
-        if (prediction.probabilityEstimate <= prediction.breakeven) {
-            return `${lead} and the lead is statistically real, but at ${pct(prediction.probabilityEstimate)} it is still under the ${pct(prediction.breakeven)} this payout needs.`;
+
+        if (best.edge >= EDGE_BAR) {
+            armed_ref.current = { code: best.code, digit: best.digit, at: ticks_ref.current[best.code] || 0 };
+            setArmed({ ...armed_ref.current, confirmed: false });
+            setPhase('confirming');
+            say(`${best.code} digit ${best.digit} cleared the bar (${signedPct(best.edge)}). Confirming…`);
         }
-        return `${lead}, clears the significance bar, and at ${pct(prediction.probabilityEstimate)} sits above the ${pct(prediction.breakeven)} break-even.`;
-    }, [prediction, marketLabel]);
+        timer_ref.current = window.setTimeout(runSweep, SWEEP_MS);
+    };
+
+    const openSocket = () => {
+        const ws = new WebSocket(isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING);
+        ws_ref.current = ws;
+        ws.onopen = () => {
+            ws.send(JSON.stringify({ active_symbols: 'brief' }));
+            MARKETS.forEach(m =>
+                ws.send(JSON.stringify({ ticks_history: m.code, count: HISTORY, end: 'latest', style: 'ticks', subscribe: 1 }))
+            );
+        };
+        ws.onmessage = ev => {
+            if (!active_ref.current) return;
+            let d;
+            try {
+                d = JSON.parse(ev.data);
+            } catch {
+                return;
+            }
+            if (d.msg_type === 'active_symbols' && Array.isArray(d.active_symbols)) {
+                d.active_symbols.forEach(s => {
+                    const c = s.symbol || s.underlying_symbol;
+                    if (c && typeof s.pip_size === 'number') decimals_ref.current[c] = s.pip_size;
+                    else if (c && typeof s.pip === 'number') decimals_ref.current[c] = `${s.pip}`.split('.')[1]?.length ?? 0;
+                });
+                return;
+            }
+            if (d.msg_type === 'history' && d.echo_req?.ticks_history) {
+                const c = d.echo_req.ticks_history;
+                if (typeof d.pip_size === 'number') decimals_ref.current[c] = d.pip_size;
+                const dec = decimals_ref.current[c] ?? 2;
+                digits_ref.current[c] = (d.history?.prices || []).map(p => lastDigit(p, dec)).slice(-HISTORY);
+                return;
+            }
+            if (d.msg_type === 'tick' && d.tick?.symbol) {
+                const c = d.tick.symbol;
+                if (typeof d.tick.pip_size === 'number') decimals_ref.current[c] = d.tick.pip_size;
+                const dec = decimals_ref.current[c] ?? 2;
+                digits_ref.current[c] = [...(digits_ref.current[c] || []), lastDigit(d.tick.quote, dec)].slice(-HISTORY);
+                ticks_ref.current[c] = (ticks_ref.current[c] || 0) + 1;
+            }
+        };
+        ws.onclose = () => {
+            if (!active_ref.current || ws_ref.current !== ws) return;
+            say('Market stream dropped. Reconnecting…');
+            reconnect_ref.current = window.setTimeout(() => {
+                if (active_ref.current) openSocket();
+            }, 1000);
+        };
+        ws.onerror = () => {
+            /* onclose handles recovery */
+        };
+    };
+
+    const limitHit = () => {
+        const lim = cfg_ref.current.settings;
+        const pnl = session_ref.current.pnl;
+        if (pnl <= -Math.abs(Number(lim.stop_loss) || Infinity)) return 'loss';
+        if (pnl >= Math.abs(Number(lim.take_profit) || Infinity)) return 'profit';
+        return null;
+    };
+
+    const startScan = () => {
+        if (cfg_ref.current.needs_real_ack) {
+            setNotice('Confirm the real-money notice above to start.');
+            return;
+        }
+        const hitLimit = limitHit();
+        if (hitLimit) {
+            setNotice(
+                hitLimit === 'loss'
+                    ? 'Session stop-loss reached. Reset the session to keep scanning.'
+                    : 'Session take-profit reached. Reset the session to keep scanning.'
+            );
+            setPhase('done');
+            return;
+        }
+        stopAll();
+        track_ref.current?.cancel?.();
+        track_ref.current = null;
+        digits_ref.current = {};
+        ticks_ref.current = {};
+        armed_ref.current = null;
+        sweep_ref.current = 0;
+        setRows({});
+        setLeader(null);
+        setArmed(null);
+        setSweep(0);
+        setBatch(null);
+        setResult(null);
+        setNotice('');
+        setPhase('scanning');
+        active_ref.current = true;
+        say(`Scanning ${MARKETS.length} markets for the strongest Matches digit…`);
+        openSocket();
+        timer_ref.current = window.setTimeout(runSweep, 1200);
+    };
+
+    const stopScan = () => {
+        if (auto_timer_ref.current) {
+            window.clearTimeout(auto_timer_ref.current);
+            auto_timer_ref.current = null;
+        }
+        setAuto(false);
+        auto_ref.current = false;
+        stopAll();
+        armed_ref.current = null;
+        setArmed(null);
+        setPhase('idle');
+        say('Scan stopped.');
+    };
+
+    // ------------------------------------------------------------ view
+    const stake = Number(settings.stake) || 0;
+    const cover = settings.cover;
+    const win_amount = stake * (payout - cover);
+    const breakeven = cover / payout;
+    const odds = React.useMemo(
+        () =>
+            sessionOdds(
+                cover,
+                stake,
+                payout,
+                Math.abs(Number(settings.take_profit) || 0),
+                Math.abs(Number(settings.stop_loss) || 0)
+            ),
+        [cover, stake, payout, settings.take_profit, settings.stop_loss]
+    );
+    const limit_state =
+        session.pnl <= -Math.abs(Number(settings.stop_loss) || Infinity)
+            ? 'loss'
+            : session.pnl >= Math.abs(Number(settings.take_profit) || Infinity)
+              ? 'profit'
+              : null;
+    const busy = phase === 'firing' || phase === 'settling';
+    const scanning = phase === 'scanning' || phase === 'confirming';
+    const stepIndex = { idle: -1, scanning: 0, confirming: 1, firing: 2, settling: 2, done: 3 }[phase];
+    const focus = armed || (leader ? { code: leader.code, digit: leader.digit } : null);
+    const focusScores = focus ? rows[focus.code]?.scores : null;
+    const covered = result?.digits || armed?.digits || (focusScores ? topDigits(focusScores, cover) : []);
+    const ranked = MARKETS.map(m => ({ ...m, r: rows[m.code] }))
+        .filter(m => m.r)
+        .sort((a, b) => b.r.edge - a.r.edge);
+
+    const waitingAuto = auto && phase === 'done' && !result && !limit_state;
+    const coreLabel = (() => {
+        if (phase === 'idle') return { big: 'SCAN', small: 'tap to find an entry' };
+        if (phase === 'scanning')
+            return {
+                big: leader ? leader.digit : '…',
+                small: sweep ? `sweep ${sweep} · ${leader?.code || 'loading'}` : 'loading ticks',
+            };
+        if (phase === 'confirming') return { big: armed?.digit ?? '…', small: `confirming ${armed?.code || ''}` };
+        if (phase === 'firing') return { big: batch?.digit ?? '…', small: 'opening contracts' };
+        if (phase === 'settling') return { big: batch?.digit ?? '…', small: `settling ${batch?.settled || 0}/${batch?.opened || 0}` };
+        if (limit_state) return { big: 'STOP', small: limit_state === 'loss' ? 'stop-loss reached' : 'target reached' };
+        if (waitingAuto) return { big: lastEntry ? (lastEntry.total > 0 ? 'HIT' : 'MISS') : '…', small: 'auto · next scan…' };
+        return { big: result ? (result.exitDigit ?? result.digit) : (batch?.digit ?? '—'), small: 'tap to scan again' };
+    })();
+
+    const onCore = () => {
+        if (waitingAuto) {
+            stopScan();
+            return;
+        }
+        if (busy || (limit_state && !scanning)) return;
+        if (scanning) stopScan();
+        else startScan();
+    };
 
     return (
-        <div className='matches-pro'>
-            <div className='matches-pro__panel'>
-                <div className='matches-pro__head'>
-                    <div>
-                        <div className='matches-pro__title'>MATCHES PRO</div>
-                        <div className='matches-pro__subtitle'>Phase 3 - demo auto trading with risk limits.</div>
-                    </div>
-                    <div className={`matches-pro__status matches-pro__status--${status}`}>
-                        <i className='matches-pro__dot' />
-                        {status_text}
-                    </div>
+        <div className='mpro'>
+            <header className='mpro__head'>
+                <div>
+                    <div className='mpro__eyebrow'>MATCHES PRO</div>
+                    <h1 className='mpro__title'>Digit Hunter</h1>
+                    <p className='mpro__lede'>
+                        One tap scans every volatility market, confirms the strongest setup, then covers its top digits
+                        with Matches contracts on the same tick.
+                    </p>
                 </div>
+                <span className={`mpro__acct ${!activeLoginid ? 'bad' : is_demo ? 'ok' : 'real'}`}>
+                    {!activeLoginid ? 'NOT SIGNED IN' : is_demo ? 'DEMO' : 'REAL MONEY'}
+                </span>
+            </header>
 
-                {error && <div className='matches-pro__warn'>{error}</div>}
+            {needs_real_ack && (
+                <section className='mpro__real' role='alert'>
+                    <b>You are on a real-money account</b>
+                    <p>
+                        Matches pays about 8× when a covered digit lands, but Deriv keeps a margin: over time it loses
+                        about 10% of what is staked, whatever the settings. Set your session stop-loss before you start.
+                    </p>
+                    <button type='button' onClick={() => setRealOk(true)}>
+                        I understand — enable real trading
+                    </button>
+                </section>
+            )}
 
-                <div className='matches-pro__controls'>
-                    <label className='matches-pro__field'>
-                        <span>Market</span>
-                        <select value={symbol} onChange={e => setSymbol(e.target.value)}>
-                            {symbols.map(s => (
-                                <option key={s.code} value={s.code}>
-                                    {s.label}
-                                </option>
-                            ))}
-                        </select>
-                    </label>
-                    <label className='matches-pro__field'>
-                        <span>Distribution window</span>
-                        <select value={window_size} onChange={e => setWindowSize(Number(e.target.value))}>
-                            {WINDOW_CHOICES.map(w => (
-                                <option key={w} value={w}>
-                                    {w} ticks
-                                </option>
-                            ))}
-                        </select>
-                    </label>
-                    <label className='matches-pro__field'>
-                        <span>{live_pricing ? 'Payout multiplier (live from Deriv)' : 'Payout multiplier'}</span>
+            <section className='mpro__setup' aria-label='Trade settings'>
+                <div className='mpro__stepper'>
+                    <span className='mpro__label'>Stake per contract</span>
+                    <div className='mpro__stepper-row'>
+                        <button
+                            type='button'
+                            disabled={scanning || busy}
+                            onClick={() => updateSettings({ stake: Math.max(0.35, Number((stake - 0.5).toFixed(2))) })}
+                            aria-label='Lower stake'
+                        >
+                            −
+                        </button>
                         <input
                             type='number'
-                            step='0.1'
-                            min='1.1'
-                            value={payout}
-                            readOnly={live_pricing}
-                            onChange={e => setPayout(Number(e.target.value) || 9.3)}
+                            inputMode='decimal'
+                            min='0.35'
+                            step='0.5'
+                            value={settings.stake}
+                            disabled={scanning || busy}
+                            onChange={e => updateSettings({ stake: e.target.value })}
+                            onBlur={e => updateSettings({ stake: Math.max(0.35, Number(e.target.value) || 0.35) })}
+                        />
+                        <button
+                            type='button'
+                            disabled={scanning || busy}
+                            onClick={() => updateSettings({ stake: Number((stake + 0.5).toFixed(2)) })}
+                            aria-label='Raise stake'
+                        >
+                            +
+                        </button>
+                    </div>
+                </div>
+                <div className='mpro__stepper'>
+                    <span className='mpro__label'>Digits to cover</span>
+                    <div className='mpro__stepper-row'>
+                        <button
+                            type='button'
+                            disabled={scanning || busy || cover <= 1}
+                            onClick={() => updateSettings({ cover: cover - 1 })}
+                            aria-label='Cover fewer digits'
+                        >
+                            −
+                        </button>
+                        <output>{cover}</output>
+                        <button
+                            type='button'
+                            disabled={scanning || busy || cover >= MAX_COVER}
+                            onClick={() => updateSettings({ cover: cover + 1 })}
+                            aria-label='Cover more digits'
+                        >
+                            +
+                        </button>
+                    </div>
+                </div>
+                <div className='mpro__cover-meter' aria-hidden='true'>
+                    {Array.from({ length: 10 }, (_, i) => (
+                        <i key={i} className={i < cover ? 'on' : ''} />
+                    ))}
+                    <span>
+                        Hits about <b>{cover * 10}%</b> of entries · one contract on each of the top {cover} digit
+                        {cover > 1 ? 's' : ''}
+                    </span>
+                </div>
+                <div className='mpro__payline'>
+                    <span>
+                        Risk <b>{money(stake * cover)} {currency}</b>
+                    </span>
+                    <span>
+                        If it hits <b className='gold'>+{money(win_amount)} {currency}</b>
+                    </span>
+                    <span>
+                        Break-even <b>{pct(breakeven)}</b> hits
+                    </span>
+                </div>
+                <div className={`mpro__odds ${odds === null ? '' : odds >= 0.45 ? 'good' : odds >= 0.3 ? 'mid' : 'bad'}`}>
+                    <span>Chance this session reaches the profit target before the stop-loss</span>
+                    <b>{odds === null ? '—' : `${Math.round(odds * 100)}%`}</b>
+                </div>
+                <div className='mpro__limits'>
+                    <label>
+                        <span>Stop session at loss</span>
+                        <input
+                            type='number'
+                            inputMode='decimal'
+                            min='1'
+                            value={settings.stop_loss}
+                            disabled={scanning || busy}
+                            onChange={e => updateSettings({ stop_loss: e.target.value })}
+                        />
+                    </label>
+                    <label>
+                        <span>Stop session at profit</span>
+                        <input
+                            type='number'
+                            inputMode='decimal'
+                            min='1'
+                            value={settings.take_profit}
+                            disabled={scanning || busy}
+                            onChange={e => updateSettings({ take_profit: e.target.value })}
                         />
                     </label>
                 </div>
+                <label className={`mpro__auto ${auto ? 'on' : ''}`}>
+                    <input
+                        type='checkbox'
+                        checked={auto}
+                        disabled={!can_trade || Boolean(limit_state)}
+                        onChange={e => {
+                            const on = e.target.checked;
+                            setAuto(on);
+                            auto_ref.current = on;
+                            if (!on && auto_timer_ref.current) {
+                                window.clearTimeout(auto_timer_ref.current);
+                                auto_timer_ref.current = null;
+                                setPhase('done');
+                            }
+                        }}
+                    />
+                    <i />
+                    <span>
+                        <b>Auto</b> keeps scanning and firing until the stop-loss or profit target ends the session
+                    </span>
+                </label>
+            </section>
 
-                <div className='matches-pro__readout'>
-                    <div className='matches-pro__stat'>
-                        <span>Current tick</span>
-                        <strong>{quote ?? '-'}</strong>
-                    </div>
-                    <div className='matches-pro__stat'>
-                        <span>Current digit</span>
-                        <strong className='matches-pro__digit'>{current_digit ?? '-'}</strong>
-                    </div>
-                    <div className='matches-pro__stat'>
-                        <span>Decimals</span>
-                        <strong>{decimals ?? '-'}</strong>
-                    </div>
-                    <div className='matches-pro__stat'>
-                        <span>History</span>
-                        <strong>{digits.length}</strong>
-                    </div>
-                </div>
+            <ol className='mpro__steps'>
+                {STEPS.map((s, i) => (
+                    <li key={s} className={i < stepIndex ? 'done' : i === stepIndex ? 'now' : ''}>
+                        <i>{i + 1}</i>
+                        {s}
+                    </li>
+                ))}
+            </ol>
 
-                <div className='matches-pro__section-title'>Statistical analysis</div>
-                <div className={`matches-pro__signal matches-pro__signal--${quality.replace(' ', '-').toLowerCase()}`}>
-                    <div className='matches-pro__signal-main'>
-                        <div className='matches-pro__signal-digit'>{predicted ?? '-'}</div>
-                        <div>
-                            <div className='matches-pro__signal-quality'>{quality}</div>
-                            <div className='matches-pro__signal-sub'>
-                                Score {prediction?.score ?? 0}/100, sample {prediction?.sampleSize ?? 0}
-                            </div>
-                        </div>
-                    </div>
-                    <div className='matches-pro__signal-nums'>
-                        <div>
-                            <span>Estimated probability</span>
-                            <strong>{prediction ? pct(prediction.probabilityEstimate) : '-'}</strong>
-                        </div>
-                        <div>
-                            <span>Break-even needed</span>
-                            <strong>{prediction ? pct(prediction.breakeven) : '-'}</strong>
-                        </div>
-                    </div>
-                </div>
-
-                {plainRead && <div className='matches-pro__read'>{plainRead}</div>}
-
-                {prediction && (
-                    <>
-                        <button type='button' className='matches-pro__link' onClick={() => setShowWhy(v => !v)}>
-                            {show_why ? 'Hide reasoning' : 'Why?'}
-                        </button>
-                        {show_why && (
-                            <div className='matches-pro__why'>
-                                <p>{prediction.reason}</p>
-                                <table>
-                                    <tbody>
-                                        {prediction.factors.map(f => (
-                                            <tr key={f.label}>
-                                                <td>{f.label}</td>
-                                                <td className={f.value >= 0 ? 'pos' : 'neg'}>
-                                                    {f.value >= 0 ? '+' : ''}
-                                                    {f.value.toFixed(2)} sigma
-                                                </td>
-                                                <td className='note'>{f.note || ''}</td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                                <p className='matches-pro__why-foot'>
-                                    Significance bar is {Z_CRITICAL} sigma, corrected for testing 10 digits across 5
-                                    windows every tick. Probability is shrunk toward 10% with a 500-observation prior.
-                                </p>
-                            </div>
-                        )}
-                    </>
-                )}
-
-                {/* -------------------------------- analyse -------------------------------- */}
-                <div className='matches-pro__section-title'>Analyse</div>
-                <div className='matches-pro__analyse'>
-                    <div className='matches-pro__analyse-controls'>
-                        <button
-                            type='button'
-                            className='matches-pro__analyse-btn'
-                            disabled={!prediction || prediction.predictedDigit === null}
-                            onClick={startAnalysis}
-                        >
-                            {analysis && !analysis.done ? 'ANALYSING...' : 'ANALYSE'}
-                        </button>
-                        <label className='matches-pro__field'>
-                            <span>Window</span>
-                            <select
-                                value={window_seconds}
-                                onChange={e => setWindowSeconds(Number(e.target.value))}
-                                disabled={analysis && !analysis.done}
-                            >
-                                {WINDOW_SECONDS.map(w => (
-                                    <option key={w} value={w}>
-                                        {w} seconds
-                                    </option>
-                                ))}
-                            </select>
-                        </label>
-                    </div>
-
-                    {analysis && (
-                        <div className={`matches-pro__analyse-card ${analysis.done ? 'done' : 'live'}`}>
-                            <div className='matches-pro__analyse-digit'>{analysis.digit}</div>
-                            <div className='matches-pro__analyse-body'>
-                                {!analysis.done ? (
-                                    <>
-                                        <div className='matches-pro__analyse-count'>{remaining}s</div>
-                                        <div className='matches-pro__analyse-bar'>
-                                            <span
-                                                style={{
-                                                    width: `${(remaining / window_seconds) * 100}%`,
-                                                }}
-                                            />
-                                        </div>
-                                        <div className='matches-pro__analyse-sub'>
-                                            {analysis.ticks.length} tick{analysis.ticks.length === 1 ? '' : 's'} so far,{' '}
-                                            {analysis.hits} match{analysis.hits === 1 ? '' : 'es'}
-                                        </div>
-                                    </>
-                                ) : (
-                                    <>
-                                        <div className='matches-pro__analyse-count'>
-                                            {analysis.hits}/{analysis.ticks.length}
-                                        </div>
-                                        <div className='matches-pro__analyse-sub'>
-                                            Digit {analysis.digit} appeared {analysis.hits} time
-                                            {analysis.hits === 1 ? '' : 's'} in {analysis.ticks.length} tick
-                                            {analysis.ticks.length === 1 ? '' : 's'}. Expected about{' '}
-                                            {(analysis.ticks.length * 0.1).toFixed(1)}.
-                                        </div>
-                                    </>
-                                )}
-                                <div className='matches-pro__analyse-nums'>
-                                    {analysis.quality} &middot; estimated {pct(analysis.probability)} &middot; break-even{' '}
-                                    {pct(analysis.breakeven)}
-                                </div>
-                            </div>
-                            {analysis.ticks.length > 0 && (
-                                <div className='matches-pro__analyse-ticks'>
-                                    {analysis.ticks.map((d, i) => (
-                                        <span key={`${i}-${d}`} className={d === analysis.digit ? 'hit' : ''}>
-                                            {d}
-                                        </span>
-                                    ))}
-                                </div>
-                            )}
-                        </div>
-                    )}
-
-                    {analyse_stats && analyse_stats.state.analyses > 0 && (
-                        <div className='matches-pro__verdict'>
-                            {analyse_stats.summary.verdict}
-                            <button
-                                type='button'
-                                className='matches-pro__link'
-                                onClick={() => {
-                                    resetAnalyse(symbol);
-                                    refreshAnalyseStats(symbol);
+            <section className={`mpro__radar mpro__radar--${phase}`}>
+                <div className='mpro__ring'>
+                    {Array.from({ length: 10 }, (_, d) => {
+                        const angle = (d / 10) * Math.PI * 2 - Math.PI / 2;
+                        const score = focusScores ? focusScores[d] : null;
+                        const heat = score === null ? 0 : Math.max(0, Math.min(1, (score - 0.06) / 0.1));
+                        const isPick = covered.includes(d);
+                        const isExit = result && result.exitDigit === d;
+                        return (
+                            <div
+                                key={d}
+                                className={`mpro__node ${isPick ? 'pick' : ''} ${isExit ? 'exit' : ''}`}
+                                style={{
+                                    left: `${50 + 41 * Math.cos(angle)}%`,
+                                    top: `${50 + 41 * Math.sin(angle)}%`,
+                                    '--heat': heat,
                                 }}
                             >
-                                Reset tally
-                            </button>
-                        </div>
-                    )}
-
-                    <div className='matches-pro__note-inline'>
-                        The countdown is a window to act in, not a period during which the digit becomes more likely.
-                        Each digit stays at roughly 10% per tick throughout. The tally above is this button&apos;s own
-                        record - watch it rather than any single result.
-                    </div>
-                </div>
-
-                {/* -------------------------------- trading -------------------------------- */}
-                <div className='matches-pro__section-title'>Trading</div>
-
-                <div className='matches-pro__locks'>
-                    <div className={`matches-pro__lock ${isAuthorized ? 'ok' : 'bad'}`}>
-                        {isAuthorized ? 'Signed in' : 'Not signed in'}
-                    </div>
-                    <div className={`matches-pro__lock ${is_demo ? 'ok' : 'bad'}`}>
-                        {activeLoginid ? `${activeLoginid} ${is_demo ? '(demo)' : '(REAL - blocked)'}` : 'No account'}
-                    </div>
-                    <div className={`matches-pro__lock ${unlocked ? 'ok' : 'bad'}`}>
-                        Evidence {evidence}/{MIN_EVIDENCE}
-                    </div>
-                </div>
-
-                <div className='matches-pro__limits'>
-                    {MAIN_FIELDS.map(f => (
-                        <label key={f.key} className='matches-pro__field'>
-                            <span>{f.label}</span>
-                            <input
-                                type='number'
-                                step={f.step}
-                                min={f.min}
-                                value={limits[f.key]}
-                                onChange={e => setLimit(f.key, e.target.value)}
-                            />
-                        </label>
-                    ))}
-                    <label className='matches-pro__field'>
-                        <span>Trade on</span>
-                        <select value={limits.min_quality} onChange={e => setLimit('min_quality', e.target.value)}>
-                            {QUALITY_FLOORS.map(q => (
-                                <option key={q.value} value={q.value}>
-                                    {q.label}
-                                </option>
-                            ))}
-                        </select>
-                    </label>
-                </div>
-
-                <div className='matches-pro__note-inline'>{FLOOR_RATE[limits.min_quality]}</div>
-
-                {limits.min_quality === 'ANY' && (
-                    <div className='matches-pro__warn'>
-                        Validation mode: every tick qualifies, so the engine&apos;s judgement is bypassed. Useful for
-                        checking the trading path end to end, not a strategy.
-                    </div>
-                )}
-
-                <button type='button' className='matches-pro__link' onClick={() => setShowAdvanced(v => !v)}>
-                    {show_advanced ? 'Hide advanced limits' : 'Advanced limits'}
-                </button>
-
-                {show_advanced && (
-                    <div className='matches-pro__limits'>
-                        {ADVANCED_FIELDS.map(f => (
-                            <label key={f.key} className='matches-pro__field'>
-                                <span>{f.label}</span>
-                                <input
-                                    type='number'
-                                    step={f.step}
-                                    min={f.min}
-                                    value={limits[f.key]}
-                                    onChange={e => setLimit(f.key, e.target.value)}
-                                />
-                            </label>
-                        ))}
-                    </div>
-                )}
-
-                <div className='matches-pro__trade-bar'>
+                                <b>{d}</b>
+                                <small>{score === null ? '' : pct(score)}</small>
+                            </div>
+                        );
+                    })}
                     <button
                         type='button'
-                        className={`matches-pro__auto ${auto ? 'on' : ''}`}
-                        disabled={!can_arm}
-                        onClick={() => setAuto(v => !v)}
+                        className='mpro__core'
+                        onClick={onCore}
+                        disabled={busy}
+                        aria-label={scanning ? 'Stop scanning' : 'Start scan'}
                     >
-                        {auto ? 'STOP AUTO TRADING' : 'START AUTO TRADING (DEMO)'}
+                        <span className='mpro__core-big'>{coreLabel.big}</span>
+                        <span className='mpro__core-small'>{coreLabel.small}</span>
+                        {scanning && <span className='mpro__core-stop'>tap to stop</span>}
                     </button>
-                    <div className={`matches-pro__gate ${gate.allowed ? 'ok' : ''}`}>{gate.reason}</div>
                 </div>
+                <div className='mpro__focus'>
+                    {focus ? (
+                        <>
+                            <span>{armed ? (armed.confirmed ? 'Locked entry' : 'Confirming') : 'Strongest right now'}</span>
+                            <b>
+                                {focus.code} · {covered.length > 1 ? `digits ${covered.join(' ')}` : `digit ${focus.digit}`}
+                            </b>
+                            <small>
+                                edge {signedPct(rows[focus.code]?.edge ?? 0)} · bar {signedPct(EDGE_BAR)} · seen{' '}
+                                {pct(rows[focus.code]?.hitRate ?? NULL_P)} of last 200
+                            </small>
+                        </>
+                    ) : (
+                        <>
+                            <span>Ready</span>
+                            <b>{MARKETS.length} markets · Digit Match · 1 tick</b>
+                            <small>Needs {MIN_TICKS}+ ticks per market before scoring</small>
+                        </>
+                    )}
+                </div>
+                {auto && lastEntry && (
+                    <div className={`mpro__last-entry ${lastEntry.total > 0 ? 'hit' : 'miss'}`}>
+                        Last: {lastEntry.total > 0 ? 'HIT' : 'MISS'} on {lastEntry.code} · landed {lastEntry.exitDigit ?? '?'} ·{' '}
+                        {lastEntry.total >= 0 ? '+' : ''}
+                        {money(lastEntry.total)} {lastEntry.currency}
+                    </div>
+                )}
+                {notice && <div className='mpro__notice'>{notice}</div>}
+            </section>
 
-                <div className='matches-pro__readout'>
-                    <div className='matches-pro__stat'>
-                        <span>Trades today</span>
-                        <strong>{day.trades.length}</strong>
+            <section className='mpro__board' aria-label='Market board'>
+                <div className='mpro__board-head'>
+                    <span>Market</span>
+                    <span>Digit</span>
+                    <span>Edge</span>
+                    <span>Last 4</span>
+                </div>
+                {(ranked.length ? ranked : MARKETS.map(m => ({ ...m, r: null }))).map((m, i) => {
+                    const r = m.r;
+                    const isArmed = armed?.code === m.code;
+                    const width = r ? Math.max(4, Math.min(100, (r.edge / (EDGE_BAR * 1.5)) * 100)) : 0;
+                    return (
+                        <div key={m.code} className={`mpro__row ${i === 0 && r ? 'lead' : ''} ${isArmed ? 'armed' : ''}`}>
+                            <span className='mpro__mkt'>
+                                <b>{m.code}</b>
+                                <small>{m.name}</small>
+                            </span>
+                            <span className='mpro__digit'>{r ? r.digit : '·'}</span>
+                            <span className='mpro__edge'>
+                                <span className='mpro__track'>
+                                    <i style={{ width: `${width}%` }} className={r && r.edge >= EDGE_BAR ? 'over' : ''} />
+                                </span>
+                                <em>{r ? signedPct(r.edge) : '—'}</em>
+                            </span>
+                            <span className='mpro__last'>{r ? r.recent.join(' ') : '— — — —'}</span>
+                        </div>
+                    );
+                })}
+            </section>
+
+            <section className='mpro__bottom'>
+                <div className='mpro__session'>
+                    <div>
+                        <span>Entries</span>
+                        <b>{session.batches}</b>
                     </div>
-                    <div className='matches-pro__stat'>
-                        <span>Wins / losses</span>
-                        <strong>
-                            {day.wins}/{day.losses}
-                        </strong>
+                    <div>
+                        <span>Hits</span>
+                        <b>{session.hits}</b>
                     </div>
-                    <div className='matches-pro__stat'>
-                        <span>Hit rate</span>
-                        <strong>
-                            {day.trades.length ? `${((day.wins / day.trades.length) * 100).toFixed(1)}%` : '-'}
-                        </strong>
-                    </div>
-                    <div className='matches-pro__stat'>
-                        <span>Profit / loss</span>
-                        <strong className={day.pl >= 0 ? 'pos' : 'neg'}>
-                            {day.pl >= 0 ? '+' : ''}
-                            {day.pl.toFixed(2)}
-                        </strong>
+                    <div className={limit_state ? `limit ${limit_state}` : ''}>
+                        <span>Session P/L</span>
+                        <b className={session.pnl >= 0 ? 'pos' : 'neg'}>
+                            {session.pnl >= 0 ? '+' : ''}
+                            {money(session.pnl)}
+                        </b>
                     </div>
                 </div>
-
-                <div className='matches-pro__note-inline'>
-                    Every contract appears in the run panel below under Summary, Transactions and Journal.
-                </div>
-
-                <button
-                    type='button'
-                    className='matches-pro__link'
-                    onClick={() => {
-                        resetDay(symbol);
-                        refreshDay(symbol);
-                    }}
-                >
-                    Reset today&apos;s trading counters
-                </button>
-
-                {/* -------------------------------- backtest -------------------------------- */}
-                <div className='matches-pro__section-title'>
-                    Backtest
+                {(session.batches > 0 || limit_state) && (
                     <button
                         type='button'
-                        className='matches-pro__reset'
+                        className='mpro__reset'
+                        disabled={scanning || busy}
                         onClick={() => {
-                            reset(symbol);
-                            setFeed([]);
-                            refreshStats(symbol);
+                            setSession({ batches: 0, hits: 0, pnl: 0 });
+                            setNotice('');
+                            setResult(null);
+                            setPhase('idle');
+                            say('Session reset.');
                         }}
                     >
-                        Reset
+                        {limit_state ? 'Session stopped · reset to continue' : 'Reset session'}
                     </button>
-                </div>
-                {stats && (
-                    <>
-                        <div className='matches-pro__readout'>
-                            <div className='matches-pro__stat'>
-                                <span>Predictions</span>
-                                <strong>{stats.summary.n}</strong>
-                            </div>
-                            <div className='matches-pro__stat'>
-                                <span>Correct</span>
-                                <strong>{stats.summary.k}</strong>
-                            </div>
-                            <div className='matches-pro__stat'>
-                                <span>Accuracy</span>
-                                <strong>{stats.summary.n ? pct(stats.summary.accuracy) : '-'}</strong>
-                            </div>
-                            <div className='matches-pro__stat'>
-                                <span>Baseline</span>
-                                <strong>10.00%</strong>
-                            </div>
-                        </div>
-                        <div className='matches-pro__verdict'>{stats.summary.verdict}</div>
-                        <div className='matches-pro__mini'>
-                            Last 100: {pct(stats.summary.recent_accuracy)}, longest hit streak{' '}
-                            {stats.state.longest_win}, longest miss streak {stats.state.longest_loss}
-                        </div>
-                        {Object.keys(stats.state.by_quality).length > 0 && (
-                            <div className='matches-pro__mini'>
-                                {Object.entries(stats.state.by_quality).map(([q, v]) => (
-                                    <span key={q} className='matches-pro__tag'>
-                                        {q}: {v.correct}/{v.n} ({v.n ? ((v.correct / v.n) * 100).toFixed(1) : '0.0'}%)
-                                    </span>
-                                ))}
-                            </div>
-                        )}
-                    </>
                 )}
+                <ul className='mpro__feed'>
+                    {feed.length ? (
+                        feed.map(f => <li key={f.t}>{f.line}</li>)
+                    ) : (
+                        <li className='muted'>Activity shows here once you scan.</li>
+                    )}
+                </ul>
+                <p className='mpro__fine'>
+                    Each covered digit adds about 10% hit chance, but each hit pays less and Deriv&apos;s
+                    margin stays: on 130,000 real ticks every cover setting lost about 10% of what was risked over time.
+                    Winning more entries is not the same as finishing more sessions in profit. With a +10 / −20 session,
+                    covering 3 digits reached the target 48% of the time, 8 digits only 15%. Use the session chance above to
+                    compare settings.
+                </p>
+            </section>
 
-                <div className='matches-pro__section-title'>Signal feed</div>
-                <div className='matches-pro__feed'>
-                    {feed.map(f => (
-                        <div key={f.t} className={`matches-pro__feed-row ${f.hit ? 'hit' : 'miss'}`}>
-                            <span>{clockOf(f.t)}</span>
-                            <span>MATCH {f.predicted}</span>
-                            <span>actual {f.actual}</span>
-                            <span>{f.quality}</span>
-                            <span>{f.hit ? 'HIT' : 'miss'}</span>
+            {result && (
+                <div className='mpro__sheet-wrap' role='dialog' aria-modal='true' onClick={() => setResult(null)}>
+                    <div className={`mpro__sheet ${result.total > 0 ? 'hit' : 'miss'}`} onClick={e => e.stopPropagation()}>
+                        <div className='mpro__sheet-tag'>{result.total > 0 ? 'HIT' : 'MISSED'}</div>
+                        <div className='mpro__sheet-amt'>
+                            {result.total >= 0 ? '+' : ''}
+                            {money(result.total)} <small>{result.currency}</small>
                         </div>
-                    ))}
-                    {!feed.length && <span className='matches-pro__muted'>Waiting for the next tick...</span>}
-                </div>
-
-                <div className='matches-pro__section-title'>Digit distribution - last {sample.length} ticks</div>
-                <div className='matches-pro__dist'>
-                    {distribution.map(d => (
-                        <div key={d.digit} className='matches-pro__row'>
-                            <span className={`matches-pro__row-digit ${d.digit === predicted ? 'is-predicted' : ''}`}>
-                                {d.digit}
-                            </span>
-                            <span className='matches-pro__bar'>
-                                <span style={{ width: `${(d.p / max_pct) * 100}%` }} />
-                            </span>
-                            <span className='matches-pro__row-pct'>{d.p.toFixed(1)}%</span>
+                        <div className='mpro__sheet-digits'>
+                            <div>
+                                <span>Covered</span>
+                                <b className={result.digits.length > 2 ? 'sm' : ''}>{result.digits.join(' ')}</b>
+                            </div>
+                            <div>
+                                <span>Landed</span>
+                                <b>{result.exitDigit ?? '?'}</b>
+                            </div>
+                            <div>
+                                <span>Market</span>
+                                <b className='sm'>{result.code}</b>
+                            </div>
                         </div>
-                    ))}
-                </div>
-
-                {diag && (
-                    <div className='matches-pro__diag'>
-                        socket {diag.ready_state} | messages {diag.messages} | last {diag.last_msg_type} | symbols{' '}
-                        {diag.symbols_seen} | precision {diag.pip_source} ({diag.known_decimals} known) | open{' '}
-                        {open_ref.current.size}
-                        {diag.last_error ? ` | ${diag.last_error}` : ''}
+                        <div className='mpro__sheet-sub'>
+                            {result.wins}/{result.count} contracts won
+                            {limit_state && (
+                                <strong className='mpro__sheet-stop'>
+                                    {limit_state === 'loss'
+                                        ? ' · Session stop-loss reached'
+                                        : ' · Session profit target reached'}
+                                </strong>
+                            )}
+                        </div>
+                        <div className='mpro__sheet-actions'>
+                            <button type='button' className='ghost' onClick={() => setResult(null)}>
+                                Close
+                            </button>
+                            <button
+                                type='button'
+                                disabled={Boolean(limit_state)}
+                                onClick={() => {
+                                    setResult(null);
+                                    startScan();
+                                }}
+                            >
+                                {limit_state ? 'Session stopped' : 'Scan again'}
+                            </button>
+                        </div>
                     </div>
-                )}
-
-                <div className='matches-pro__note'>
-                    Demo accounts only in this phase - a real login id is refused by the execution layer, not just
-                    hidden here. Auto trading unlocks per market at {MIN_EVIDENCE} graded predictions. The signal floor is yours to
-                    set, but lowering it does not create an edge - it only trades more often on weaker evidence. Every trade still faces a negative expected value at a{' '}
-                    {payout}x payout unless the estimated probability beats {pct(1 / payout)}, so treat a profitable
-                    demo run as a small sample, not a discovery.
                 </div>
-            </div>
+            )}
         </div>
     );
 };

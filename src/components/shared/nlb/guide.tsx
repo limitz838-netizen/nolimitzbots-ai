@@ -33,28 +33,28 @@ export const GUIDES = {
         ],
     },
     speedbot: {
-        title: 'How to use Speedbot',
-        intro: 'Speedbot trades continuously on every cycle until you stop it or it hits your take-profit / stop-loss.',
+        title: 'How to use Nolimitz AI',
+        intro: 'Nolimitz AI trades digit contracts that win about 9 ticks in 10, one after another, until your profit target or maximum loss ends the session.',
         sections: [
             {
-                h: 'What it does',
-                p: 'Pick a market, trade type, stake, ticks, and — importantly — a Take Profit and Stop Loss. It keeps trading and tracks your running P/L. When TP or SL is reached, it stops itself and shows the result.',
+                h: 'Pick a contract',
+                p: 'Over 0 loses only when the last digit is 0. Under 9 loses only on 9. Differs loses only on its picked digit. All three won about 90% of trades on 195,000 real Deriv ticks.',
             },
             {
-                h: 'Take Profit / Stop Loss are your seatbelt',
-                p: 'These are the most important settings. TP locks in gains by stopping while you are ahead; SL caps the damage on a bad run. Never run Speedbot without both set to amounts you are comfortable with.',
+                h: 'Why 90% wins can still lose money',
+                p: 'Each win pays about 9.6% of the stake, each loss costs the whole stake, so one loss cancels about ten wins. Break-even is about 91.2% wins, so over many trades these contracts lose around 1.3% of what is staked.',
             },
             {
-                h: 'Fast vs Normal',
-                p: 'Normal waits for each contract to settle before the next — safer and easier to follow. Fast overlaps trades for speed but stakes accumulate quicker. Use Normal while learning.',
+                h: 'Stake of 2 or more',
+                p: 'Below 2 Deriv rounds the payout down to about 6%, which makes the maths much worse. The engine will not start below 2.',
             },
             {
-                h: 'Alternate options',
-                p: 'Alternate Even/Odd and Alternate on Loss switch sides automatically. They change the pattern of trades, not the odds of any single trade.',
+                h: 'Target and maximum loss',
+                p: 'Every session needs both. The chance box shows how often the target is reached before the maximum loss with your settings, so compare a few before you run.',
             },
             {
-                h: 'Martingale — handle with care',
-                p: 'Martingale raises your stake after a loss to recover it. It can recover small losing streaks but a long streak grows the stake very fast and can drain a balance. It is capped here, but treat it as high risk and keep the multiplier low (≤2).',
+                h: 'Real accounts',
+                p: 'Real trading needs a one-time confirmation per login. Test on demo first.',
             },
         ],
     },

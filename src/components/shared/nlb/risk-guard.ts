@@ -39,7 +39,7 @@ export const DEFAULT_LIMITS = {
     max_consecutive_losses: 3,
     daily_profit_target: 10,
     daily_loss_limit: 5,
-    cooldown_ticks: 3,
+    cooldown_ticks: 0,
     max_open: 1,
     min_quality: 'MEDIUM',
 };
@@ -126,6 +126,8 @@ export const evaluate = ctx => {
         evidence,
         auto_on,
         min_evidence = MIN_EVIDENCE,
+        session_pl = day?.pl || 0,
+        stop_mode = 'legacy',
     } = ctx;
 
     if (!auto_on) return { allowed: false, reason: 'Auto trade is off' };
@@ -152,20 +154,23 @@ export const evaluate = ctx => {
     if (open_count >= limits.max_open) return { allowed: false, reason: 'A contract is still open' };
     if (cooldown_remaining > 0) return { allowed: false, reason: `Cooldown: ${cooldown_remaining} ticks` };
 
-    if (day.trades.length >= limits.max_trades) {
-        return { allowed: false, reason: `Max trades reached (${limits.max_trades})` };
+    if (stop_mode !== 'targets') {
+        if (day.trades.length >= limits.max_trades) {
+            return { allowed: false, reason: `Max trades reached (${limits.max_trades})` };
+        }
+        if (day.consecutive_losses >= limits.max_consecutive_losses) {
+            return {
+                allowed: false,
+                reason: `${day.consecutive_losses} losses in a row - stopped at limit of ${limits.max_consecutive_losses}`,
+            };
+        }
     }
-    if (day.consecutive_losses >= limits.max_consecutive_losses) {
-        return {
-            allowed: false,
-            reason: `${day.consecutive_losses} losses in a row - stopped at limit of ${limits.max_consecutive_losses}`,
-        };
+
+    if (session_pl <= -Math.abs(limits.daily_loss_limit)) {
+        return { allowed: false, reason: `Stop loss reached (${session_pl.toFixed(2)})` };
     }
-    if (day.pl <= -Math.abs(limits.daily_loss_limit)) {
-        return { allowed: false, reason: `Daily loss limit hit (${day.pl.toFixed(2)})` };
-    }
-    if (day.pl >= Math.abs(limits.daily_profit_target)) {
-        return { allowed: false, reason: `Daily profit target reached (${day.pl.toFixed(2)})` };
+    if (session_pl >= Math.abs(limits.daily_profit_target)) {
+        return { allowed: false, reason: `Take profit reached (+${session_pl.toFixed(2)})` };
     }
 
     if (!(Number(limits.stake) > 0)) return { allowed: false, reason: 'Stake must be greater than zero' };

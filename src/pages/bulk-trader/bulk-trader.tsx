@@ -22,8 +22,12 @@ const FALLBACK_DECIMALS = { R_10: 3, R_25: 3, R_50: 4, R_75: 4, R_100: 2 };
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const lastDigit = (quote, decimals) => Number(Number(quote).toFixed(decimals).slice(-1));
 
+const MAX_BATCH_COUNT = 20;
+const DEFAULT_MAX_EXPOSURE = 10;
+const MAX_MART_STEPS = 4;
+
 const BulkTrader = observer(() => {
-    const { client, run_panel } = useStore();
+    const { client, run_panel, transactions, summary_card } = useStore();
     const is_logged_in = !!client?.is_logged_in;
     const currency = client?.currency || 'USD';
 
@@ -36,6 +40,7 @@ const BulkTrader = observer(() => {
     const [duration, setDuration] = React.useState(1);
     const [stake, setStake] = React.useState('0.5');
     const [count, setCount] = React.useState(5);
+    const [max_exposure, setMaxExposure] = React.useState(String(DEFAULT_MAX_EXPOSURE));
     const [martingale, setMartingale] = React.useState(false);
     const [mult, setMult] = React.useState('2.0');
     const [next_stake, setNextStake] = React.useState(null); // martingale-adjusted stake for next batch
@@ -58,10 +63,29 @@ const BulkTrader = observer(() => {
     const ws_ref = React.useRef(null);
     const decimals_ref = React.useRef({ ...FALLBACK_DECIMALS });
     const cfg_ref = React.useRef({});
-    cfg_ref.current = { symbol, window_size, pair, over_digit, under_digit, duration, stake };
+    const effective_stake = next_stake ?? (parseFloat(stake) || 0);
+    cfg_ref.current = {
+        symbol,
+        window_size,
+        pair,
+        over_digit,
+        under_digit,
+        duration,
+        stake: effective_stake,
+        currency,
+    };
     const batch_ref = React.useRef(null);
 
     const stake_num = parseFloat(stake) || 0;
+    const max_exposure_num = Math.max(0, parseFloat(max_exposure) || 0);
+    const effective_stake_num = next_stake ?? stake_num;
+    const batch_exposure = effective_stake_num * count;
+    const exposure_ok =
+        effective_stake_num >= 0.35 &&
+        count >= 1 &&
+        count <= MAX_BATCH_COUNT &&
+        max_exposure_num >= 0.35 &&
+        batch_exposure <= max_exposure_num + 1e-9;
     const sides =
         pair === 'EO'
             ? [
@@ -90,13 +114,13 @@ const BulkTrader = observer(() => {
 
         const requestPayouts = () => {
             const c = cfg_ref.current;
-            const amount = parseFloat(c.stake) || 0;
+            const amount = Number(c.stake) || 0;
             if (!amount || amount < 0.35) return;
             const base = {
                 proposal: 1,
                 amount,
                 basis: 'stake',
-                currency: 'USD',
+                currency: c.currency || 'USD',
                 duration: c.duration,
                 duration_unit: 't',
                 underlying_symbol: c.symbol,
@@ -185,7 +209,7 @@ const BulkTrader = observer(() => {
     React.useEffect(() => {
         const t = setTimeout(() => notifyCfg('payouts'), 400);
         return () => clearTimeout(t);
-    }, [stake, duration, pair, over_digit, under_digit]);
+    }, [stake, next_stake, currency, duration, pair, over_digit, under_digit]);
 
     // ---- stats ----
     const counts = Array(10).fill(0);
@@ -211,6 +235,14 @@ const BulkTrader = observer(() => {
         setSettling({ settled: 0, total: ids.length });
         batch_ref.current = trackContracts(ids, {
             onUpdate: ({ settled, total }) => setSettling({ settled, total }),
+            onContract: contract => {
+                try {
+                    transactions?.onBotContractEvent?.(contract);
+                    summary_card?.onBotContractEvent?.(contract);
+                } catch {
+                    /* display mirroring must never interrupt settlement */
+                }
+            },
             onDone: ({ total, wins, settled, count }) => {
                 setSettling(null);
                 try { run_panel?.setIsRunning?.(false); } catch { /* noop */ }
@@ -222,12 +254,19 @@ const BulkTrader = observer(() => {
                     const m = Math.max(1, parseFloat(mult) || 1);
                     if (total < 0) {
                         mart_steps_ref.current += 1;
-                        if (mart_steps_ref.current > 7) {
+                        const perTradeCap = Math.max(0.35, max_exposure_num / Math.max(1, count));
+                        if (mart_steps_ref.current > MAX_MART_STEPS) {
                             mart_steps_ref.current = 0;
                             setNextStake(null);
                         } else {
-                            const bumped = Math.min((next_stake ?? base) * m, base * 200);
-                            setNextStake(Number(bumped.toFixed(2)));
+                            const requested = (next_stake ?? base) * m;
+                            const bumped = Math.min(requested, perTradeCap);
+                            if (bumped <= (next_stake ?? base) + 0.0001) {
+                                mart_steps_ref.current = 0;
+                                setNextStake(null);
+                            } else {
+                                setNextStake(Number(bumped.toFixed(2)));
+                            }
                         }
                     } else {
                         mart_steps_ref.current = 0;
@@ -253,46 +292,150 @@ const BulkTrader = observer(() => {
     // ---- fire a batch ----
     const fire = async side => {
         const fire_stake = next_stake ?? stake_num;
-        if (!api_base?.api || is_busy || !is_logged_in || fire_stake < 0.35) return;
+        const exposure = fire_stake * count;
+
+        const blockedReason =
+            !is_logged_in
+                ? 'Not signed in to Deriv.'
+                : !api_base?.api
+                  ? 'Trading connection is not ready yet. Wait a moment and try again.'
+                  : is_busy
+                      ? 'A batch is already being prepared.'
+                      : !!settling
+                        ? 'The previous batch is still settling.'
+                        : fire_stake < 0.35
+                          ? 'Stake must be at least 0.35.'
+                          : count < 1 || count > MAX_BATCH_COUNT
+                            ? `Trade count must be between 1 and ${MAX_BATCH_COUNT}.`
+                            : max_exposure_num < 0.35
+                              ? 'Maximum batch exposure must be at least 0.35.'
+                              : exposure > max_exposure_num + 1e-9
+                                ? `Batch exposure ${currency} ${exposure.toFixed(2)} exceeds your limit of ${currency} ${max_exposure_num.toFixed(2)}.`
+                                : '';
+
+        if (blockedReason) {
+            setReceipts([{ ok: false, msg: `NOT SENT — ${blockedReason}` }]);
+            try { run_panel?.setIsRunning?.(false); } catch { /* noop */ }
+            return;
+        }
+
         unlockAudio();
-        try { run_panel?.setIsRunning?.(true); } catch { /* noop */ }
+        try {
+            run_panel.run_id = `bulk-${Date.now()}`;
+            run_panel?.setIsRunning?.(true);
+            run_panel?.toggleDrawer?.(true);
+        } catch {
+            /* run panel unavailable */
+        }
+
         setIsBusy(true);
         setResult(null);
         setReceipts([]);
-        const out = [];
-        const ids = [];
-        for (let i = 0; i < count; i++) {
-            try {
-                const proposal_req = {
-                    proposal: 1,
-                    amount: fire_stake,
-                    basis: 'stake',
-                    contract_type: side.contract_type,
-                    currency,
-                    duration,
-                    duration_unit: 't',
-                    underlying_symbol: symbol,
-                    ...(side.barrier !== undefined ? { barrier: String(side.barrier) } : {}),
-                };
-                // eslint-disable-next-line no-await-in-loop
-                const prop = await api_base.api.send(proposal_req);
-                const proposal_id = prop?.proposal?.id;
-                const ask_price = Number(prop?.proposal?.ask_price ?? fire_stake);
-                if (!proposal_id) throw new Error('No proposal returned');
-                // eslint-disable-next-line no-await-in-loop
-                const res = await api_base.api.send({ buy: proposal_id, price: ask_price });
-                const cid = res?.buy?.contract_id;
-                if (cid) ids.push(cid);
-                out.push({ ok: true, msg: `#${i + 1} bought — ${currency} ${Number(res?.buy?.buy_price ?? fire_stake).toFixed(2)}` });
-            } catch (e) {
-                out.push({ ok: false, msg: `#${i + 1} failed — ${describeError(e)}` });
+
+        const baseProposal = {
+            proposal: 1,
+            amount: fire_stake,
+            basis: 'stake',
+            contract_type: side.contract_type,
+            currency,
+            duration,
+            duration_unit: 't',
+            underlying_symbol: symbol,
+            ...(side.barrier !== undefined ? { barrier: String(side.barrier) } : {}),
+        };
+
+        try {
+            // Stage 1: pre-price every contract concurrently. This avoids the old
+            // proposal -> buy -> 300ms wait loop and gets the full batch ready
+            // before any buy is sent.
+            const proposalResults = await Promise.allSettled(
+                Array.from({ length: count }, () => api_base.api.send(baseProposal))
+            );
+
+            const prepared = proposalResults
+                .map((result, index) => {
+                    if (result.status !== 'fulfilled') {
+                        return { index, error: describeError(result.reason) };
+                    }
+                    const proposal = result.value?.proposal;
+                    if (!proposal?.id) return { index, error: 'No proposal returned' };
+                    return {
+                        index,
+                        proposal_id: proposal.id,
+                        ask_price: Number(proposal.ask_price ?? fire_stake),
+                    };
+                });
+
+            const proposalFailures = prepared.filter(x => x.error);
+            const ready = prepared.filter(x => !x.error);
+
+            if (proposalFailures.length) {
+                setReceipts(
+                    proposalFailures.map(x => ({
+                        ok: false,
+                        msg: `#${x.index + 1} proposal failed — ${x.error}`,
+                    }))
+                );
             }
-            setReceipts([...out]);
-            // eslint-disable-next-line no-await-in-loop
-            await new Promise(r => setTimeout(r, 300));
+
+            if (!ready.length) return;
+
+            // Stage 2: dispatch all buys together. Network/server scheduling means
+            // "same tick" can never be guaranteed, but this is the tightest batch
+            // launch we can make without serial delays.
+            const launchedAt = performance.now();
+            const buyResults = await Promise.allSettled(
+                ready.map(item => api_base.api.send({ buy: item.proposal_id, price: item.ask_price }))
+            );
+            const launchMs = performance.now() - launchedAt;
+
+            const ids = [];
+            const out = [...proposalFailures.map(x => ({
+                ok: false,
+                msg: `#${x.index + 1} proposal failed — ${x.error}`,
+            }))];
+
+            buyResults.forEach((result, idx) => {
+                const item = ready[idx];
+                if (result.status === 'fulfilled') {
+                    const res = result.value;
+                    const cid = res?.buy?.contract_id;
+                    if (cid) ids.push(cid);
+                    out.push({
+                        ok: Boolean(cid),
+                        msg: cid
+                            ? `#${item.index + 1} bought — ${currency} ${Number(res?.buy?.buy_price ?? fire_stake).toFixed(2)}`
+                            : `#${item.index + 1} failed — no contract id returned`,
+                    });
+                } else {
+                    out.push({
+                        ok: false,
+                        msg: `#${item.index + 1} buy failed — ${describeError(result.reason)}`,
+                    });
+                }
+            });
+
+            out.sort((a, b) => {
+                const ai = Number((a.msg.match(/#(\d+)/) || [])[1] || 0);
+                const bi = Number((b.msg.match(/#(\d+)/) || [])[1] || 0);
+                return ai - bi;
+            });
+            out.unshift({
+                ok: true,
+                msg: `Parallel batch dispatched: ${ready.length} buys in ${launchMs.toFixed(0)} ms request window · exposure ${currency} ${exposure.toFixed(2)}`,
+            });
+            setReceipts(out);
+
+            if (ids.length) trackBatch(ids, side.label, symbol);
+            else {
+                try { run_panel?.setIsRunning?.(false); } catch { /* noop */ }
+            }
+        } catch (e) {
+            setReceipts([{ ok: false, msg: `Batch failed — ${describeError(e)}` }]);
+            try { run_panel?.setIsRunning?.(false); } catch { /* noop */ }
+        } finally {
+            setIsBusy(false);
         }
-        setIsBusy(false);
-        if (ids.length) trackBatch(ids, side.label, symbol);
     };
 
     return (
@@ -309,6 +452,11 @@ const BulkTrader = observer(() => {
 
                 {!is_logged_in && (
                     <div className='bulk-trader__warn'>Sign in with your Deriv account to place trades.</div>
+                )}
+                {is_logged_in && (
+                    <div className='bulk-trader__connection'>
+                        Trading API: <b>{api_base?.api ? (api_base?.is_authorized ? 'READY' : 'CONNECTED') : 'CONNECTING'}</b>
+                    </div>
                 )}
 
                 <div className='bulk-trader__label'>Market</div>
@@ -419,7 +567,7 @@ const BulkTrader = observer(() => {
                     ))}
                 </div>
 
-                <div className='bulk-trader__row'>
+                <div className='bulk-trader__row bulk-trader__row--trade-config'>
                     <div className='bulk-trader__field'>
                         <span>Ticks</span>
                         <input
@@ -439,11 +587,33 @@ const BulkTrader = observer(() => {
                         <input
                             type='number'
                             min={1}
-                            max={20}
+                            max={MAX_BATCH_COUNT}
                             value={count}
-                            onChange={e => setCount(clamp(parseInt(e.target.value || 1, 10), 1, 20))}
+                            onChange={e => setCount(clamp(parseInt(e.target.value || 1, 10), 1, MAX_BATCH_COUNT))}
                         />
                     </div>
+                    <div className='bulk-trader__field'>
+                        <span>Max batch exposure ({currency})</span>
+                        <input
+                            type='number'
+                            min='0.35'
+                            step='0.5'
+                            value={max_exposure}
+                            onChange={e => setMaxExposure(e.target.value)}
+                        />
+                    </div>
+                </div>
+
+                <div className={`bulk-trader__risk-preview ${exposure_ok ? 'ok' : 'blocked'}`}>
+                    <div><span>Effective stake</span><strong>{currency} {effective_stake_num.toFixed(2)}</strong></div>
+                    <div><span>Contracts</span><strong>{count}</strong></div>
+                    <div><span>Total exposure</span><strong>{currency} {batch_exposure.toFixed(2)}</strong></div>
+                    <div><span>Exposure limit</span><strong>{currency} {max_exposure_num.toFixed(2)}</strong></div>
+                    <p>
+                        {exposure_ok
+                            ? 'READY — proposals will be prepared first, then the buys will be dispatched as one parallel batch.'
+                            : 'BLOCKED — reduce stake/trade count or increase the batch exposure limit before buying.'}
+                    </p>
                 </div>
 
                 <label className='bulk-trader__toggle'>
@@ -466,8 +636,7 @@ const BulkTrader = observer(() => {
                             </div>
                         )}
                         <div className='bulk-trader__mart-warn'>
-                            After a losing batch the next batch's stake is multiplied to recover. Capped at 7 steps, then
-                            resets. Losing streaks grow stake fast — keep the multiplier low and test on demo.
+                            After a losing batch the next batch's stake is multiplied to recover. Capped at {MAX_MART_STEPS} steps and by your maximum batch exposure, then resets. Losing streaks grow stake fast — keep the multiplier low and test on demo.
                         </div>
                     </>
                 )}
@@ -479,7 +648,7 @@ const BulkTrader = observer(() => {
                             <button
                                 key={side.key}
                                 className={`bulk-trader__side bulk-trader__side--${side.accent}`}
-                                disabled={!is_logged_in || is_busy || !!settling || stake_num < 0.35}
+                                disabled={!is_logged_in || is_busy || !!settling || !exposure_ok}
                                 onClick={() => fire(side)}
                             >
                                 <span className='bulk-trader__side-name'>{side.label}</span>
@@ -488,7 +657,7 @@ const BulkTrader = observer(() => {
                                 </span>
                                 <span className='bulk-trader__side-pct'>{p !== null ? `${p.toFixed(2)}%` : '…'}</span>
                                 <span className='bulk-trader__side-action'>
-                                    ⚡ Buy {count} × {stake_num.toFixed(2)}
+                                    ⚡ Parallel buy {count} × {effective_stake_num.toFixed(2)}
                                 </span>
                             </button>
                         );

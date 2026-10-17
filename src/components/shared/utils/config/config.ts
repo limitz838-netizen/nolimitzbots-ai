@@ -103,9 +103,17 @@ export const generateOAuthURL = async (prompt?: string): Promise<string> => {
         const clientId = process.env.NEXT_PUBLIC_DERIV_APP_ID;
         if (!clientId) return '';
 
+        // OAuth redirect URIs must exactly match a URI registered in the Deriv
+        // developer dashboard. Never use a random Vercel preview hostname as the
+        // redirect URI. Production can continue to use the live origin, while
+        // preview/staging builds should set NEXT_PUBLIC_DERIV_REDIRECT_URI to a
+        // stable HTTPS domain such as https://staging.app.nolimitzbots.com.
+        const configuredRedirectUri = process.env.NEXT_PUBLIC_DERIV_REDIRECT_URI?.trim();
+        const redirectUri = configuredRedirectUri || window.location.origin;
+
         const config: AuthConfig = {
             clientId,
-            redirectUri: window.location.origin,
+            redirectUri,
             scopes: 'trade',
         };
 

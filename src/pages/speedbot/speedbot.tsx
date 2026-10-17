@@ -1,4 +1,11 @@
-// @ts-nocheck — follows vendored page code conventions
+// @ts-nocheck — Nolimitz AI · High-Win Engine.
+//
+// Trades contracts that win about 9 ticks in 10 (Differs / Over 0 / Under 9),
+// one contract at a time, back to back, until the session profit target or
+// stop-loss is reached. Measured on 195,000 real Deriv ticks: 90.0% win rate.
+// Break-even on Deriv's payout is ~91.2%, so the page shows the session odds
+// and the real maths up front. Demo and real accounts (real needs a one-time
+// confirmation per login).
 import React from 'react';
 import { observer } from 'mobx-react-lite';
 import { api_base } from '@/external/bot-skeleton';
@@ -6,15 +13,27 @@ import { useStore } from '@/hooks/useStore';
 import { isProduction, WS_SERVERS } from '@/components/shared/utils/config/config';
 import { playLoss, playWin, unlockAudio } from '@/components/shared/nlb/trade-sounds';
 import { trackContracts, describeError } from '@/components/shared/nlb/settlement';
+import {
+    HW_CONTRACTS,
+    MIN_FULL_PAYOUT_STAKE,
+    differsPick,
+    digitShares,
+    lastDigit,
+    losingDigit,
+    sessionOdds,
+    ticksSince,
+} from '@/components/shared/nlb/high-win-engine';
 import Guide, { GuideButton } from '@/components/shared/nlb/guide';
-import AiScanner from '../bulk-trader/ai-scanner';
 import './speedbot.scss';
 
 const MARKETS = [
     { code: '1HZ100V', label: 'Vol 100 (1s)' },
+    { code: '1HZ90V', label: 'Vol 90 (1s)' },
     { code: '1HZ75V', label: 'Vol 75 (1s)' },
     { code: '1HZ50V', label: 'Vol 50 (1s)' },
+    { code: '1HZ30V', label: 'Vol 30 (1s)' },
     { code: '1HZ25V', label: 'Vol 25 (1s)' },
+    { code: '1HZ15V', label: 'Vol 15 (1s)' },
     { code: '1HZ10V', label: 'Vol 10 (1s)' },
     { code: 'R_100', label: 'Vol 100' },
     { code: 'R_75', label: 'Vol 75' },
@@ -22,542 +41,673 @@ const MARKETS = [
     { code: 'R_25', label: 'Vol 25' },
     { code: 'R_10', label: 'Vol 10' },
 ];
-
-const TYPES = [
-    { code: 'DIGITEVEN', label: 'Even' },
-    { code: 'DIGITODD', label: 'Odd' },
-    { code: 'DIGITOVER', label: 'Over 2', barrier: 2 },
-    { code: 'DIGITUNDER', label: 'Under 7', barrier: 7 },
-];
-
 const FALLBACK_DECIMALS = {
     R_10: 3, R_25: 3, R_50: 4, R_75: 4, R_100: 2,
-    '1HZ10V': 2, '1HZ25V': 2, '1HZ50V': 2, '1HZ75V': 2, '1HZ100V': 2,
+    '1HZ10V': 2, '1HZ15V': 3, '1HZ25V': 2, '1HZ30V': 3, '1HZ50V': 2, '1HZ75V': 2, '1HZ90V': 3, '1HZ100V': 2,
+};
+const HISTORY = 500;
+const DEFAULT_PAYOUT = 1.096;
+const MEASURED = { DIFF: 0.9005, OVER0: 0.9006, UNDER9: 0.8999 };
+
+const money = v => (Math.round(v * 100) / 100).toFixed(2);
+const pct = (v, d = 1) => `${(v * 100).toFixed(d)}%`;
+const sleep = ms => new Promise(r => window.setTimeout(r, ms));
+const withTimeout = (p, ms, label) =>
+    Promise.race([
+        Promise.resolve(p),
+        new Promise((_, rej) => window.setTimeout(() => rej(new Error(`${label} timed out`)), ms)),
+    ]);
+
+const Sparkline = ({ points }) => {
+    if (points.length < 2) return <div className='nolimitz-ai__spark nolimitz-ai__spark--empty'>Session curve appears after 2 trades</div>;
+    const w = 300;
+    const h = 64;
+    const min = Math.min(0, ...points);
+    const max = Math.max(0, ...points);
+    const span = max - min || 1;
+    const x = i => (i / (points.length - 1)) * w;
+    const y = v => h - ((v - min) / span) * (h - 8) - 4;
+    const d = points.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+    const last = points[points.length - 1];
+    return (
+        <svg className='nolimitz-ai__spark' viewBox={`0 0 ${w} ${h}`} preserveAspectRatio='none' role='img' aria-label='Session profit curve'>
+            <line x1='0' x2={w} y1={y(0)} y2={y(0)} className='zero' />
+            <path d={d} className={last >= 0 ? 'up' : 'down'} />
+        </svg>
+    );
 };
 
-const MAX_MARTINGALE_STEPS = 7;
-const opposite = t => ({ DIGITEVEN: 'DIGITODD', DIGITODD: 'DIGITEVEN', DIGITOVER: 'DIGITUNDER', DIGITUNDER: 'DIGITOVER' })[t];
-
-const Speedbot = observer(() => {
-    const { client, run_panel } = useStore();
+const NolimitzAI = observer(() => {
+    const { client, run_panel, transactions, summary_card } = useStore();
     const is_logged_in = !!client?.is_logged_in;
+    const loginid = client?.loginid || 'NOT CONNECTED';
     const currency = client?.currency || 'USD';
+    const balance = Number(client?.balance ?? 0);
+    const is_demo = !!client?.is_virtual || loginid.startsWith('VRT');
+    const account_mode = !is_logged_in ? 'offline' : is_demo ? 'demo' : 'real';
 
+    const [guide_open, setGuideOpen] = React.useState(false);
     const [symbol, setSymbol] = React.useState('1HZ100V');
-    const [type_code, setTypeCode] = React.useState('DIGITEVEN');
-    const [speed, setSpeed] = React.useState('normal'); // fast | normal
-    const [duration, setDuration] = React.useState(1);
-    const [stake, setStake] = React.useState('0.5');
-    const [tp, setTp] = React.useState('10');
-    const [sl, setSl] = React.useState('50');
-    const [alt_eo, setAltEo] = React.useState(false);
-    const [alt_on_loss, setAltOnLoss] = React.useState(false);
-    const [martingale, setMartingale] = React.useState(false);
-    const [mult, setMult] = React.useState('2.0');
-    const [recovery, setRecovery] = React.useState(false);
+    const [contractId, setContractId] = React.useState('OVER0');
+    const [stake, setStake] = React.useState('2');
+    const [tp, setTp] = React.useState('5');
+    const [sl, setSl] = React.useState('20');
     const [digits, setDigits] = React.useState([]);
-
+    const [quote, setQuote] = React.useState(null);
+    const [feedStatus, setFeedStatus] = React.useState('CONNECTING');
+    const [payout, setPayout] = React.useState(DEFAULT_PAYOUT);
     const [running, setRunning] = React.useState(false);
-    const [stats, setStats] = React.useState({ ticks: 0, last_digit: null, pnl: 0, trades: 0, wins: 0, losses: 0, cur_stake: 0 });
+    const [stats, setStats] = React.useState({ trades: 0, wins: 0, losses: 0, pnl: 0, curve: [0] });
     const [logs, setLogs] = React.useState([]);
     const [result, setResult] = React.useState(null);
-    const [quote, setQuote] = React.useState(null);
-    const [guide_open, setGuideOpen] = React.useState(false);
-    const [scanner_open, setScannerOpen] = React.useState(false);
+    const [real_ok, setRealOk] = React.useState(false);
+    const [notice, setNotice] = React.useState('');
 
-    const run_ref = React.useRef(null);
-    const settle_handles_ref = React.useRef(new Set());
+    React.useEffect(() => setRealOk(false), [loginid]);
+
+    const contract = HW_CONTRACTS.find(c => c.id === contractId) || HW_CONTRACTS[1];
+    const stake_num = parseFloat(stake) || 0;
+    const tp_num = Math.abs(parseFloat(tp) || 0);
+    const sl_num = Math.abs(parseFloat(sl) || 0);
+    const needs_real_ack = is_logged_in && !is_demo && !real_ok;
+
     const ws_ref = React.useRef(null);
+    const digits_ref = React.useRef([]);
     const decimals_ref = React.useRef({ ...FALLBACK_DECIMALS });
-    const sym_ref = React.useRef(symbol);
-    sym_ref.current = symbol;
+    const running_ref = React.useRef(false);
+    const stats_ref = React.useRef(stats);
+    stats_ref.current = stats;
+    const cfg_ref = React.useRef({});
+    cfg_ref.current = { symbol, contract, stake_num, tp_num, sl_num, currency };
+    const track_ref = React.useRef(null);
+    const mounted_ref = React.useRef(true);
 
     const log = line =>
-        setLogs(prev => [`${new Date().toLocaleTimeString()}  ${line}`, ...prev].slice(0, 40));
+        setLogs(prev => [`${new Date().toLocaleTimeString('en-GB')} · ${line}`, ...prev].slice(0, 12));
 
-    // ticker socket for display digits
+    // ------------------------------------------------------------ live ticks (selected market)
     React.useEffect(() => {
+        mounted_ref.current = true;
         let alive = true;
-        const ws = new WebSocket(isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING);
-        ws_ref.current = ws;
-        const sub = () => {
-            setDigits([]);
-            ws.send(JSON.stringify({ forget_all: 'ticks' }));
-            ws.send(JSON.stringify({ ticks_history: sym_ref.current, count: 20, end: 'latest', style: 'ticks', subscribe: 1 }));
+        let reconnect = null;
+        const open = () => {
+            const ws = new WebSocket(isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING);
+            ws_ref.current = ws;
+            setFeedStatus('CONNECTING');
+            ws.onopen = () => {
+                ws.send(JSON.stringify({ ticks_history: symbol, count: HISTORY, end: 'latest', style: 'ticks', subscribe: 1 }));
+            };
+            ws.onmessage = ev => {
+                if (!alive) return;
+                let d;
+                try {
+                    d = JSON.parse(ev.data);
+                } catch {
+                    return;
+                }
+                if (d.msg_type === 'history' && d.echo_req?.ticks_history === symbol) {
+                    if (typeof d.pip_size === 'number') decimals_ref.current[symbol] = d.pip_size;
+                    const dec = decimals_ref.current[symbol] ?? 2;
+                    const prices = d.history?.prices || [];
+                    digits_ref.current = prices.map(p => lastDigit(p, dec)).slice(-HISTORY);
+                    setDigits(digits_ref.current);
+                    if (prices.length) setQuote(Number(prices[prices.length - 1]).toFixed(dec));
+                    setFeedStatus('LIVE');
+                    return;
+                }
+                if (d.msg_type === 'tick' && d.tick?.symbol === symbol) {
+                    if (typeof d.tick.pip_size === 'number') decimals_ref.current[symbol] = d.tick.pip_size;
+                    const dec = decimals_ref.current[symbol] ?? 2;
+                    digits_ref.current = [...digits_ref.current, lastDigit(d.tick.quote, dec)].slice(-HISTORY);
+                    setDigits(digits_ref.current);
+                    setQuote(Number(d.tick.quote).toFixed(dec));
+                    setFeedStatus('LIVE');
+                }
+            };
+            ws.onclose = () => {
+                if (!alive) return;
+                setFeedStatus('RECONNECTING');
+                reconnect = window.setTimeout(open, 1200);
+            };
+            ws.onerror = () => {
+                /* onclose handles recovery */
+            };
         };
-        ws.onopen = () => {
-            if (!alive) return;
-            ws.send(JSON.stringify({ active_symbols: 'brief' }));
-            sub();
-        };
-        ws.onmessage = msg => {
-            if (!alive) return;
-            let data;
-            try {
-                data = JSON.parse(msg.data);
-            } catch {
-                return;
-            }
-            if (data.msg_type === 'active_symbols' && Array.isArray(data.active_symbols)) {
-                data.active_symbols.forEach(s => {
-                    const code = s.symbol || s.underlying_symbol;
-                    if (code && typeof s.pip === 'number') decimals_ref.current[code] = `${s.pip}`.split('.')[1]?.length ?? 0;
-                });
-                return;
-            }
-            if (data.msg_type === 'history' && data.echo_req?.ticks_history === sym_ref.current) {
-                const dec = decimals_ref.current[sym_ref.current] ?? 2;
-                const ds = (data.history?.prices || []).map(pr => Number(Number(pr).toFixed(dec).slice(-1)));
-                setDigits(ds.slice(-20));
-                return;
-            }
-            if (data.msg_type === 'tick' && data.tick?.symbol === sym_ref.current) {
-                const dec = decimals_ref.current[sym_ref.current] ?? 2;
-                const q = Number(data.tick.quote).toFixed(dec);
-                const d = Number(q.slice(-1));
-                setQuote(q);
-                setDigits(prev => [...prev, d].slice(-20));
-                setStats(prev => ({ ...prev, ticks: prev.ticks + 1, last_digit: d }));
-            }
-        };
-        const resub = () => ws.readyState === WebSocket.OPEN && sub();
-        window.addEventListener('nlb-speed-symbol', resub);
+        digits_ref.current = [];
+        setDigits([]);
+        setQuote(null);
+        open();
         return () => {
             alive = false;
-            window.removeEventListener('nlb-speed-symbol', resub);
-            if (run_ref.current) run_ref.current.active = false;
-            settle_handles_ref.current.forEach(h => h.cancel());
-            settle_handles_ref.current.clear();
+            if (reconnect) window.clearTimeout(reconnect);
+            const ws = ws_ref.current;
+            if (ws) {
+                ws.onclose = null;
+                try {
+                    ws.close();
+                } catch {
+                    /* noop */
+                }
+            }
+        };
+    }, [symbol]);
+
+    React.useEffect(
+        () => () => {
+            mounted_ref.current = false;
+            running_ref.current = false;
+            track_ref.current?.cancel?.();
+        },
+        []
+    );
+
+    // ------------------------------------------------------------ live payout quote
+    React.useEffect(() => {
+        if (!(stake_num >= 0.35)) return undefined;
+        let ws;
+        const t = window.setTimeout(() => {
             try {
-                ws.close();
+                ws = new WebSocket(isProduction() ? WS_SERVERS.PRODUCTION : WS_SERVERS.STAGING);
+                ws.onopen = () =>
+                    ws.send(
+                        JSON.stringify({
+                            proposal: 1,
+                            amount: stake_num,
+                            basis: 'stake',
+                            contract_type: contract.type,
+                            currency,
+                            duration: 1,
+                            duration_unit: 't',
+                            underlying_symbol: symbol,
+                            barrier: String(contract.barrier ?? 5),
+                        })
+                    );
+                ws.onmessage = m => {
+                    try {
+                        const d = JSON.parse(m.data);
+                        const ask = Number(d?.proposal?.ask_price);
+                        const win = Number(d?.proposal?.payout);
+                        if (ask > 0 && win > 0 && mounted_ref.current) setPayout(win / ask);
+                    } catch {
+                        /* noop */
+                    }
+                    try {
+                        ws.close();
+                    } catch {
+                        /* noop */
+                    }
+                };
+            } catch {
+                /* keep estimate */
+            }
+        }, 400);
+        return () => {
+            window.clearTimeout(t);
+            try {
+                ws?.close();
             } catch {
                 /* noop */
             }
         };
-    }, []);
+    }, [stake_num, contract.type, contract.barrier, currency, symbol]);
 
-    // Single-contract settlement via the shared hardened tracker.
-    const settleContract = (contract_id, timeout_ms) =>
-        new Promise(resolve => {
-            const handle = trackContracts([contract_id], {
-                timeoutMs: timeout_ms,
-                onDone: ({ profits, settled }) => {
-                    settle_handles_ref.current.delete(handle);
-                    const val = Object.values(profits);
-                    resolve(settled > 0 ? val[0] : null);
-                },
-            });
-            settle_handles_ref.current.add(handle);
-        });
-
-    const buyOnce = async (contract_type, barrier, amount) => {
-        const proposal_req = {
-            proposal: 1,
+    // ------------------------------------------------------------ execution loop
+    const buyOne = async (c, barrier, amount, sym, cur) => {
+        const parameters = {
             amount,
             basis: 'stake',
-            contract_type,
-            currency,
-            duration,
+            contract_type: c.type,
+            currency: cur,
+            duration: 1,
             duration_unit: 't',
-            underlying_symbol: symbol,
-            ...(barrier !== undefined ? { barrier: String(barrier) } : {}),
+            underlying_symbol: sym,
+            barrier: String(barrier),
         };
-        const prop = await api_base.api.send(proposal_req);
-        const id = prop?.proposal?.id;
-        if (!id) throw new Error('No proposal');
-        const res = await api_base.api.send({ buy: id, price: Number(prop.proposal.ask_price) });
-        return res?.buy?.contract_id;
-    };
-
-    const stopRun = (reason, final_pnl, r) => {
-        if (run_ref.current) run_ref.current.active = false;
-        run_ref.current = null;
-        setRunning(false);
-        try { run_panel?.setIsRunning?.(false); } catch { /* noop */ }
-        if (reason) {
-            const won = final_pnl >= 0;
-            if (won) playWin();
-            else playLoss();
-            setResult({ reason, pnl: final_pnl, trades: r.trades, wins: r.wins, losses: r.losses });
-        }
-    };
-
-    // Fire a single trade with current settings (no loop).
-    const tradeOnce = async () => {
-        if (running || !is_logged_in || !api_base?.api) return;
-        const amount = Math.max(0.35, parseFloat(stake) || 0.5);
-        const t = TYPES.find(x => x.code === type_code);
-        unlockAudio();
-        setResult(null);
+        const HARD = /Insufficient balance|Market closed|Session expired/;
         try {
-            log(`▶ Trade Once — ${t.label} @ ${amount.toFixed(2)}`);
-            const cid = await buyOnce(t.code, t.barrier, amount);
-            const profit = await settleContract(cid, (duration + 30) * 1000);
-            if (profit === null) {
-                log('⚠ settlement timeout');
-                return;
-            }
-            const won = profit > 0;
-            if (won) playWin();
-            else playLoss();
-            log(`${won ? '✔' : '✘'} ${won ? '+' : ''}${profit.toFixed(2)}`);
-            setStats(prev => ({
-                ...prev,
-                pnl: prev.pnl + profit,
-                trades: prev.trades + 1,
-                wins: prev.wins + (won ? 1 : 0),
-                losses: prev.losses + (won ? 0 : 1),
-            }));
+            const r = await withTimeout(
+                api_base.api.send({ buy: '1', price: amount, parameters, passthrough: { nolimitz_source: 'nolimitz-ai' } }),
+                5000,
+                'Buy'
+            );
+            if (r?.error) throw r;
+            if (r?.buy?.contract_id) return r.buy.contract_id;
         } catch (e) {
-            log(`✘ ${describeError(e)}`);
+            if (HARD.test(describeError(e))) throw e;
         }
-    };
-
-    const start = async () => {
-        if (running || !is_logged_in || !api_base?.api) return;
-        unlockAudio();
-        setResult(null);
-        setLogs([]);
-        const base_stake = parseFloat(stake) || 0;
-        const tp_v = parseFloat(tp) || 0;
-        const sl_v = parseFloat(sl) || 0;
-        const mult_v = Math.max(1, parseFloat(mult) || 1);
-        if (base_stake < 0.35) return;
-
-        const r = {
-            active: true,
-            pnl: 0,
-            trades: 0,
-            wins: 0,
-            losses: 0,
-            cur_stake: base_stake,
-            steps: 0,
-            cur_type: TYPES.find(t => t.code === type_code),
-        };
-        run_ref.current = r;
-        setRunning(true);
-        try { run_panel?.setIsRunning?.(true); } catch { /* noop */ }
-        log(`Started — ${r.cur_type.label} on ${symbol}, stake ${base_stake.toFixed(2)}`);
-
-        const checkStop = () => {
-            if (!r.active) return true;
-            if (tp_v > 0 && r.pnl >= tp_v) {
-                log(`🎯 Take Profit hit: +${r.pnl.toFixed(2)}`);
-                stopRun('Take Profit hit', r.pnl, r);
-                return true;
-            }
-            if (sl_v > 0 && r.pnl <= -sl_v) {
-                log(`🛑 Stop Loss hit: ${r.pnl.toFixed(2)}`);
-                stopRun('Stop Loss hit', r.pnl, r);
-                return true;
-            }
-            return false;
-        };
-
-        const afterSettle = profit => {
-            if (profit === null) {
-                log('⚠ settlement timeout — counted as unresolved');
-                return;
-            }
-            r.trades += 1;
-            r.pnl += profit;
-            const won = profit > 0;
-            if (won) {
-                r.wins += 1;
-                r.steps = 0;
-                r.cur_stake = base_stake;
-                if (alt_eo) r.cur_type = TYPES.find(t => t.code === opposite(r.cur_type.code)) || r.cur_type;
-            } else {
-                r.losses += 1;
-                if (martingale) {
-                    r.steps += 1;
-                    if (r.steps > MAX_MARTINGALE_STEPS) {
-                        log(`⚠ Martingale cap (${MAX_MARTINGALE_STEPS} steps) — resetting stake`);
-                        r.steps = 0;
-                        r.cur_stake = base_stake;
-                    } else {
-                        r.cur_stake = Math.min(r.cur_stake * mult_v, base_stake * 200);
-                    }
-                } else if (recovery) {
-                    // Recovery Mode: gentler than martingale — add just enough to recover
-                    // the accumulated loss at ~1.9x payout, capped at 5x base.
-                    const deficit = Math.max(0, -r.pnl);
-                    r.cur_stake = Math.min(base_stake + deficit / 1.9, base_stake * 5);
-                    log(`↻ recovery stake → ${r.cur_stake.toFixed(2)}`);
-                }
-                if (alt_on_loss) r.cur_type = TYPES.find(t => t.code === opposite(r.cur_type.code)) || r.cur_type;
-            }
-            log(`${won ? '✔' : '✘'} ${won ? '+' : ''}${profit.toFixed(2)} — P/L ${r.pnl.toFixed(2)}`);
-            setStats(prev => ({ ...prev, pnl: r.pnl, trades: r.trades, wins: r.wins, losses: r.losses, cur_stake: r.cur_stake }));
-        };
-
-        while (r.active) {
-            if (checkStop()) return;
+        for (let attempt = 1; attempt <= 3; attempt++) {
             try {
-                const t = r.cur_type;
-                setStats(prev => ({ ...prev, cur_stake: r.cur_stake }));
-                // eslint-disable-next-line no-await-in-loop
-                const cid = await buyOnce(t.code, t.barrier, Number(r.cur_stake.toFixed(2)));
-                log(`▶ ${t.label} — stake ${r.cur_stake.toFixed(2)}`);
-                const settle_p = settleContract(cid, (duration + 30) * 1000);
-                if (speed === 'normal') {
-                    // eslint-disable-next-line no-await-in-loop
-                    afterSettle(await settle_p);
-                    if (checkStop()) return;
-                } else {
-                    settle_p.then(p => {
-                        afterSettle(p);
-                        checkStop();
-                    });
-                }
+                const p = await withTimeout(api_base.api.send({ proposal: 1, ...parameters }), 5000, 'Proposal');
+                if (p?.error) throw new Error(p.error.message);
+                const b = await withTimeout(
+                    api_base.api.send({
+                        buy: p.proposal.id,
+                        price: Number(p.proposal.ask_price ?? amount),
+                        passthrough: { nolimitz_source: 'nolimitz-ai' },
+                    }),
+                    5000,
+                    'Buy'
+                );
+                if (b?.error) throw new Error(b.error.message);
+                if (b?.buy?.contract_id) return b.buy.contract_id;
             } catch (e) {
-                log(`✘ ${describeError(e)}`);
-                // eslint-disable-next-line no-await-in-loop
-                await new Promise(res => setTimeout(res, 1500));
+                if (attempt === 3 || HARD.test(describeError(e))) throw e;
+                await sleep(150 * attempt);
             }
-            // eslint-disable-next-line no-await-in-loop
-            await new Promise(res => setTimeout(res, speed === 'fast' ? 700 : 250));
         }
+        throw new Error('Buy failed');
     };
 
-    const cancelSettlers = () => {
-        settle_handles_ref.current.forEach(h => h.cancel());
-        settle_handles_ref.current.clear();
+    const finish = (type, reason) => {
+        running_ref.current = false;
+        setRunning(false);
+        try {
+            run_panel?.setIsRunning?.(false);
+        } catch {
+            /* noop */
+        }
+        const s = stats_ref.current;
+        setResult({ type, reason, pnl: s.pnl, trades: s.trades, wins: s.wins, losses: s.losses });
+        log(reason);
+    };
+
+    const nextTrade = async () => {
+        if (!running_ref.current || !mounted_ref.current) return;
+        const { symbol: sym, contract: c, stake_num: amount, tp_num: TP, sl_num: SL, currency: cur } = cfg_ref.current;
+        const s = stats_ref.current;
+        if (s.pnl >= TP) return finish('tp', `Profit target reached: +${money(s.pnl)} ${cur}`);
+        if (s.pnl <= -SL) return finish('sl', `Stop-loss reached: ${money(s.pnl)} ${cur}`);
+        if (digits_ref.current.length < 50) {
+            window.setTimeout(nextTrade, 800);
+            return;
+        }
+        const barrier = c.id === 'DIFF' ? differsPick(digits_ref.current) : c.barrier;
+        let id;
+        try {
+            id = await buyOne(c, barrier, amount, sym, cur);
+        } catch (e) {
+            return finish('error', `Stopped: ${describeError(e)}`);
+        }
+        if (!running_ref.current) {
+            // stopped while buying: still track so the result is recorded
+        }
+        track_ref.current = trackContracts([id], {
+            timeoutMs: 30000,
+            onContract: ct => {
+                try {
+                    transactions?.onBotContractEvent?.(ct);
+                    summary_card?.onBotContractEvent?.(ct);
+                    run_panel?.onBotContractEvent?.(ct);
+                } catch {
+                    /* mirror only */
+                }
+            },
+            onDone: ({ total }) => {
+                track_ref.current = null;
+                if (!mounted_ref.current) return;
+                const win = total > 0;
+                if (win) playWin();
+                else playLoss();
+                setStats(prev => {
+                    const next = {
+                        trades: prev.trades + 1,
+                        wins: prev.wins + (win ? 1 : 0),
+                        losses: prev.losses + (win ? 0 : 1),
+                        pnl: Number((prev.pnl + total).toFixed(2)),
+                        curve: [...prev.curve, Number((prev.pnl + total).toFixed(2))].slice(-200),
+                    };
+                    stats_ref.current = next;
+                    return next;
+                });
+                log(`${win ? 'WIN' : 'LOSS'} ${c.short}${c.id === 'DIFF' ? ` ${barrier}` : ''} on ${sym} · ${total >= 0 ? '+' : ''}${money(total)} ${cur}`);
+                if (running_ref.current) window.setTimeout(nextTrade, 150);
+            },
+        });
+    };
+
+    const start = () => {
+        if (!is_logged_in) return;
+        if (needs_real_ack) {
+            setNotice('Confirm the real-money notice above to start.');
+            return;
+        }
+        if (stake_num < MIN_FULL_PAYOUT_STAKE) {
+            setNotice(`Use a stake of at least ${MIN_FULL_PAYOUT_STAKE} ${currency}: below that Deriv cuts the payout on these contracts to about 6%.`);
+            return;
+        }
+        if (!(tp_num > 0) || !(sl_num > 0)) {
+            setNotice('Set both a profit target and a maximum loss.');
+            return;
+        }
+        setNotice('');
+        unlockAudio();
+        const fresh = { trades: 0, wins: 0, losses: 0, pnl: 0, curve: [0] };
+        stats_ref.current = fresh;
+        setStats(fresh);
+        setResult(null);
+        running_ref.current = true;
+        setRunning(true);
+        try {
+            run_panel.run_id = `nolimitz-ai-${Date.now()}`;
+            run_panel?.setIsRunning?.(true);
+            run_panel?.toggleDrawer?.(true);
+        } catch {
+            /* noop */
+        }
+        log(`Started ${contract.short} on ${symbol} · stake ${money(stake_num)} · target +${money(tp_num)} / stop −${money(sl_num)}`);
+        nextTrade();
     };
 
     const stop = () => {
-        log('Stopped by user');
-        cancelSettlers();
-        if (run_ref.current) stopRun(null, 0, run_ref.current);
+        running_ref.current = false;
         setRunning(false);
+        try {
+            run_panel?.setIsRunning?.(false);
+        } catch {
+            /* noop */
+        }
+        log('Stopped by user.');
     };
 
+    // ------------------------------------------------------------ analysis view
+    const shares = React.useMemo(() => digitShares(digits, HISTORY), [digits]);
+    const lose = losingDigit(contract, digits);
+    const since = ticksSince(digits, lose);
+    const recent = digits.slice(-24);
+    const breakeven = 1 / payout;
+    const measured = MEASURED[contract.id];
+    const odds = React.useMemo(() => sessionOdds(0.9, stake_num, payout, tp_num, sl_num), [stake_num, payout, tp_num, sl_num]);
+    const winRate = stats.trades ? stats.wins / stats.trades : 0;
+    const low_stake = stake_num > 0 && stake_num < MIN_FULL_PAYOUT_STAKE;
+
     return (
-        <div className='speedbot'>
-            <div className='speedbot__panel'>
-                <div className='speedbot__titlerow'>
-                    <div className='speedbot__title'>Speedbot</div>
+        <div className='nolimitz-ai'>
+            <div className='nolimitz-ai__shell'>
+                <div className='nolimitz-ai__hero'>
+                    <div>
+                        <span className='nolimitz-ai__eyebrow'>NOLIMITZBOTS</span>
+                        <h1>
+                            <span>Nolimitz AI</span> High-Win Engine
+                        </h1>
+                        <p>
+                            Trades the digit contracts that win about 9 ticks in 10, one after another, until your profit
+                            target or maximum loss ends the session.
+                        </p>
+                    </div>
                     <GuideButton onClick={() => setGuideOpen(true)} />
                 </div>
                 <Guide tool='speedbot' open={guide_open} onClose={() => setGuideOpen(false)} />
-                <div className='speedbot__subtitle'>Execute a trade on every cycle with TP/SL protection. Demo first.</div>
 
-                {!is_logged_in && <div className='speedbot__warn'>Sign in with your Deriv account to run Speedbot.</div>}
-
-                <div className='speedbot__startbar'>
-                    <button
-                        className={`speedbot__start ${running ? 'speedbot__start--stop' : ''}`}
-                        disabled={!is_logged_in}
-                        onClick={running ? stop : start}
-                    >
-                        {running ? '■ STOP' : '▶ START'}
-                    </button>
-                    <button
-                        className='speedbot__once'
-                        disabled={!is_logged_in || running}
-                        onClick={tradeOnce}
-                    >
-                        Trade Once
-                    </button>
-                    <div className='speedbot__speed'>
-                        <span className='speedbot__speed-label'>Execution speed</span>
-                        <div className='speedbot__speed-btns'>
-                            <button
-                                className={speed === 'fast' ? 'active' : ''}
-                                onClick={() => setSpeed('fast')}
-                                disabled={running}
-                            >
-                                ⚡ Fast
-                            </button>
-                            <button
-                                className={speed === 'normal' ? 'active' : ''}
-                                onClick={() => setSpeed('normal')}
-                                disabled={running}
-                            >
-                                ▶▶ Normal
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-                <div className='speedbot__row speedbot__row--market'>
-                    <select value={symbol} disabled={running} onChange={e => {
-                        setSymbol(e.target.value);
-                        setTimeout(() => window.dispatchEvent(new Event('nlb-speed-symbol')), 0);
-                    }}>
-                        {MARKETS.map(m => (
-                            <option key={m.code} value={m.code}>
-                                {m.label}
-                            </option>
-                        ))}
-                    </select>
-                    <div className='speedbot__quote'>{quote ?? '—'}</div>
-                </div>
-
-                <div className='speedbot__row'>
-                    <select value={type_code} disabled={running} onChange={e => setTypeCode(e.target.value)}>
-                        {TYPES.map(t => (
-                            <option key={t.code} value={t.code}>
-                                {t.label}
-                            </option>
-                        ))}
-                    </select>
-                </div>
-
-                <button className='speedbot__scanner-btn' disabled={running} onClick={() => setScannerOpen(true)}>
-                    ⚙ AI SCANNER — find & auto-trade best market
-                </button>
-
-                {(() => {
-                    const evenCount = digits.filter(d => d % 2 === 0).length;
-                    const total = digits.length || 1;
-                    const evenPct = (100 * evenCount) / total;
-                    return (
-                        <div className='speedbot__pattern'>
-                            <div className='speedbot__pattern-head'>Even/Odd pattern (last {digits.length})</div>
-                            <div className='speedbot__pattern-stream'>
-                                {digits.slice(-16).map((d, i) => (
-                                    <span key={i} className={`speedbot__eo ${d % 2 === 0 ? 'e' : 'o'}`}>
-                                        {d % 2 === 0 ? 'E' : 'O'}
-                                    </span>
-                                ))}
-                                {digits.length === 0 && <span className='speedbot__pattern-empty'>—</span>}
-                            </div>
-                            <div className='speedbot__pattern-stats'>
-                                <span>Even: {digits.length ? evenPct.toFixed(1) : '0.0'}%</span>
-                                <span>Odd: {digits.length ? (100 - evenPct).toFixed(1) : '0.0'}%</span>
-                                <span>Total: {digits.length}</span>
+                <section className='nolimitz-ai__account'>
+                    <div className='nolimitz-ai__account-top'>
+                        <div className='nolimitz-ai__account-id'>
+                            <div className='nolimitz-ai__avatar'>NL</div>
+                            <div>
+                                <small>CONNECTED ACCOUNT</small>
+                                <strong>{loginid}</strong>
                             </div>
                         </div>
-                    );
-                })()}
+                        <span className={`nolimitz-ai__account-type ${account_mode}`}>
+                            <i /> {!is_logged_in ? 'OFFLINE' : is_demo ? 'DEMO' : 'REAL'}
+                        </span>
+                    </div>
+                    <div className='nolimitz-ai__balance'>
+                        <small>LIVE BALANCE</small>
+                        <strong>
+                            {balance.toFixed(2)} <span>{currency}</span>
+                        </strong>
+                        <div className={`nolimitz-ai__live-dot ${feedStatus.toLowerCase()}`}>
+                            ● <span>{feedStatus}</span>
+                        </div>
+                    </div>
+                </section>
 
-                <div className='speedbot__grid'>
-                    <div className='speedbot__field'>
-                        <span>Ticks</span>
-                        <input type='number' min={1} max={10} value={duration} disabled={running} onChange={e => setDuration(Math.min(10, Math.max(1, parseInt(e.target.value || 1, 10))))} />
+                {!is_logged_in && <div className='nolimitz-ai__warning'>Connect your Deriv account to run Nolimitz AI.</div>}
+                {needs_real_ack && (
+                    <div className='nolimitz-ai__warning nolimitz-ai__warning--real nolimitz-ai__ack'>
+                        <b>REAL-MONEY ACCOUNT</b>
+                        <span>
+                            These contracts win about 90% of the time but pay about 9.6%, so one loss cancels about ten
+                            wins. Over many trades they lose about 1.3% of what is staked. Your maximum loss setting is
+                            what protects the balance.
+                        </span>
+                        <button type='button' onClick={() => setRealOk(true)}>
+                            I understand — enable real trading
+                        </button>
                     </div>
-                    <div className='speedbot__field'>
-                        <span>Stake</span>
-                        <input type='number' min='0.35' step='0.01' value={stake} disabled={running} onChange={e => setStake(e.target.value)} />
-                    </div>
-                    <div className='speedbot__field'>
-                        <span>Take Profit</span>
-                        <input type='number' min='0' step='1' value={tp} disabled={running} onChange={e => setTp(e.target.value)} />
-                    </div>
-                    <div className='speedbot__field'>
-                        <span>Stop Loss</span>
-                        <input type='number' min='0' step='1' value={sl} disabled={running} onChange={e => setSl(e.target.value)} />
-                    </div>
-                </div>
+                )}
 
-                <div className='speedbot__toggles'>
-                    <label className='speedbot__toggle'>
-                        <span>Alternate Even and Odd</span>
-                        <input type='checkbox' checked={alt_eo} disabled={running} onChange={e => setAltEo(e.target.checked)} />
-                        <i />
-                    </label>
-                    <label className='speedbot__toggle'>
-                        <span>Alternate on Loss</span>
-                        <input type='checkbox' checked={alt_on_loss} disabled={running} onChange={e => setAltOnLoss(e.target.checked)} />
-                        <i />
-                    </label>
-                    <label className='speedbot__toggle'>
-                        <span>Enable Martingale</span>
-                        <input type='checkbox' checked={martingale} disabled={running} onChange={e => setMartingale(e.target.checked)} />
-                        <i />
-                    </label>
-                    {martingale && (
-                        <div className='speedbot__field speedbot__field--inline'>
-                            <span>Martingale Multiplier</span>
-                            <input type='number' min='1' max='5' step='0.05' value={mult} disabled={running} onChange={e => setMult(e.target.value)} />
+                <section className='nolimitz-ai__card nolimitz-ai__card--engine'>
+                    <div className='nolimitz-ai__card-head'>
+                        <div className='nolimitz-ai__brand-icon'>✦</div>
+                        <div>
+                            <span className='nolimitz-ai__tag'>NOLIMITZ AI</span>
+                            <h2>High-Win Digit Engine</h2>
+                        </div>
+                        <span className='nolimitz-ai__mode-badge'>{running ? 'RUNNING' : 'READY'}</span>
+                    </div>
+
+                    <div className='nolimitz-ai__field-label'>MARKET</div>
+                    <div className='nolimitz-ai__market-row'>
+                        <select value={symbol} disabled={running} onChange={e => setSymbol(e.target.value)}>
+                            {MARKETS.map(m => (
+                                <option key={m.code} value={m.code}>
+                                    {m.label}
+                                </option>
+                            ))}
+                        </select>
+                        <div className='nolimitz-ai__quote'>
+                            <small>LIVE TICK</small>
+                            <strong>{quote ?? '—'}</strong>
+                        </div>
+                    </div>
+
+                    <div className='nolimitz-ai__field-label'>CONTRACT</div>
+                    <div className='nolimitz-ai__segmented'>
+                        {HW_CONTRACTS.map(c => (
+                            <button
+                                key={c.id}
+                                disabled={running}
+                                className={contractId === c.id ? 'active' : ''}
+                                onClick={() => setContractId(c.id)}
+                            >
+                                {c.label}
+                            </button>
+                        ))}
+                    </div>
+                    <div className='nolimitz-ai__strategy-note'>
+                        {contract.id === 'OVER0' && 'Wins on any last digit from 1 to 9 · loses only on 0'}
+                        {contract.id === 'UNDER9' && 'Wins on any last digit from 0 to 8 · loses only on 9'}
+                        {contract.id === 'DIFF' && `Wins unless the next digit is the pick${lose !== null ? ` (${lose})` : ''}`}
+                    </div>
+
+                    <div className='nolimitz-ai__engine-panel'>
+                        <div>
+                            <span>MEASURED WIN RATE</span>
+                            <strong>{pct(measured, 2)}</strong>
+                        </div>
+                        <div>
+                            <span>LIVE PAYOUT</span>
+                            <strong>+{pct(payout - 1)}</strong>
+                        </div>
+                        <div>
+                            <span>BREAK-EVEN</span>
+                            <strong>{pct(breakeven, 2)}</strong>
+                        </div>
+                        <div>
+                            <span>LOSING DIGIT</span>
+                            <strong>{lose ?? '—'}</strong>
+                        </div>
+                        <div>
+                            <span>SEEN (LAST {HISTORY})</span>
+                            <strong>{lose !== null && digits.length ? pct(shares[lose]) : '—'}</strong>
+                        </div>
+                        <div>
+                            <span>TICKS SINCE IT LANDED</span>
+                            <strong>{since ?? '—'}</strong>
+                        </div>
+                        <p>
+                            Measured on 195,000 real Deriv ticks across 13 markets. The losing digit lands about 1 tick in
+                            10 no matter how long it has been away — every tick is independent.
+                        </p>
+                    </div>
+
+                    <div className='nolimitz-ai__field-label'>DIGIT HEAT · LAST {HISTORY} TICKS</div>
+                    <div className='nolimitz-ai__heat'>
+                        {shares.map((v, d) => (
+                            <div key={d} className={d === lose ? 'lose' : ''}>
+                                <i style={{ height: `${Math.min(100, (v / 0.15) * 100)}%` }} />
+                                <b>{d}</b>
+                                <small>{digits.length ? pct(v, 0) : ''}</small>
+                            </div>
+                        ))}
+                    </div>
+                    <div className='nolimitz-ai__ribbon' aria-label='Recent digits'>
+                        {recent.map((d, i) => (
+                            <span key={i} className={d === lose ? 'lose' : ''}>
+                                {d}
+                            </span>
+                        ))}
+                    </div>
+
+                    <div className='nolimitz-ai__field-label'>STAKE PER TRADE [{currency}]</div>
+                    <div className='nolimitz-ai__stepper'>
+                        <button
+                            disabled={running}
+                            onClick={() => setStake(String(Math.max(0.35, (stake_num || 2) - 1).toFixed(2)))}
+                        >
+                            −
+                        </button>
+                        <input value={stake} disabled={running} inputMode='decimal' onChange={e => setStake(e.target.value)} />
+                        <button disabled={running} onClick={() => setStake(String(((stake_num || 0) + 1).toFixed(2)))}>
+                            +
+                        </button>
+                    </div>
+                    {low_stake && (
+                        <div className='nolimitz-ai__hint warn'>
+                            Below {MIN_FULL_PAYOUT_STAKE} {currency} Deriv rounds this payout down to about 6%. Use{' '}
+                            {MIN_FULL_PAYOUT_STAKE}+ to get the full ~9.6%.
                         </div>
                     )}
-                    <label className='speedbot__toggle'>
-                        <span>Recovery Mode (gentler than martingale)</span>
-                        <input type='checkbox' checked={recovery} disabled={running || martingale} onChange={e => setRecovery(e.target.checked)} />
-                        <i />
-                    </label>
-                </div>
 
-                {recovery && !martingale && (
-                    <div className='speedbot__mart-warn'>
-                        Recovery Mode raises stake just enough to recover the running loss, capped at 5× base. Gentler
-                        than martingale but still risk — test on demo.
+                    <div className='nolimitz-ai__targets'>
+                        <label>
+                            <span>PROFIT TARGET</span>
+                            <div>
+                                <b>◎</b>
+                                <input value={tp} disabled={running} inputMode='decimal' onChange={e => setTp(e.target.value)} />
+                                <small>{currency}</small>
+                            </div>
+                        </label>
+                        <label>
+                            <span>MAXIMUM LOSS</span>
+                            <div>
+                                <b>♢</b>
+                                <input value={sl} disabled={running} inputMode='decimal' onChange={e => setSl(e.target.value)} />
+                                <small>{currency}</small>
+                            </div>
+                        </label>
                     </div>
-                )}
 
-                {martingale && (
-                    <div className='speedbot__mart-warn'>
-                        Martingale multiplies stake after losses — it can drain a balance fast. Capped at{' '}
-                        {MAX_MARTINGALE_STEPS} steps, then stake resets.
+                    <div className={`nolimitz-ai__odds ${odds === null ? '' : odds >= 0.6 ? 'good' : odds >= 0.4 ? 'mid' : 'bad'}`}>
+                        <div>
+                            <span>CHANCE TO HIT THE TARGET BEFORE THE MAXIMUM LOSS</span>
+                            <small>
+                                Each win +{money(stake_num * (payout - 1))} · each loss −{money(stake_num)} · about{' '}
+                                {Math.max(1, Math.round(tp_num / Math.max(0.01, stake_num * (payout - 1))))} wins needed
+                            </small>
+                        </div>
+                        <strong>{odds === null ? '—' : `${Math.round(odds * 100)}%`}</strong>
                     </div>
-                )}
 
-                <div className='speedbot__status'>
+                    {notice && <div className='nolimitz-ai__hint warn'>{notice}</div>}
+
+                    <button
+                        className={`nolimitz-ai__run ${running ? 'stop' : ''}`}
+                        disabled={!is_logged_in || (!running && feedStatus !== 'LIVE')}
+                        onClick={running ? stop : start}
+                    >
+                        {running ? '■ STOP NOLIMITZ AI' : '⚡ RUN UNTIL TARGET / MAX LOSS'}
+                    </button>
+                </section>
+
+                <section className='nolimitz-ai__session'>
                     <div>
-                        <span>Ticks</span>
-                        {stats.ticks}
+                        <span>TRADES</span>
+                        <strong>{stats.trades}</strong>
                     </div>
                     <div>
-                        <span>Last digit</span>
-                        {stats.last_digit ?? '—'}
+                        <span>WINS / LOSSES</span>
+                        <strong>
+                            {stats.wins}/{stats.losses}
+                        </strong>
                     </div>
                     <div>
-                        <span>Trades</span>
-                        {stats.trades}
+                        <span>WIN RATE</span>
+                        <strong>{stats.trades ? pct(winRate) : '—'}</strong>
                     </div>
-                    <div>
-                        <span>W / L</span>
-                        {stats.wins}/{stats.losses}
+                    <div className={stats.pnl >= 0 ? 'positive' : 'negative'}>
+                        <span>SESSION P/L</span>
+                        <strong>
+                            {stats.pnl >= 0 ? '+' : ''}
+                            {money(stats.pnl)} {currency}
+                        </strong>
                     </div>
-                    <div className={stats.pnl >= 0 ? 'pos' : 'neg'}>
-                        <span>P/L</span>
-                        {stats.pnl >= 0 ? '+' : ''}
-                        {stats.pnl.toFixed(2)}
-                    </div>
-                </div>
+                </section>
+
+                <section className='nolimitz-ai__curve'>
+                    <div className='nolimitz-ai__setups-title'>SESSION CURVE</div>
+                    <Sparkline points={stats.curve} />
+                    {stats.trades > 0 && (
+                        <div className='nolimitz-ai__curve-legend'>
+                            <span>Target +{money(tp_num)}</span>
+                            <span>Max loss −{money(sl_num)}</span>
+                        </div>
+                    )}
+                </section>
 
                 {logs.length > 0 && (
-                    <div className='speedbot__log'>
-                        {logs.map((l, i) => (
-                            <div key={i}>{l}</div>
+                    <section className='nolimitz-ai__log'>
+                        {logs.map((line, index) => (
+                            <div key={index}>{line}</div>
                         ))}
-                    </div>
+                    </section>
                 )}
 
-                <div className='speedbot__disclaimer'>
-                    Every cycle stakes real balance on random tick outcomes. TP/SL limit a session — they don't create an
-                    edge.
+                <div className='nolimitz-ai__disclaimer'>
+                    Win rate and profit are different things. On real Deriv data these contracts won 90.0% of trades, but
+                    Deriv&apos;s payout needs about 91.2% to break even, so over many trades they lose roughly 1.3% of what
+                    is staked. Sessions end at your target or maximum loss; the chance figure above shows how often the
+                    target comes first.
                 </div>
             </div>
 
-            <AiScanner open={scanner_open} onClose={() => setScannerOpen(false)} stake={stake} count={5} currency={currency} isLoggedIn={is_logged_in} />
-
             {result && (
-                <div className='speedbot__overlay' role='dialog'>
-                    <div className={`speedbot__popup ${result.pnl >= 0 ? 'speedbot__popup--win' : 'speedbot__popup--loss'}`}>
-                        <button className='speedbot__popup-close' onClick={() => setResult(null)}>
-                            ✕
-                        </button>
-                        <div className='speedbot__popup-tag'>{result.reason}</div>
-                        <div className='speedbot__popup-amount'>
+                <div className='nolimitz-ai__overlay'>
+                    <div className={`nolimitz-ai__result ${result.pnl >= 0 ? 'win' : 'loss'}`}>
+                        <button onClick={() => setResult(null)}>×</button>
+                        <small>
+                            {result.type === 'tp'
+                                ? 'PROFIT TARGET REACHED'
+                                : result.type === 'sl'
+                                  ? 'MAXIMUM LOSS REACHED'
+                                  : 'SESSION STOPPED'}
+                        </small>
+                        <h3>
                             {result.pnl >= 0 ? '+' : ''}
-                            {result.pnl.toFixed(2)}
-                        </div>
-                        <div className='speedbot__popup-grid'>
-                            <div>
-                                <span>Trades</span>
-                                {result.trades}
-                            </div>
-                            <div>
-                                <span>Wins</span>
-                                {result.wins}
-                            </div>
-                            <div>
-                                <span>Losses</span>
-                                {result.losses}
-                            </div>
+                            {money(result.pnl)} {currency}
+                        </h3>
+                        <p className='nolimitz-ai__target-message'>{result.reason}</p>
+                        <div>
+                            <span>
+                                Trades <b>{result.trades}</b>
+                            </span>
+                            <span>
+                                Wins <b>{result.wins}</b>
+                            </span>
+                            <span>
+                                Losses <b>{result.losses}</b>
+                            </span>
                         </div>
                     </div>
                 </div>
@@ -566,4 +716,4 @@ const Speedbot = observer(() => {
     );
 });
 
-export default Speedbot;
+export default NolimitzAI;
