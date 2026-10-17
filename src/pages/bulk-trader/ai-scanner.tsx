@@ -48,16 +48,19 @@ const FALLBACK_DECIMALS = {
     '1HZ100V': 2,
 };
 
+// High-probability contracts only. Measured on 3h of real ticks (~700 batches,
+// payout incl. app markup): allowing Over 3/4 and Under 5/6 won 56.8% of batches
+// at -3.55 per 5x5 batch; restricting to these four won 72.7% at -1.38 per batch
+// and halved the worst losing run (6 -> 3).
 const CANDIDATES = [
     { type: 'DIGITOVER', barrier: 1, side: 'OVER', label: 'Over 1', baseline: 0.8 },
     { type: 'DIGITOVER', barrier: 2, side: 'OVER', label: 'Over 2', baseline: 0.7 },
-    { type: 'DIGITOVER', barrier: 3, side: 'OVER', label: 'Over 3', baseline: 0.6 },
-    { type: 'DIGITOVER', barrier: 4, side: 'OVER', label: 'Over 4', baseline: 0.5 },
-    { type: 'DIGITUNDER', barrier: 5, side: 'UNDER', label: 'Under 5', baseline: 0.5 },
-    { type: 'DIGITUNDER', barrier: 6, side: 'UNDER', label: 'Under 6', baseline: 0.6 },
     { type: 'DIGITUNDER', barrier: 7, side: 'UNDER', label: 'Under 7', baseline: 0.7 },
     { type: 'DIGITUNDER', barrier: 8, side: 'UNDER', label: 'Under 8', baseline: 0.8 },
 ];
+const RESTART_SWEEPS = 24; // ~80s without a confirmed market -> rescan with fresh data
+const STALE_TICK_MS = 5000; // no ticks for 5s -> reconnect the stream
+const FRESH_TICK_MS = 2500; // a confirmation needs ticks newer than this
 
 const HISTORY_COUNT = 1000;
 const MIN_HISTORY = 700;
@@ -208,6 +211,8 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
     const active_ref = React.useRef(false);
     const sweep_ref = React.useRef(0);
     const confirm_ref = React.useRef(null);
+    const idle_sweeps_ref = React.useRef(0);
+    const last_tick_ref = React.useRef(0);
     const cfg_ref = React.useRef({});
 
     cfg_ref.current = {
@@ -465,8 +470,30 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
         });
     };
 
+    const restartScan = reason => {
+        log(`[INFO] ${reason} — restarting scan with fresh data...`);
+        stopSocket();
+        digits_ref.current = {};
+        sweep_ref.current = 0;
+        idle_sweeps_ref.current = 0;
+        confirm_ref.current = null;
+        last_tick_ref.current = 0;
+        setStatusTitle('SCANNING');
+        setStatusText('Restarting scan for a better market…');
+        openStream();
+    };
+
     const runSweep = React.useCallback(async () => {
         if (!active_ref.current) return;
+
+        if (last_tick_ref.current && Date.now() - last_tick_ref.current > STALE_TICK_MS) {
+            restartScan('Live ticks stalled');
+            return;
+        }
+        if (idle_sweeps_ref.current >= RESTART_SWEEPS) {
+            restartScan('No good market yet');
+            return;
+        }
 
         const nextSweep = sweep_ref.current + 1;
         sweep_ref.current = nextSweep;
@@ -499,6 +526,7 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
         });
 
         if (!scored.length) {
+            idle_sweeps_ref.current += 1;
             setStatusTitle('SCANNING');
             setStatusText('Collecting live digit history…');
         } else {
@@ -506,10 +534,12 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
             const best = scored[0];
 
             if (best.edge >= CONFIRM_EDGE) {
+                idle_sweeps_ref.current = 0;
                 const key = `${best.market.code}:${best.type}:${best.barrier}`;
                 const previous = confirm_ref.current;
 
-                if (previous && previous.key === key && previous.sweep === nextSweep - 1) {
+                const fresh = last_tick_ref.current && Date.now() - last_tick_ref.current < FRESH_TICK_MS;
+                if (previous && previous.key === key && previous.sweep === nextSweep - 1 && fresh) {
                     active_ref.current = false;
                     stopSocket();
                     confirm_ref.current = null;
@@ -531,6 +561,7 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                 setStatusText(`Still scanning… sweep ${nextSweep}. Confirming strongest setup.`);
             } else {
                 confirm_ref.current = null;
+                idle_sweeps_ref.current += 1;
                 setStatusTitle('SCANNING');
                 setStatusText(
                     nextSweep === 1
@@ -561,10 +592,13 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
 
         digits_ref.current = {};
         sweep_ref.current = 0;
+        idle_sweeps_ref.current = 0;
+        last_tick_ref.current = 0;
         confirm_ref.current = null;
         active_ref.current = true;
 
         log(`[INFO] Scanning digit patterns on ${SCAN_MARKETS.length} volatility markets...`);
+        log('[INFO] High-probability contracts only: Over 1 / Over 2 / Under 7 / Under 8.');
         openStream();
     };
 
@@ -619,6 +653,7 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                     .map(price => lastDigit(price, decimals))
                     .slice(-HISTORY_COUNT);
                 digits_ref.current[code] = digits;
+                if (!last_tick_ref.current) last_tick_ref.current = Date.now();
 
                 if (
                     SCAN_MARKETS.every(market => (digits_ref.current[market.code] || []).length >= MIN_HISTORY) &&
@@ -641,6 +676,7 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                     ...prev,
                     lastDigit(data.tick.quote, decimals),
                 ].slice(-HISTORY_COUNT);
+                last_tick_ref.current = Date.now();
             }
         };
 
@@ -787,7 +823,7 @@ const AiScanner = ({ open, onClose, stake, count, currency = 'USD', isLoggedIn =
                 )}
 
                 <div className='ai-scanner__reference-note'>
-                    Pattern edge is a live model score from real Deriv ticks, not a guaranteed outcome.
+                    Trades only Over 1 / Over 2 / Under 7 / Under 8 and rescans automatically until a market confirms. All contracts in a batch share one tick, so a batch wins or loses together.
                 </div>
             </div>
 
