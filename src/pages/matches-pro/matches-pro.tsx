@@ -2,8 +2,13 @@
 //
 // Flow: tap SCAN -> 13 volatility markets stream live -> every sweep each market's
 // strongest digit is scored (matches-scan-engine) -> the leader must clear the bar
-// and hold it on the next sweep after fresh ticks -> all contracts are bought in
-// parallel on that market+digit (one shared tick) -> settlement -> result sheet.
+// and hold it on the next sweep after fresh ticks -> one MATCH contract is bought
+// on each of the market's top-K digits ("cover"), all in parallel on one tick ->
+// settlement -> result sheet.
+//
+// Cover mode, measured on 130k real ticks (495 entries): covering 1/2/3/4/5 digits
+// hit 8.7/21/30/39/50% of entries and cut the longest losing streak from 62 to
+// 23/17/11/11. Average loss stays ~10% of risk either way (Deriv's margin).
 //
 // Demo accounts only. Real accounts can scan but cannot trade from this page.
 import React from 'react';
@@ -17,6 +22,7 @@ import { playLoss, playWin, unlockAudio } from '@/components/shared/nlb/trade-so
 import {
     bestMatch,
     lastDigit,
+    topDigits,
     CONFIRM_TICKS,
     EDGE_BAR,
     HISTORY,
@@ -47,7 +53,7 @@ const FALLBACK_DECIMALS = {
 };
 
 const SWEEP_MS = 2500;
-const MAX_CONTRACTS = 10;
+const MAX_COVER = 5;
 const DEFAULT_PAYOUT = 8.93; // payout per 1 staked; replaced by a live quote
 const SETTINGS_KEY = 'nlb_matches_pro_v3';
 const STEPS = ['Scan', 'Confirm', 'Fire', 'Result'];
@@ -57,10 +63,12 @@ const loadSettings = () => {
         const s = JSON.parse(window.localStorage.getItem(SETTINGS_KEY) || '{}');
         return {
             stake: Number(s.stake) >= 0.35 ? Number(s.stake) : 1,
-            count: Math.min(MAX_CONTRACTS, Math.max(1, parseInt(s.count, 10) || 3)),
+            cover: Math.min(MAX_COVER, Math.max(1, parseInt(s.cover, 10) || 3)),
+            stop_loss: Number(s.stop_loss) > 0 ? Number(s.stop_loss) : 20,
+            take_profit: Number(s.take_profit) > 0 ? Number(s.take_profit) : 10,
         };
     } catch {
-        return { stake: 1, count: 3 };
+        return { stake: 1, cover: 3, stop_loss: 20, take_profit: 10 };
     }
 };
 const saveSettings = s => {
@@ -119,6 +127,8 @@ const MatchesPro = () => {
     const mounted_ref = React.useRef(true);
     const cfg_ref = React.useRef({});
     cfg_ref.current = { settings, currency, can_trade, payout };
+    const session_ref = React.useRef(session);
+    session_ref.current = session;
 
     const say = line => setFeed(prev => [{ t: Date.now() + Math.random(), line }, ...prev].slice(0, 8));
 
@@ -225,21 +235,23 @@ const MatchesPro = () => {
     }, [settings.stake, currency]);
 
     // ------------------------------------------------------------ execution
-    const fire = async (code, digit, edge) => {
+    const fire = async (code, digits, edge) => {
         const { settings: s, currency: cur, can_trade: allowed } = cfg_ref.current;
-        const n = Math.min(MAX_CONTRACTS, Math.max(1, parseInt(s.count, 10) || 1));
+        const n = digits.length;
+        const digit = digits[0];
         const amount = Math.max(0.35, Number(s.stake) || 0.35);
+        const list = digits.join(', ');
 
         if (!allowed) {
             setPhase('done');
             setNotice('Entry found. Sign in with a Deriv demo account to open contracts.');
-            say(`Entry found on ${code}: digit ${digit}. Not traded (demo account required).`);
+            say(`Entry found on ${code}: digits ${list}. Not traded (demo account required).`);
             return;
         }
 
         setPhase('firing');
-        setBatch({ code, digit, opened: 0, settled: 0, requested: n });
-        say(`Opening ${n} × MATCH ${digit} on ${code}…`);
+        setBatch({ code, digit, digits, opened: 0, settled: 0, requested: n });
+        say(`Opening MATCH on ${code} for digit${n > 1 ? 's' : ''} ${list}…`);
         unlockAudio();
         try {
             run_panel.run_id = `matches-pro-${Date.now()}`;
@@ -249,7 +261,7 @@ const MatchesPro = () => {
             /* run panel is a mirror only */
         }
 
-        const parameters = {
+        const paramsFor = d => ({
             amount,
             basis: 'stake',
             contract_type: 'DIGITMATCH',
@@ -257,10 +269,11 @@ const MatchesPro = () => {
             duration: 1,
             duration_unit: 't',
             underlying_symbol: code,
-            barrier: String(digit),
-        };
+            barrier: String(d),
+        });
         const HARD = /Insufficient balance|Market closed|Session expired/;
         const openOne = async slot => {
+            const parameters = paramsFor(digits[slot - 1]);
             try {
                 const r = await withTimeout(
                     api_base.api.send({
@@ -322,7 +335,7 @@ const MatchesPro = () => {
             return;
         }
 
-        say(`${ids.length}/${n} contracts opened together in ${ms}ms.`);
+        say(`${ids.length}/${n} contract${n > 1 ? 's' : ''} opened together in ${ms}ms.`);
         setBatch(b => ({ ...b, opened: ids.length }));
         setPhase('settling');
 
@@ -360,8 +373,12 @@ const MatchesPro = () => {
                     hits: prev.hits + (hit ? 1 : 0),
                     pnl: Number((prev.pnl + total).toFixed(2)),
                 }));
-                setResult({ code, digit, edge, total, wins, count, exitDigit, currency: cur });
-                say(hit ? `HIT on ${code}: digit ${digit}. +${money(total)} ${cur}` : `Missed on ${code}. ${money(total)} ${cur}`);
+                setResult({ code, digit, digits, edge, total, wins, count, exitDigit, currency: cur });
+                say(
+                    hit
+                        ? `HIT on ${code}: digit ${exitDigit ?? '?'} landed in ${list}. +${money(total)} ${cur}`
+                        : `Missed on ${code} (landed ${exitDigit ?? '?'}). ${money(total)} ${cur}`
+                );
                 setPhase('done');
             },
         });
@@ -401,8 +418,10 @@ const MatchesPro = () => {
                 stopAll();
                 armed_ref.current = null;
                 setArmed({ ...a, confirmed: true });
+                const cover = topDigits(again.scores, cfg_ref.current.settings.cover);
+                setArmed({ ...a, confirmed: true, digits: cover });
                 say(`Locked: ${a.code} digit ${a.digit} held the bar (${signedPct(again.edge)}).`);
-                fire(a.code, a.digit, again.edge);
+                fire(a.code, cover, again.edge);
                 return;
             }
             say(`${a.code} digit ${a.digit} faded. Back to scanning.`);
@@ -472,7 +491,25 @@ const MatchesPro = () => {
         };
     };
 
+    const limitHit = () => {
+        const lim = cfg_ref.current.settings;
+        const pnl = session_ref.current.pnl;
+        if (pnl <= -Math.abs(Number(lim.stop_loss) || Infinity)) return 'loss';
+        if (pnl >= Math.abs(Number(lim.take_profit) || Infinity)) return 'profit';
+        return null;
+    };
+
     const startScan = () => {
+        const hitLimit = limitHit();
+        if (hitLimit) {
+            setNotice(
+                hitLimit === 'loss'
+                    ? 'Session stop-loss reached. Reset the session to keep scanning.'
+                    : 'Session take-profit reached. Reset the session to keep scanning.'
+            );
+            setPhase('done');
+            return;
+        }
         stopAll();
         track_ref.current?.cancel?.();
         track_ref.current = null;
@@ -504,14 +541,21 @@ const MatchesPro = () => {
 
     // ------------------------------------------------------------ view
     const stake = Number(settings.stake) || 0;
-    const count = settings.count;
-    const win_amount = stake * count * (payout - 1);
-    const breakeven = 1 / payout;
+    const cover = settings.cover;
+    const win_amount = stake * (payout - cover);
+    const breakeven = cover / payout;
+    const limit_state =
+        session.pnl <= -Math.abs(Number(settings.stop_loss) || Infinity)
+            ? 'loss'
+            : session.pnl >= Math.abs(Number(settings.take_profit) || Infinity)
+              ? 'profit'
+              : null;
     const busy = phase === 'firing' || phase === 'settling';
     const scanning = phase === 'scanning' || phase === 'confirming';
     const stepIndex = { idle: -1, scanning: 0, confirming: 1, firing: 2, settling: 2, done: 3 }[phase];
     const focus = armed || (leader ? { code: leader.code, digit: leader.digit } : null);
     const focusScores = focus ? rows[focus.code]?.scores : null;
+    const covered = result?.digits || armed?.digits || (focusScores ? topDigits(focusScores, cover) : []);
     const ranked = MARKETS.map(m => ({ ...m, r: rows[m.code] }))
         .filter(m => m.r)
         .sort((a, b) => b.r.edge - a.r.edge);
@@ -526,11 +570,12 @@ const MatchesPro = () => {
         if (phase === 'confirming') return { big: armed?.digit ?? '…', small: `confirming ${armed?.code || ''}` };
         if (phase === 'firing') return { big: batch?.digit ?? '…', small: 'opening contracts' };
         if (phase === 'settling') return { big: batch?.digit ?? '…', small: `settling ${batch?.settled || 0}/${batch?.opened || 0}` };
-        return { big: result ? result.digit : (batch?.digit ?? '—'), small: 'tap to scan again' };
+        if (limit_state) return { big: 'STOP', small: limit_state === 'loss' ? 'stop-loss reached' : 'target reached' };
+        return { big: result ? (result.exitDigit ?? result.digit) : (batch?.digit ?? '—'), small: 'tap to scan again' };
     })();
 
     const onCore = () => {
-        if (busy) return;
+        if (busy || (limit_state && !scanning)) return;
         if (scanning) stopScan();
         else startScan();
     };
@@ -542,8 +587,8 @@ const MatchesPro = () => {
                     <div className='mpro__eyebrow'>MATCHES PRO</div>
                     <h1 className='mpro__title'>Digit Hunter</h1>
                     <p className='mpro__lede'>
-                        One tap scans every volatility market for the strongest digit, confirms it, then opens your
-                        contracts on it together.
+                        One tap scans every volatility market, confirms the strongest setup, then covers its top digits
+                        with Matches contracts on the same tick.
                     </p>
                 </div>
                 <span className={`mpro__acct ${can_trade ? 'ok' : 'bad'}`}>
@@ -584,30 +629,39 @@ const MatchesPro = () => {
                     </div>
                 </div>
                 <div className='mpro__stepper'>
-                    <span className='mpro__label'>Contracts per entry</span>
+                    <span className='mpro__label'>Digits to cover</span>
                     <div className='mpro__stepper-row'>
                         <button
                             type='button'
-                            disabled={scanning || busy || count <= 1}
-                            onClick={() => updateSettings({ count: count - 1 })}
-                            aria-label='Fewer contracts'
+                            disabled={scanning || busy || cover <= 1}
+                            onClick={() => updateSettings({ cover: cover - 1 })}
+                            aria-label='Cover fewer digits'
                         >
                             −
                         </button>
-                        <output>{count}</output>
+                        <output>{cover}</output>
                         <button
                             type='button'
-                            disabled={scanning || busy || count >= MAX_CONTRACTS}
-                            onClick={() => updateSettings({ count: count + 1 })}
-                            aria-label='More contracts'
+                            disabled={scanning || busy || cover >= MAX_COVER}
+                            onClick={() => updateSettings({ cover: cover + 1 })}
+                            aria-label='Cover more digits'
                         >
                             +
                         </button>
                     </div>
                 </div>
+                <div className='mpro__cover-meter' aria-hidden='true'>
+                    {Array.from({ length: 10 }, (_, i) => (
+                        <i key={i} className={i < cover ? 'on' : ''} />
+                    ))}
+                    <span>
+                        Hits about <b>{cover * 10}%</b> of entries · one contract on each of the top {cover} digit
+                        {cover > 1 ? 's' : ''}
+                    </span>
+                </div>
                 <div className='mpro__payline'>
                     <span>
-                        Risk <b>{money(stake * count)} {currency}</b>
+                        Risk <b>{money(stake * cover)} {currency}</b>
                     </span>
                     <span>
                         If it hits <b className='gold'>+{money(win_amount)} {currency}</b>
@@ -615,6 +669,30 @@ const MatchesPro = () => {
                     <span>
                         Break-even <b>{pct(breakeven)}</b> hits
                     </span>
+                </div>
+                <div className='mpro__limits'>
+                    <label>
+                        <span>Stop session at loss</span>
+                        <input
+                            type='number'
+                            inputMode='decimal'
+                            min='1'
+                            value={settings.stop_loss}
+                            disabled={scanning || busy}
+                            onChange={e => updateSettings({ stop_loss: e.target.value })}
+                        />
+                    </label>
+                    <label>
+                        <span>Stop session at profit</span>
+                        <input
+                            type='number'
+                            inputMode='decimal'
+                            min='1'
+                            value={settings.take_profit}
+                            disabled={scanning || busy}
+                            onChange={e => updateSettings({ take_profit: e.target.value })}
+                        />
+                    </label>
                 </div>
             </section>
 
@@ -633,7 +711,7 @@ const MatchesPro = () => {
                         const angle = (d / 10) * Math.PI * 2 - Math.PI / 2;
                         const score = focusScores ? focusScores[d] : null;
                         const heat = score === null ? 0 : Math.max(0, Math.min(1, (score - 0.06) / 0.1));
-                        const isPick = focus && focus.digit === d;
+                        const isPick = covered.includes(d);
                         const isExit = result && result.exitDigit === d;
                         return (
                             <div
@@ -667,7 +745,7 @@ const MatchesPro = () => {
                         <>
                             <span>{armed ? (armed.confirmed ? 'Locked entry' : 'Confirming') : 'Strongest right now'}</span>
                             <b>
-                                {focus.code} · digit {focus.digit}
+                                {focus.code} · {covered.length > 1 ? `digits ${covered.join(' ')}` : `digit ${focus.digit}`}
                             </b>
                             <small>
                                 edge {signedPct(rows[focus.code]?.edge ?? 0)} · bar {signedPct(EDGE_BAR)} · seen{' '}
@@ -725,7 +803,7 @@ const MatchesPro = () => {
                         <span>Hits</span>
                         <b>{session.hits}</b>
                     </div>
-                    <div>
+                    <div className={limit_state ? `limit ${limit_state}` : ''}>
                         <span>Session P/L</span>
                         <b className={session.pnl >= 0 ? 'pos' : 'neg'}>
                             {session.pnl >= 0 ? '+' : ''}
@@ -733,6 +811,22 @@ const MatchesPro = () => {
                         </b>
                     </div>
                 </div>
+                {(session.batches > 0 || limit_state) && (
+                    <button
+                        type='button'
+                        className='mpro__reset'
+                        disabled={scanning || busy}
+                        onClick={() => {
+                            setSession({ batches: 0, hits: 0, pnl: 0 });
+                            setNotice('');
+                            setResult(null);
+                            setPhase('idle');
+                            say('Session reset.');
+                        }}
+                    >
+                        {limit_state ? 'Session stopped · reset to continue' : 'Reset session'}
+                    </button>
+                )}
                 <ul className='mpro__feed'>
                     {feed.length ? (
                         feed.map(f => <li key={f.t}>{f.line}</li>)
@@ -741,9 +835,10 @@ const MatchesPro = () => {
                     )}
                 </ul>
                 <p className='mpro__fine'>
-                    Demo accounts only. A Matches contract wins only if the next digit equals the pick, about 1 in 10.
-                    In tests on 100,000+ real Deriv ticks the scan&apos;s picks hit about 10%, the same as any digit,
-                    and break-even is {pct(breakeven)}. Expect long runs of misses.
+                    Demo accounts only. Each covered digit adds about 10% hit chance, but Deriv&apos;s margin stays: in tests
+                    on 130,000 real ticks every cover setting lost about 10% of what was risked over time. Covering more
+                    digits mainly shortens losing runs (longest run: 62 misses covering 1 digit, 11 covering 5). The stop
+                    limits end the session before a bad run gets large.
                 </p>
             </section>
 
@@ -757,8 +852,8 @@ const MatchesPro = () => {
                         </div>
                         <div className='mpro__sheet-digits'>
                             <div>
-                                <span>Picked</span>
-                                <b>{result.digit}</b>
+                                <span>Covered</span>
+                                <b className={result.digits.length > 2 ? 'sm' : ''}>{result.digits.join(' ')}</b>
                             </div>
                             <div>
                                 <span>Landed</span>
@@ -771,6 +866,13 @@ const MatchesPro = () => {
                         </div>
                         <div className='mpro__sheet-sub'>
                             {result.wins}/{result.count} contracts won
+                            {limit_state && (
+                                <strong className='mpro__sheet-stop'>
+                                    {limit_state === 'loss'
+                                        ? ' · Session stop-loss reached'
+                                        : ' · Session profit target reached'}
+                                </strong>
+                            )}
                         </div>
                         <div className='mpro__sheet-actions'>
                             <button type='button' className='ghost' onClick={() => setResult(null)}>
@@ -778,12 +880,13 @@ const MatchesPro = () => {
                             </button>
                             <button
                                 type='button'
+                                disabled={Boolean(limit_state)}
                                 onClick={() => {
                                     setResult(null);
                                     startScan();
                                 }}
                             >
-                                Scan again
+                                {limit_state ? 'Session stopped' : 'Scan again'}
                             </button>
                         </div>
                     </div>

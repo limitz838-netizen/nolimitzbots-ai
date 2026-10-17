@@ -71,4 +71,13 @@ export const bestMatch = digits => {
     };
 };
 
+// The k strongest digits for a market, strongest first. Used by "cover" mode:
+// one contract per digit, so one entry hits if ANY covered digit lands.
+export const topDigits = (scores, k) =>
+    scores
+        .map((score, digit) => ({ digit, score }))
+        .sort((a, b) => b.score - a.score || a.digit - b.digit)
+        .slice(0, Math.max(1, Math.min(9, k)))
+        .map(x => x.digit);
+
 export const lastDigit = (quote, decimals) => Number(Number(quote).toFixed(decimals).slice(-1));

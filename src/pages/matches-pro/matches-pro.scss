@@ -136,6 +136,80 @@ $neg: #fb7185;
             }
         }
     }
+    &__cover-meter {
+        grid-column: 1 / -1;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.4rem;
+        i {
+            width: calc((100% - 3.6rem) / 10);
+            height: 0.8rem;
+            border-radius: 99rem;
+            background: rgba(255, 255, 255, 0.07);
+            transition: background 0.2s;
+            &.on {
+                background: $gold;
+            }
+        }
+        span {
+            width: 100%;
+            margin-top: 0.4rem;
+            font-size: 1.15rem;
+            color: $muted;
+            b {
+                color: $gold;
+            }
+        }
+    }
+    &__limits {
+        grid-column: 1 / -1;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+        label span {
+            display: block;
+            margin-bottom: 0.4rem;
+            font-size: 1.05rem;
+            color: $muted;
+        }
+        input {
+            width: 100%;
+            height: 3.8rem;
+            padding: 0 1rem;
+            border-radius: 1rem;
+            border: 1px solid $line-soft;
+            background: rgba(0, 0, 0, 0.35);
+            color: $text;
+            font-size: 1.5rem;
+            font-weight: 700;
+            outline: none;
+            &:focus {
+                border-color: $gold;
+            }
+        }
+    }
+    &__reset {
+        width: 100%;
+        margin-top: 0.8rem;
+        height: 4rem;
+        border-radius: 1.2rem;
+        border: 1px dashed $line;
+        background: transparent;
+        color: $gold;
+        font-size: 1.25rem;
+        font-weight: 700;
+        cursor: pointer;
+        &:disabled {
+            opacity: 0.4;
+            cursor: default;
+        }
+    }
+    &__sheet-stop {
+        display: block;
+        margin-top: 0.4rem;
+        color: #fbbf24;
+    }
     &__payline {
         grid-column: 1 / -1;
         display: flex;
@@ -484,6 +558,12 @@ $neg: #fb7185;
             border-radius: 1.2rem;
             background: $card;
             border: 1px solid $line-soft;
+            &.limit.loss {
+                border-color: rgba(251, 113, 133, 0.6);
+            }
+            &.limit.profit {
+                border-color: rgba(52, 211, 153, 0.6);
+            }
         }
         span {
             display: block;
@@ -647,6 +727,10 @@ $neg: #fb7185;
             cursor: pointer;
             color: $bg-1;
             background: linear-gradient(90deg, $gold-deep, $gold);
+            &:disabled {
+                opacity: 0.45;
+                cursor: default;
+            }
             &.ghost {
                 color: $text;
                 background: rgba(255, 255, 255, 0.06);
