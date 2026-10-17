@@ -10,7 +10,8 @@
 // hit 8.7/21/30/39/50% of entries and cut the longest losing streak from 62 to
 // 23/17/11/11. Average loss stays ~10% of risk either way (Deriv's margin).
 //
-// Demo accounts only. Real accounts can scan but cannot trade from this page.
+// Demo and real accounts. Real accounts must confirm a real-money notice once per
+// login before the first entry; session stop-loss / take-profit always apply.
 import React from 'react';
 import { api_base } from '@/external/bot-skeleton';
 import { useApiBase } from '@/hooks/useApiBase';
@@ -119,7 +120,10 @@ const MatchesPro = () => {
     );
     const currency = account?.currency || 'USD';
     const is_demo = isDemoAccount(activeLoginid || '');
-    const can_trade = Boolean(isAuthorized && activeLoginid && is_demo);
+    const [real_ok, setRealOk] = React.useState(false);
+    React.useEffect(() => setRealOk(false), [activeLoginid]);
+    const can_trade = Boolean(isAuthorized && activeLoginid && (is_demo || real_ok));
+    const needs_real_ack = Boolean(isAuthorized && activeLoginid && !is_demo && !real_ok);
 
     const [settings, setSettings] = React.useState(loadSettings);
     const [phase, setPhase] = React.useState('idle'); // idle | scanning | confirming | firing | settling | done
@@ -148,7 +152,7 @@ const MatchesPro = () => {
     const track_ref = React.useRef(null);
     const mounted_ref = React.useRef(true);
     const cfg_ref = React.useRef({});
-    cfg_ref.current = { settings, currency, can_trade, payout };
+    cfg_ref.current = { settings, currency, can_trade, payout, needs_real_ack };
     const session_ref = React.useRef(session);
     session_ref.current = session;
     const auto_ref = React.useRef(auto);
@@ -270,8 +274,8 @@ const MatchesPro = () => {
 
         if (!allowed) {
             setPhase('done');
-            setNotice('Entry found. Sign in with a Deriv demo account to open contracts.');
-            say(`Entry found on ${code}: digits ${list}. Not traded (demo account required).`);
+            setNotice('Entry found. Sign in with Deriv (and confirm the real-money notice on a real account) to open contracts.');
+            say(`Entry found on ${code}: digits ${list}. Not traded (not signed in or not confirmed).`);
             return;
         }
 
@@ -554,6 +558,10 @@ const MatchesPro = () => {
     };
 
     const startScan = () => {
+        if (cfg_ref.current.needs_real_ack) {
+            setNotice('Confirm the real-money notice above to start.');
+            return;
+        }
         const hitLimit = limitHit();
         if (hitLimit) {
             setNotice(
@@ -668,10 +676,23 @@ const MatchesPro = () => {
                         with Matches contracts on the same tick.
                     </p>
                 </div>
-                <span className={`mpro__acct ${can_trade ? 'ok' : 'bad'}`}>
-                    {!activeLoginid ? 'NOT SIGNED IN' : is_demo ? 'DEMO' : 'REAL · SCAN ONLY'}
+                <span className={`mpro__acct ${!activeLoginid ? 'bad' : is_demo ? 'ok' : 'real'}`}>
+                    {!activeLoginid ? 'NOT SIGNED IN' : is_demo ? 'DEMO' : 'REAL MONEY'}
                 </span>
             </header>
+
+            {needs_real_ack && (
+                <section className='mpro__real' role='alert'>
+                    <b>You are on a real-money account</b>
+                    <p>
+                        Matches pays about 8× when a covered digit lands, but Deriv keeps a margin: over time it loses
+                        about 10% of what is staked, whatever the settings. Set your session stop-loss before you start.
+                    </p>
+                    <button type='button' onClick={() => setRealOk(true)}>
+                        I understand — enable real trading
+                    </button>
+                </section>
+            )}
 
             <section className='mpro__setup' aria-label='Trade settings'>
                 <div className='mpro__stepper'>
@@ -944,7 +965,7 @@ const MatchesPro = () => {
                     )}
                 </ul>
                 <p className='mpro__fine'>
-                    Demo accounts only. Each covered digit adds about 10% hit chance, but each hit pays less and Deriv&apos;s
+                    Each covered digit adds about 10% hit chance, but each hit pays less and Deriv&apos;s
                     margin stays: on 130,000 real ticks every cover setting lost about 10% of what was risked over time.
                     Winning more entries is not the same as finishing more sessions in profit. With a +10 / −20 session,
                     covering 3 digits reached the target 48% of the time, 8 digits only 15%. Use the session chance above to

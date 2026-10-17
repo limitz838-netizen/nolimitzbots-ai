@@ -72,10 +72,44 @@ $neg: #fb7185;
             background: rgba(52, 211, 153, 0.1);
             border: 1px solid rgba(52, 211, 153, 0.35);
         }
+        &.real {
+            color: $neg;
+            background: rgba(251, 113, 133, 0.1);
+            border: 1px solid rgba(251, 113, 133, 0.4);
+        }
         &.bad {
             color: #fbbf24;
             background: rgba(251, 191, 36, 0.08);
             border: 1px solid rgba(251, 191, 36, 0.35);
+        }
+    }
+
+    &__real {
+        margin-bottom: 1.4rem;
+        padding: 1.4rem;
+        border-radius: 1.6rem;
+        border: 1px solid rgba(251, 113, 133, 0.45);
+        background: rgba(251, 113, 133, 0.07);
+        b {
+            font-size: 1.5rem;
+            color: $text;
+        }
+        p {
+            margin: 0.6rem 0 1.2rem;
+            font-size: 1.25rem;
+            line-height: 1.5;
+            color: #cbd5e1;
+        }
+        button {
+            width: 100%;
+            height: 4.4rem;
+            border: none;
+            border-radius: 1.2rem;
+            font-size: 1.4rem;
+            font-weight: 800;
+            color: $bg-1;
+            background: linear-gradient(90deg, $gold-deep, $gold);
+            cursor: pointer;
         }
     }
 
